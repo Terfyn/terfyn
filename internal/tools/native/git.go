@@ -84,10 +84,63 @@ func gitCreateBranch(ctx context.Context, with map[string]any) (map[string]any, 
 	if err != nil {
 		return nil, fmt.Errorf("native: create_branch: %w", err)
 	}
-	if _, err := runGit(ctx, root, "switch", "-c", name); err != nil {
-		return nil, err
+	// reset (opt-in, destructive) force-recreates the branch at the start point, discarding any commits
+	// on a prior attempt — usually what a re-run of a fix workflow wants (issue #517).
+	reset, _, err := optionalBoolFromWith(with, "reset")
+	if err != nil {
+		return nil, fmt.Errorf("native: create_branch: %w", err)
 	}
-	return map[string]any{"branch": name, "created": true}, nil
+	// base is the optional start point (a ref/branch/sha) the branch is created or reset from; it is a
+	// ref, so it accepts the same shape as a branch name (e.g. "main", "origin/main").
+	rawBase, _, err := optionalStringFromWith(with, "base")
+	if err != nil {
+		return nil, fmt.Errorf("native: create_branch: %w", err)
+	}
+	var base string
+	if rawBase != "" {
+		if base, err = validateBranchName("base", rawBase); err != nil {
+			return nil, fmt.Errorf("native: create_branch: %w", err)
+		}
+	}
+
+	existed := branchExists(ctx, root, name)
+	switch {
+	case reset:
+		// A reset must name an explicit start point. `switch -C <name>` with no start point resets to
+		// the CURRENT HEAD — which, in the re-run topology this op exists for (the workspace is still on
+		// the fix branch from a prior attempt), is a no-op that leaves the prior commits in place. So
+		// require `base` and fail closed rather than silently claiming a reset that did nothing (#517).
+		if base == "" {
+			return nil, fmt.Errorf("native: create_branch: reset requires base (the ref to reset the branch to, e.g. base \"main\"); resetting to the current HEAD is a no-op when already on the branch")
+		}
+		// `switch -C <name> <base>` creates the branch or resets an existing one to the start point.
+		if _, err := runGit(ctx, root, "switch", "-C", name, base); err != nil {
+			return nil, err
+		}
+		return map[string]any{"branch": name, "created": !existed, "reset": true}, nil
+	case existed:
+		// Idempotent default: the branch already exists, so just switch to it (base is a create-time
+		// start point and does not apply here). "already exists" is success, not a run-ending error.
+		if _, err := runGit(ctx, root, "switch", name); err != nil {
+			return nil, err
+		}
+		return map[string]any{"branch": name, "created": false}, nil
+	default:
+		args := []string{"switch", "-c", name}
+		if base != "" {
+			args = append(args, base)
+		}
+		if _, err := runGit(ctx, root, args...); err != nil {
+			return nil, err
+		}
+		return map[string]any{"branch": name, "created": true}, nil
+	}
+}
+
+// branchExists reports whether a local branch named `name` exists in the workspace.
+func branchExists(ctx context.Context, root, name string) bool {
+	_, err := runGit(ctx, root, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+	return err == nil
 }
 
 func gitPushBranch(ctx context.Context, with map[string]any) (map[string]any, error) {

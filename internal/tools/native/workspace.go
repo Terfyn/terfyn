@@ -592,6 +592,27 @@ func optionalIntFromWith(with map[string]any, key string) (int, bool, error) {
 	}
 }
 
+// optionalBoolFromWith reads an optional boolean arg. Absent/nil returns (false, false, nil). A
+// present value may be a Go bool or the string "true"/"false"; any other value is a bad-input error.
+func optionalBoolFromWith(with map[string]any, key string) (bool, bool, error) {
+	v, ok := with[key]
+	if !ok || v == nil {
+		return false, false, nil
+	}
+	switch x := v.(type) {
+	case bool:
+		return x, true, nil
+	case string:
+		switch strings.TrimSpace(strings.ToLower(x)) {
+		case "true":
+			return true, true, nil
+		case "false":
+			return false, true, nil
+		}
+	}
+	return false, false, fmt.Errorf("field %q must be a boolean, got %T", key, v)
+}
+
 // contentFromWith reads the required string `content` arg. An explicitly empty string is a valid
 // write (truncate to empty); only an absent content field is an error.
 func contentFromWith(with map[string]any) (string, error) {

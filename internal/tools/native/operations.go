@@ -42,7 +42,7 @@ var operationCatalog = map[string][]string{
 	"commit_status.create":       {"owner", "repo", "sha", "state", "context", "description", "target_url"},
 	"message.send":               {"channel", "text", "thread_ts"},
 	"message.update":             {"channel", "ts", "text"},
-	"create_branch":              {"name"},
+	"create_branch":              {"name", "reset", "base"},
 	"push_branch":                {"branch"},
 	"read_file":                  {"path", "offset", "limit"},
 	"write_file":                 {"path", "content"},
