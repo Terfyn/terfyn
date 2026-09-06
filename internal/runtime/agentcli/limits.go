@@ -30,7 +30,7 @@ type Limits struct {
 // execution budget. Either argument may be nil. MaxTurns always resolves (default when unset), so
 // the external run is never unbounded in turns; Timeout and BudgetUSD are set only when declared.
 func MapLimits(c *spec.AgentConstraints, exec *spec.PolicyExecution) Limits {
-	l := Limits{MaxTurns: spec.ResolveMaxIterations(c)}
+	l := Limits{MaxTurns: spec.ResolveMaxIterations(c, spec.PolicyMaxIterations(exec))}
 	if c != nil && c.TimeoutSeconds > 0 {
 		l.Timeout = time.Duration(c.TimeoutSeconds) * time.Second
 	}

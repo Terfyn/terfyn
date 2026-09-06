@@ -201,6 +201,9 @@ func lowerPolicyExecution(e *lang.PolicyExecutionBlock) *spec.PolicyExecution {
 	if e.MaxWallClockSeconds != nil {
 		ex.MaxWallClockSeconds = *e.MaxWallClockSeconds
 	}
+	if e.MaxIterations != nil {
+		ex.MaxIterations = *e.MaxIterations
+	}
 	if e.RequireStructuredOutput != nil {
 		ex.RequireStructuredOutput = *e.RequireStructuredOutput
 	}

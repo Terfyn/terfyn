@@ -133,6 +133,10 @@ func execution(e *spec.PolicyExecution) *lang.PolicyExecutionBlock {
 		v := e.MaxWallClockSeconds
 		b.MaxWallClockSeconds = &v
 	}
+	if e.MaxIterations != 0 {
+		v := e.MaxIterations
+		b.MaxIterations = &v
+	}
 	if e.RequireStructuredOutput {
 		v := true
 		b.RequireStructuredOutput = &v

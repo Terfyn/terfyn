@@ -27,3 +27,40 @@ func TestResolveMaxTokens(t *testing.T) {
 		t.Fatalf("DefaultAgentMaxTokens = %d, want a raised agent default (> 4096)", DefaultAgentMaxTokens)
 	}
 }
+
+func TestResolveMaxIterations_policyCeiling(t *testing.T) {
+	cases := []struct {
+		name       string
+		c          *AgentConstraints
+		policyCeil int
+		want       int
+	}{
+		{"nil + no ceiling -> default", nil, 0, DefaultAgentMaxIterations},
+		{"unset + no ceiling -> default", &AgentConstraints{}, 0, DefaultAgentMaxIterations},
+		{"explicit under default hard cap", &AgentConstraints{MaxIterations: 20}, 0, 20},
+		{"explicit above default hard cap -> clamped to 32", &AgentConstraints{MaxIterations: 99}, 0, HardAgentMaxIterations},
+		{"policy raises the ceiling -> 64 honored", &AgentConstraints{MaxIterations: 64}, 128, 64},
+		{"policy ceiling clamps above it", &AgentConstraints{MaxIterations: 200}, 128, 128},
+		{"policy ceiling below default bounds even the default", &AgentConstraints{}, 4, 4},
+		{"policy ceiling below an explicit value clamps it", &AgentConstraints{MaxIterations: 10}, 6, 6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveMaxIterations(tc.c, tc.policyCeil); got != tc.want {
+				t.Fatalf("ResolveMaxIterations(%+v, %d) = %d, want %d", tc.c, tc.policyCeil, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPolicyMaxIterations(t *testing.T) {
+	if got := PolicyMaxIterations(nil); got != 0 {
+		t.Fatalf("nil exec = %d, want 0", got)
+	}
+	if got := PolicyMaxIterations(&PolicyExecution{}); got != 0 {
+		t.Fatalf("unset = %d, want 0", got)
+	}
+	if got := PolicyMaxIterations(&PolicyExecution{MaxIterations: 64}); got != 64 {
+		t.Fatalf("set = %d, want 64", got)
+	}
+}

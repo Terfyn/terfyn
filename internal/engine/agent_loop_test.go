@@ -204,6 +204,43 @@ func TestRun_agentToolLoop_happyPath(t *testing.T) {
 	assertAuditChain(t, "run-loop", events)
 }
 
+// The governing policy's execution.maxIterations is the ceiling, not the frozen global cap: here the
+// agent asks for 5 turns but the policy caps at 2, so the loop hits the cap at turn 2 (limit_hit) and
+// finalizes — proving the policy ceiling flowed through the evaluator to the loop bound (issue #522).
+func TestRun_agentToolLoop_policyMaxIterationsCeilingClamps(t *testing.T) {
+	graph := agentLoopGraph(t, spec.AgentSpec{
+		Tools:       []string{"helper"},
+		Constraints: &spec.AgentConstraints{MaxIterations: 5},
+	}, spec.PolicySpec{Execution: &spec.PolicyExecution{MaxIterations: 2}})
+	mock := &models.MockClient{
+		Script: []models.MockTurn{
+			{ToolCalls: []models.ToolCall{{ID: "c1", Name: "helper", Arguments: json.RawMessage(`{}`)}}},
+			{ToolCalls: []models.ToolCall{{ID: "c2", Name: "helper", Arguments: json.RawMessage(`{}`)}}}, // turn 2 is the policy cap
+			{Content: `{"summary":"capped by policy"}`},                                                  // forced finalize turn
+		},
+	}
+	got, events, err := runAgentLoop(t, graph, mock, nil)
+	if err != nil {
+		t.Fatalf("expected finalize at the policy cap, got err %v", err)
+	}
+	if got.Status != "succeeded" {
+		t.Fatalf("status %q err=%q", got.Status, got.ErrorText)
+	}
+	// 2 loop turns (capped by the policy's 2, not the agent's 5) + 1 finalize.
+	if mock.CallCount() != 3 {
+		t.Fatalf("generates %d, want 3 (policy cap 2 + finalize); the agent's maxIterations 5 must not win", mock.CallCount())
+	}
+	var sawLimit bool
+	for _, ev := range events {
+		if ev.Type == string(trace.EventLimitHit) && strings.Contains(ev.DataJSON, "max_iterations") {
+			sawLimit = true
+		}
+	}
+	if !sawLimit {
+		t.Fatalf("expected limit_hit max_iterations at the policy cap (2); the ceiling did not clamp, events=%+v", events)
+	}
+}
+
 // At maxIterations the run no longer dies: the engine forces one final tool-free completion so the
 // agent returns its best output, records the limit_hit, and the run succeeds (issue #518).
 func TestRun_agentToolLoop_maxIterationsFinalizes(t *testing.T) {

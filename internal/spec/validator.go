@@ -251,6 +251,9 @@ func validatePolicySpecs(g *ProjectGraph) []error {
 			if ex.MaxTotalCostUsd < 0 {
 				errs = append(errs, pr.Pos.Errorf("Policy/%s: execution.maxTotalCostUsd must be non-negative", name))
 			}
+			if ex.MaxIterations < 0 {
+				errs = append(errs, pr.Pos.Errorf("Policy/%s: execution.maxIterations must be non-negative", name))
+			}
 		}
 		if ap := pr.Spec.Approvals; ap != nil {
 			if ApprovalRequireAllTools(ap) && ApprovalPermissive(ap) {

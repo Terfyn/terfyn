@@ -8,14 +8,15 @@ import (
 	"github.com/Terfyn/terfyn/internal/trace"
 )
 
-// agentMaxIterations resolves the loop's iteration bound (issue #160). The default/hard-cap
+// agentMaxIterations resolves the loop's iteration bound (issue #160), clamped to the governing
+// policy's execution.maxIterations ceiling (policyCeiling; 0 = unset → the default). The default/cap
 // semantics live in spec.ResolveMaxIterations, the single source of truth shared with the
-// external-runtime turn mapping (issue #340), so the ceiling is identical across runtimes.
-func agentMaxIterations(agent *spec.AgentResource) int {
+// external-runtime turn mapping (issue #340), so the ceiling is identical across runtimes (#522).
+func agentMaxIterations(agent *spec.AgentResource, policyCeiling int) int {
 	if agent == nil {
-		return spec.ResolveMaxIterations(nil)
+		return spec.ResolveMaxIterations(nil, policyCeiling)
 	}
-	return spec.ResolveMaxIterations(agent.Spec.Constraints)
+	return spec.ResolveMaxIterations(agent.Spec.Constraints, policyCeiling)
 }
 
 func (e *Executor) redactionOpts() trace.RedactionOptions {

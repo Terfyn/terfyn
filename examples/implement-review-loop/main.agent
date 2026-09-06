@@ -41,6 +41,10 @@ policy coding-agent {
     execution {
         maxTotalCostUsd 5
         maxWallClockSeconds 300
+        // Raise the agent iteration ceiling above the default 32: a real implementation explores,
+        // edits several files, runs tests, and fixes what fails in one attempt (issue #522). Cost and
+        // wall-clock above still bound genuine runaways.
+        maxIterations 64
     }
     effects {
         permit { workspace.read, workspace.write, process.exec }

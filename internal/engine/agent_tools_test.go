@@ -59,20 +59,32 @@ func TestAdvertisedAgentTools_DeclaredOperationSchema(t *testing.T) {
 
 func TestAgentMaxIterations(t *testing.T) {
 	t.Parallel()
-	if got := agentMaxIterations(nil); got != spec.DefaultAgentMaxIterations {
+	// No policy ceiling (0): default hard cap of 32 applies.
+	if got := agentMaxIterations(nil, 0); got != spec.DefaultAgentMaxIterations {
 		t.Fatalf("nil agent = %d", got)
 	}
-	if got := agentMaxIterations(&spec.AgentResource{}); got != spec.DefaultAgentMaxIterations {
+	if got := agentMaxIterations(&spec.AgentResource{}, 0); got != spec.DefaultAgentMaxIterations {
 		t.Fatalf("unset = %d", got)
 	}
-	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 0}}}); got != spec.DefaultAgentMaxIterations {
+	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 0}}}, 0); got != spec.DefaultAgentMaxIterations {
 		t.Fatalf("zero = %d", got)
 	}
-	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 2}}}); got != 2 {
+	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 2}}}, 0); got != 2 {
 		t.Fatalf("explicit = %d", got)
 	}
-	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 99}}}); got != spec.HardAgentMaxIterations {
-		t.Fatalf("hard cap = %d", got)
+	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 99}}}, 0); got != spec.HardAgentMaxIterations {
+		t.Fatalf("default hard cap = %d", got)
+	}
+	// A policy ceiling raises the cap: 64 is now honored (issue #522).
+	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 64}}}, 100); got != 64 {
+		t.Fatalf("raised ceiling = %d, want 64", got)
+	}
+	if got := agentMaxIterations(&spec.AgentResource{Spec: spec.AgentSpec{Constraints: &spec.AgentConstraints{MaxIterations: 200}}}, 100); got != 100 {
+		t.Fatalf("clamp to policy ceiling = %d, want 100", got)
+	}
+	// A policy ceiling below the default bounds even the default.
+	if got := agentMaxIterations(&spec.AgentResource{}, 4); got != 4 {
+		t.Fatalf("default clamped to low policy ceiling = %d, want 4", got)
 	}
 }
 

@@ -167,11 +167,12 @@ type InterruptConfig struct {
 func (d *PolicyDecl) Position() Pos { return d.Pos }
 func (d *PolicyDecl) declNode()     {}
 
-// PolicyExecutionBlock is `execution { maxTotalCostUsd … maxWallClockSeconds … requireStructuredOutput … }`.
+// PolicyExecutionBlock is `execution { maxTotalCostUsd … maxWallClockSeconds … maxIterations … requireStructuredOutput … }`.
 type PolicyExecutionBlock struct {
 	Pos                     Pos
 	MaxTotalCostUsd         *float64
 	MaxWallClockSeconds     *int
+	MaxIterations           *int
 	RequireStructuredOutput *bool
 }
 

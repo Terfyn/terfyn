@@ -313,9 +313,13 @@ type PolicyEffects struct {
 }
 
 type PolicyExecution struct {
-	MaxWallClockSeconds     int     `yaml:"maxWallClockSeconds,omitempty" json:"maxWallClockSeconds,omitempty"`
-	MaxTotalCostUsd         float64 `yaml:"maxTotalCostUsd,omitempty" json:"maxTotalCostUsd,omitempty"`
-	RequireStructuredOutput bool    `yaml:"requireStructuredOutput,omitempty" json:"requireStructuredOutput,omitempty"`
+	MaxWallClockSeconds int     `yaml:"maxWallClockSeconds,omitempty" json:"maxWallClockSeconds,omitempty"`
+	MaxTotalCostUsd     float64 `yaml:"maxTotalCostUsd,omitempty" json:"maxTotalCostUsd,omitempty"`
+	// MaxIterations is the policy's ceiling on an agent's constraints.maxIterations — the governed,
+	// environment-overridable replacement for the frozen global cap (issue #522). Unset/zero keeps the
+	// default HardAgentMaxIterations (32); resolved via ResolveMaxIterations.
+	MaxIterations           int  `yaml:"maxIterations,omitempty" json:"maxIterations,omitempty"`
+	RequireStructuredOutput bool `yaml:"requireStructuredOutput,omitempty" json:"requireStructuredOutput,omitempty"`
 }
 
 type PolicyTools struct {
