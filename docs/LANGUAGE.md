@@ -255,7 +255,8 @@ policy coding {
   flagged at apply/run (#207) and never resolved to a stored value.
 - Policy: `preset <name>` (a built-in preset — `strict` / `permissive` / `shell_safe` — resolved and
   overridable exactly like the YAML `spec.preset`, #430), `execution { maxTotalCostUsd /
-  maxWallClockSeconds / requireStructuredOutput }`, `approvals { requiredFor { … } / requireAllTools
+  maxWallClockSeconds / maxIterations / requireStructuredOutput }` (`maxIterations` is the agent
+  iteration ceiling, #522), `approvals { requiredFor { … } / requireAllTools
   / permissive }`, and the full effect model `effects { permit { … } permitWithApproval { … } }`.
 - Policy `hitl` (#106, #440): `hitl { descriptionPrefix "…" redactKeys { "k" … } toolSwitchMap { <src-op>
   { <target-op> … } … } interruptOn { <tool> | <tool> { allowedDecisions { approve reject edit switch }

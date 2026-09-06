@@ -33,6 +33,40 @@ func TestStricterOf_checkRunUsesTighterBudget(t *testing.T) {
 	}
 }
 
+// Subworkflow composition takes the tighter iteration ceiling. Unlike cost, 0 means "the default 32",
+// not "unbounded", so a callee that omits maxIterations still imposes 32 and a caller that omits it
+// cannot fail open on a raise (issue #522).
+func TestStricterOf_maxIterationsTakesTighterCeiling(t *testing.T) {
+	t.Parallel()
+	ceiling := func(a, b *spec.PolicyExecution) int {
+		ev := StricterOf(NewEvaluator(nil, &spec.PolicySpec{Execution: a}), NewEvaluator(nil, &spec.PolicySpec{Execution: b}))
+		ps := ev.(interface {
+			PolicySpec() *spec.PolicySpec
+		}).PolicySpec()
+		return spec.PolicyMaxIterations(ps.Execution)
+	}
+	// Caller only sets cost (implicit ceiling 32); callee caps iterations at 4 → merged 4 (not lost).
+	if got := ceiling(&spec.PolicyExecution{MaxTotalCostUsd: 5}, &spec.PolicyExecution{MaxIterations: 4}); got != 4 {
+		t.Fatalf("callee's 4 must win over caller's implicit 32, got %d", got)
+	}
+	// Caller raises to 64, callee omits it (implicit 32) → merged clamps back to 32 (stored as unset).
+	if got := ceiling(&spec.PolicyExecution{MaxIterations: 64}, &spec.PolicyExecution{MaxTotalCostUsd: 5}); got != 0 {
+		t.Fatalf("caller's 64 must not fail open when callee implies 32; want unset(=32), got %d", got)
+	}
+	// Both explicitly allow a raise to 64 → merged 64 honored.
+	if got := ceiling(&spec.PolicyExecution{MaxIterations: 64}, &spec.PolicyExecution{MaxIterations: 64}); got != 64 {
+		t.Fatalf("both allowing 64 should compose to 64, got %d", got)
+	}
+	// A nil callee spec still imposes the default 32 on a caller's 64.
+	nilCallee := StricterOf(NewEvaluator(nil, &spec.PolicySpec{Execution: &spec.PolicyExecution{MaxIterations: 64}}), NewEvaluator(nil, nil))
+	ps := nilCallee.(interface {
+		PolicySpec() *spec.PolicySpec
+	}).PolicySpec()
+	if got := spec.PolicyMaxIterations(ps.Execution); got != 0 {
+		t.Fatalf("nil callee spec must clamp caller's 64 to the default; want unset(=32), got %d", got)
+	}
+}
+
 func TestStricterOf_nilPassthrough(t *testing.T) {
 	t.Parallel()
 	a := NewEvaluator(nil, &spec.PolicySpec{

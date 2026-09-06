@@ -17,6 +17,7 @@ type policySpecRisk struct {
 	Execution *struct {
 		MaxTotalCostUsd     float64 `json:"maxTotalCostUsd"`
 		MaxWallClockSeconds int     `json:"maxWallClockSeconds"`
+		MaxIterations       int     `json:"maxIterations"`
 	} `json:"execution"`
 	Approvals *struct {
 		RequiredFor []string `json:"requiredFor"`
@@ -256,6 +257,25 @@ func summarizePolicyRisk(sink *riskSink, op Operation, oldJSON, newJSON string, 
 				Witness:  wit,
 			})
 		}
+		// A new policy that raises the iteration ceiling above the default 32 is a budget relaxation
+		// versus the no-policy baseline; an explicit ceiling at or below 32 is a tightening note (#522).
+		if newIter := policyIterCeiling(newPol); newIter > spec.HardAgentMaxIterations {
+			sink.add(RiskItem{
+				Category: RiskCategoryBudgetRelaxation,
+				Severity: RiskSeverityHigh,
+				Reason:   fmt.Sprintf("New policy raises the iteration ceiling to %d, above the default %d (Policy/%s).", newIter, spec.HardAgentMaxIterations, name),
+				Target:   target,
+				Witness:  wit,
+			})
+		} else if policyMaxIter(newPol) > 0 {
+			sink.add(RiskItem{
+				Category: RiskCategorySafety,
+				Severity: RiskSeverityLow,
+				Reason:   fmt.Sprintf("New policy defines an iteration ceiling (Policy/%s).", name),
+				Target:   target,
+				Witness:  wit,
+			})
+		}
 		return
 	}
 
@@ -297,6 +317,18 @@ func summarizePolicyRisk(sink *riskSink, op Operation, oldJSON, newJSON string, 
 			Category: RiskCategoryBudgetRelaxation,
 			Severity: RiskSeverityHigh,
 			Reason:   reason,
+			Target:   target,
+			Witness:  wit,
+		})
+	}
+	// Iteration ceiling: 0/absent is the default 32 (not unbounded), so raising the EFFECTIVE ceiling —
+	// 8→64, or removing an explicit 8 so it rises to 32 — is a budget relaxation the review gate sees;
+	// 64→0 (falls to 32) is a tightening and must not flag (#522).
+	if oldIter, newIter := policyIterCeiling(oldPol), policyIterCeiling(newPol); newIter > oldIter {
+		sink.add(RiskItem{
+			Category: RiskCategoryBudgetRelaxation,
+			Severity: RiskSeverityHigh,
+			Reason:   fmt.Sprintf("Iteration ceiling increased from %d to %d (Policy/%s).", oldIter, newIter, name),
 			Target:   target,
 			Witness:  wit,
 		})
@@ -624,6 +656,24 @@ func policyMaxWall(p *policySpecRisk) int {
 		return 0
 	}
 	return p.Execution.MaxWallClockSeconds
+}
+
+// policyMaxIter is a policy's raw execution.maxIterations (0 when unset).
+func policyMaxIter(p *policySpecRisk) int {
+	if p == nil || p.Execution == nil {
+		return 0
+	}
+	return p.Execution.MaxIterations
+}
+
+// policyIterCeiling is a policy's EFFECTIVE iteration ceiling for risk comparison. Unlike cost/wall,
+// 0/absent is not "unbounded" — it is the default HardAgentMaxIterations (32). Raising the effective
+// ceiling (e.g. 8→64, or removing an explicit 8 so it rises to 32) is a budget relaxation (#522).
+func policyIterCeiling(p *policySpecRisk) int {
+	if p == nil || p.Execution == nil {
+		return spec.HardAgentMaxIterations
+	}
+	return spec.EffectiveMaxIterationsCeiling(p.Execution.MaxIterations)
 }
 
 func policyApprovals(p *policySpecRisk) []string {

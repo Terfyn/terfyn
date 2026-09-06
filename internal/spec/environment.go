@@ -106,6 +106,9 @@ func mergePolicyOverride(pol *PolicySpec, ovr PolicyOverride) {
 		if pe.MaxTotalCostUsd > 0 {
 			merged.MaxTotalCostUsd = pe.MaxTotalCostUsd
 		}
+		if pe.MaxIterations != 0 {
+			merged.MaxIterations = pe.MaxIterations
+		}
 		if pe.RequireStructuredOutput {
 			merged.RequireStructuredOutput = true
 		}

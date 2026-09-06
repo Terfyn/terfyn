@@ -144,6 +144,9 @@ func printPolicy(p *printer, d *PolicyDecl) {
 		if e.MaxWallClockSeconds != nil {
 			fmt.Fprintf(p, "        maxWallClockSeconds %d\n", *e.MaxWallClockSeconds)
 		}
+		if e.MaxIterations != nil {
+			fmt.Fprintf(p, "        maxIterations %d\n", *e.MaxIterations)
+		}
 		printBoolField(p, "        ", "requireStructuredOutput", e.RequireStructuredOutput)
 		p.blockTail(e.Pos.Line, "        ")
 		p.WriteString("    }\n")
@@ -465,6 +468,9 @@ func printExecutionAt(p *printer, indent string, e *PolicyExecutionBlock) {
 	}
 	if e.MaxWallClockSeconds != nil {
 		fmt.Fprintf(p, "%smaxWallClockSeconds %d\n", inner, *e.MaxWallClockSeconds)
+	}
+	if e.MaxIterations != nil {
+		fmt.Fprintf(p, "%smaxIterations %d\n", inner, *e.MaxIterations)
 	}
 	printBoolField(p, inner, "requireStructuredOutput", e.RequireStructuredOutput)
 	p.blockTail(e.Pos.Line, inner)

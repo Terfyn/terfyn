@@ -344,7 +344,7 @@ func (e *Executor) runAgentToolLoop(
 	// (maxIterations: 1 is a single completion; tools never run). HITL interrupt is not consulted
 	// inside this loop: inner uses must already be pre-approved (--approve / ApprovedActions) or
 	// CheckToolCall fails closed (approval_required).
-	maxIter := agentMaxIterations(agent)
+	maxIter := agentMaxIterations(agent, policyMaxIterationsCeiling(pol))
 	var acc models.GenerateMeta
 	loopPctx := pctx
 

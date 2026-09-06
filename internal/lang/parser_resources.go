@@ -543,12 +543,16 @@ func (p *parser) parsePolicyExecution() *PolicyExecutionBlock {
 			if v, ok := p.constraintInt(field); ok {
 				b.MaxWallClockSeconds = &v
 			}
+		case "maxIterations":
+			if v, ok := p.constraintInt(field); ok {
+				b.MaxIterations = &v
+			}
 		case "requireStructuredOutput":
 			if v, ok := p.constraintBool(field); ok {
 				b.RequireStructuredOutput = &v
 			}
 		default:
-			p.errorf(fpos, "unknown execution field %q (want maxTotalCostUsd, maxWallClockSeconds, or requireStructuredOutput)", field)
+			p.errorf(fpos, "unknown execution field %q (want maxTotalCostUsd, maxWallClockSeconds, maxIterations, or requireStructuredOutput)", field)
 			p.syncLine()
 		}
 	}

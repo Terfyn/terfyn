@@ -40,7 +40,7 @@ func TestParseToolDecl(t *testing.T) {
 
 func TestParsePolicyDecl(t *testing.T) {
 	f, diags := Parse("t.agent", `policy guarded {
-    execution { maxTotalCostUsd 5 }
+    execution { maxTotalCostUsd 5 maxIterations 64 }
     approvals { requiredFor { tool.github.pull_request.post_comment } }
     effects {
         permit { github.read }
@@ -56,6 +56,9 @@ func TestParsePolicyDecl(t *testing.T) {
 	}
 	if d.Execution == nil || d.Execution.MaxTotalCostUsd == nil || *d.Execution.MaxTotalCostUsd != 5 {
 		t.Fatalf("execution: %+v", d.Execution)
+	}
+	if d.Execution.MaxIterations == nil || *d.Execution.MaxIterations != 64 {
+		t.Fatalf("execution.maxIterations: %+v", d.Execution.MaxIterations)
 	}
 	if d.Approvals == nil || len(d.Approvals.RequiredFor) != 1 {
 		t.Fatalf("approvals: %+v", d.Approvals)
@@ -129,6 +132,7 @@ func TestPrintRoundTrip_ToolPolicy(t *testing.T) {
 policy p {
     execution {
         maxTotalCostUsd 3
+        maxIterations 64
     }
     effects {
         permit { workspace.read }

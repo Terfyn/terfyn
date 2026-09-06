@@ -106,6 +106,50 @@ func TestRiskSummary_removingCeilingIsRelaxation(t *testing.T) {
 	}
 }
 
+// Raising a policy's iteration ceiling is a budget relaxation the review gate must see; unlike
+// cost/wall, 0/absent is the default 32 (not unbounded), so 8→64 relaxes, 8→unset relaxes (rises to
+// 32), and 64→unset is a tightening (falls to 32) that must not flag (issue #522).
+func TestRiskSummary_maxIterationsRelaxation(t *testing.T) {
+	graphWithIters := func(n int) *spec.ProjectGraph {
+		g := minimalGraph()
+		g.Policies["default"] = &spec.PolicyResource{
+			APIVersion: spec.APIVersionV0, Kind: spec.KindPolicy, Metadata: spec.Metadata{Name: "default"},
+			Spec: spec.PolicySpec{Execution: &spec.PolicyExecution{MaxIterations: n}},
+		}
+		return g
+	}
+	iterRelaxationFlagged := func(t *testing.T, oldN, newN int) bool {
+		t.Helper()
+		applied := appliedFromDesired(t, "dev", graphWithIters(oldN))
+		p := NewPlanner(&fakeDeploy{list: applied})
+		pl, err := p.ComputePlan(context.Background(), "dev", graphWithIters(newN), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, it := range pl.Risk.Items {
+			if it.Category == RiskCategoryBudgetRelaxation && strings.Contains(strings.ToLower(it.Reason), "iteration ceiling") {
+				if it.Severity != RiskSeverityHigh {
+					t.Fatalf("iteration relaxation severity %s, want high", it.Severity)
+				}
+				return true
+			}
+		}
+		return false
+	}
+	if !iterRelaxationFlagged(t, 8, 64) {
+		t.Fatal("raising the iteration ceiling 8→64 must flag budget_relaxation")
+	}
+	if !iterRelaxationFlagged(t, 8, 0) {
+		t.Fatal("removing an explicit 8 (rises to the default 32) must flag budget_relaxation")
+	}
+	if iterRelaxationFlagged(t, 64, 0) {
+		t.Fatal("64→unset falls to the default 32 — a tightening — and must NOT flag")
+	}
+	if iterRelaxationFlagged(t, 64, 8) {
+		t.Fatal("lowering the ceiling 64→8 must NOT flag budget_relaxation")
+	}
+}
+
 func TestRiskSummary_effectPermitWidening(t *testing.T) {
 	oldG := graphWithPolicyBudget(3, 0, nil)
 	oldG.Policies["default"].Spec.Effects = &spec.PolicyEffects{Permit: []string{"github.read"}}

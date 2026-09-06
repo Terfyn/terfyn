@@ -38,6 +38,7 @@ tmp/
 examples/**/.agentic/
 **/.agentic/local.yaml
 **/.agentic/resolved-config.json
+**/.agentic/policy-snapshot.json
 
 # VS Code extension build outputs (editors/vscode)
 editors/vscode/node_modules/

@@ -152,3 +152,14 @@ func policySpecFromEvaluator(pol policy.PolicyEvaluator) *spec.PolicySpec {
 	}
 	return nil
 }
+
+// policyMaxIterationsCeiling returns the governing policy's execution.maxIterations ceiling (0 when
+// no policy or no ceiling is set), so the agent loop clamps to the policy's bound rather than the
+// frozen global cap (issue #522).
+func policyMaxIterationsCeiling(pol policy.PolicyEvaluator) int {
+	ps := policySpecFromEvaluator(pol)
+	if ps == nil {
+		return 0
+	}
+	return spec.PolicyMaxIterations(ps.Execution)
+}

@@ -29,7 +29,8 @@
 // against already-accumulated run cost before the next Generate or inner tool call, and again
 // after each call's actual cost. Exceeding `execution.maxTotalCostUsd` records `limit_hit`
 // (`kind: max_cost`) plus `system_error`, then fails the step with `run_error` (issue #163).
-// `constraints.maxIterations` (default 8, hard cap 32) counts Generate turns; `tool_use` on the last
+// `constraints.maxIterations` (default 8, clamped to the governing policy's `execution.maxIterations`
+// ceiling, or 32 when the policy sets none — issue #522) counts Generate turns; `tool_use` on the last
 // turn fails without executing those calls. HITL interrupt does not run inside the loop: inner uses
 // must be pre-approved (`--approve` / ApprovedActions) or CheckToolCall fails closed. Agents with no
 // tools remain a single completion. Inner tool calls share workflow-step tracing: `tool_selection`
