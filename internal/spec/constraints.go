@@ -8,10 +8,11 @@ package spec
 const (
 	DefaultAgentMaxIterations = 8
 	// HardAgentMaxIterations is the default ceiling on constraints.maxIterations. It is no longer a
-	// frozen global: a policy may raise (or lower) it via execution.maxIterations, so a coding agent
-	// that must explore, edit, and run tests in one attempt can be granted more turns while cost and
-	// wall-clock still bound genuine runaways (issue #522). This value applies when the governing
-	// policy sets no ceiling, so existing programs are unchanged.
+	// frozen global: a policy may raise (or lower) the ceiling via execution.maxIterations, so an agent
+	// that declares constraints.maxIterations can request more than 32 (or is capped below it). This is
+	// a ceiling, not a grant — an agent that asks for nothing still resolves to DefaultAgentMaxIterations
+	// (8), and cost/wall-clock still bound genuine runaways (issue #522). This value applies when the
+	// governing policy sets no ceiling, so existing programs are unchanged.
 	HardAgentMaxIterations = 32
 )
 
