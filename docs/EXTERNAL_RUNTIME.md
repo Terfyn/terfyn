@@ -25,7 +25,7 @@ interface distinct from Terfyn's own engine:
     that agent may call. Every `tools/call` routes through the **same** inner path as the internal
     loop: policy `CheckToolCall` → HITL → `Tools.Call`.
   - **Budget / iteration / timeout mapping** ([#340](https://github.com/Terfyn/terfyn/issues/340)):
-    `constraints.maxIterations → --max-turns` (shared default-8 / cap-32), `timeoutSeconds → `
+    `constraints.maxIterations → --max-turns` (shared default-8, clamped to the policy's `execution.maxIterations` ceiling or 32, #522), `timeoutSeconds → `
     process deadline, `execution.maxTotalCostUsd → --max-budget-usd`. The harness knobs are a belt;
     Terfyn's `CheckRun` stays authoritative and a breach fails closed with `limit_hit`.
   - **Trace / audit integration** ([#341](https://github.com/Terfyn/terfyn/issues/341)): external

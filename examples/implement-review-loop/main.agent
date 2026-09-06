@@ -86,8 +86,12 @@ agent Implementer {
 
     // A coding agent's write_file carries the whole new file as output tokens, so it
     // needs far more than the old 4096 default; raise the per-completion cap (issue #514).
+    // It also asks for more reason→act turns to explore, edit, run tests, and fix in one
+    // attempt: the request only takes effect because the coding-agent policy raises the
+    // ceiling to 64 (issue #522) — the agent must declare the turns; the policy permits them.
     constraints {
         maxTokens 32000
+        maxIterations 64
     }
 
     grants {

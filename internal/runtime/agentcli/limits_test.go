@@ -14,7 +14,8 @@ func TestMapLimits(t *testing.T) {
 	if l := MapLimits(nil, nil); l.MaxTurns != spec.DefaultAgentMaxIterations || l.Timeout != 0 || l.BudgetUSD != 0 {
 		t.Fatalf("nil mapping = %+v", l)
 	}
-	// Explicit constraints map through; maxIterations shares the default-8/cap-32 clamp.
+	// Explicit constraints map through; maxIterations clamps to the default 32 when the policy sets
+	// no ceiling.
 	c := &spec.AgentConstraints{MaxIterations: 99, TimeoutSeconds: 45}
 	ex := &spec.PolicyExecution{MaxTotalCostUsd: 2.5}
 	l := MapLimits(c, ex)
@@ -26,6 +27,16 @@ func TestMapLimits(t *testing.T) {
 	}
 	if l.BudgetUSD != 2.5 {
 		t.Fatalf("budget = %v", l.BudgetUSD)
+	}
+
+	// The policy ceiling flows into --max-turns, identical to the internal runtime (issue #522): a
+	// raise is honored, and a request above the ceiling clamps. An impl that ignored exec.MaxIterations
+	// would fail these.
+	if l := MapLimits(&spec.AgentConstraints{MaxIterations: 64}, &spec.PolicyExecution{MaxIterations: 128}); l.MaxTurns != 64 {
+		t.Fatalf("policy ceiling 128 should honor request 64, got %d", l.MaxTurns)
+	}
+	if l := MapLimits(&spec.AgentConstraints{MaxIterations: 200}, &spec.PolicyExecution{MaxIterations: 128}); l.MaxTurns != 128 {
+		t.Fatalf("request 200 should clamp to policy ceiling 128, got %d", l.MaxTurns)
 	}
 }
 

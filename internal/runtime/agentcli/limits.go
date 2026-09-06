@@ -16,8 +16,9 @@ import (
 // Limits are the Terfyn-derived bounds for one external run, mapped to the harness where a knob
 // exists and enforced by Terfyn regardless.
 type Limits struct {
-	// MaxTurns bounds Generate turns → --max-turns, resolved from constraints.maxIterations with
-	// the shared default-8 / cap-32 semantics (spec.ResolveMaxIterations).
+	// MaxTurns bounds Generate turns → --max-turns, resolved from constraints.maxIterations clamped to
+	// the policy's execution.maxIterations ceiling (or the default 32 when unset), via the shared
+	// spec.ResolveMaxIterations — so the turn bound is identical to the internal runtime (issue #522).
 	MaxTurns int
 	// Timeout is the process/context deadline → derived from constraints.timeoutSeconds (0 = none).
 	Timeout time.Duration

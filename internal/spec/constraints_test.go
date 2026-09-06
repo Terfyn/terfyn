@@ -64,3 +64,15 @@ func TestPolicyMaxIterations(t *testing.T) {
 		t.Fatalf("set = %d, want 64", got)
 	}
 }
+
+func TestEffectiveMaxIterationsCeiling(t *testing.T) {
+	if got := EffectiveMaxIterationsCeiling(0); got != HardAgentMaxIterations {
+		t.Fatalf("0 must map to the default %d, got %d", HardAgentMaxIterations, got)
+	}
+	if got := EffectiveMaxIterationsCeiling(64); got != 64 {
+		t.Fatalf("positive value used verbatim, got %d", got)
+	}
+	if got := EffectiveMaxIterationsCeiling(4); got != 4 {
+		t.Fatalf("a value below the default is honored (a tighter ceiling), got %d", got)
+	}
+}

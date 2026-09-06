@@ -59,33 +59,64 @@ func (s *stricterEvaluator) PolicySpec() *spec.PolicySpec {
 }
 
 func mergeStricterPolicySpec(a, b *spec.PolicySpec) *spec.PolicySpec {
-	if a == nil {
-		return clonePolicySpec(b)
+	if a == nil && b == nil {
+		return nil
 	}
-	if b == nil {
-		return clonePolicySpec(a)
+	var out *spec.PolicySpec
+	switch {
+	case a == nil:
+		out = clonePolicySpec(b)
+	case b == nil:
+		out = clonePolicySpec(a)
+	default:
+		out = clonePolicySpec(a)
+		if b.Execution != nil {
+			if out.Execution == nil {
+				cp := *b.Execution
+				out.Execution = &cp
+			} else {
+				ex := *out.Execution
+				if b.Execution.MaxTotalCostUsd > 0 && (ex.MaxTotalCostUsd <= 0 || b.Execution.MaxTotalCostUsd < ex.MaxTotalCostUsd) {
+					ex.MaxTotalCostUsd = b.Execution.MaxTotalCostUsd
+				}
+				if b.Execution.MaxWallClockSeconds > 0 && (ex.MaxWallClockSeconds <= 0 || b.Execution.MaxWallClockSeconds < ex.MaxWallClockSeconds) {
+					ex.MaxWallClockSeconds = b.Execution.MaxWallClockSeconds
+				}
+				if b.Execution.RequireStructuredOutput {
+					ex.RequireStructuredOutput = true
+				}
+				out.Execution = &ex
+			}
+		}
+		out.Hitl = mergeStricterHitl(out.Hitl, b.Hitl)
 	}
-	out := clonePolicySpec(a)
-	if b.Execution != nil {
+	// The iteration ceiling is the tighter of BOTH policies' EFFECTIVE ceilings. Unlike cost/wall-clock,
+	// 0 means "the default 32", not "unbounded" — so an absent policy (or execution block) still imposes
+	// 32, and a subworkflow can never fail open on a callee's lower cap by omitting the field (issue
+	// #522). Only a genuine tightening below the default is materialized; at the default it stays unset.
+	if merged := min(policyIterationCeiling(a), policyIterationCeiling(b)); merged < spec.HardAgentMaxIterations {
 		if out.Execution == nil {
-			cp := *b.Execution
-			out.Execution = &cp
+			out.Execution = &spec.PolicyExecution{}
+		}
+		out.Execution.MaxIterations = merged
+	} else if out.Execution != nil {
+		// Both sides allow ≥ 32: keep an explicit higher shared ceiling, else clear to unset (= 32).
+		if merged == spec.HardAgentMaxIterations {
+			out.Execution.MaxIterations = 0
 		} else {
-			ex := *out.Execution
-			if b.Execution.MaxTotalCostUsd > 0 && (ex.MaxTotalCostUsd <= 0 || b.Execution.MaxTotalCostUsd < ex.MaxTotalCostUsd) {
-				ex.MaxTotalCostUsd = b.Execution.MaxTotalCostUsd
-			}
-			if b.Execution.MaxWallClockSeconds > 0 && (ex.MaxWallClockSeconds <= 0 || b.Execution.MaxWallClockSeconds < ex.MaxWallClockSeconds) {
-				ex.MaxWallClockSeconds = b.Execution.MaxWallClockSeconds
-			}
-			if b.Execution.RequireStructuredOutput {
-				ex.RequireStructuredOutput = true
-			}
-			out.Execution = &ex
+			out.Execution.MaxIterations = merged
 		}
 	}
-	out.Hitl = mergeStricterHitl(out.Hitl, b.Hitl)
 	return out
+}
+
+// policyIterationCeiling is a policy's effective iteration ceiling — the declared execution.maxIterations
+// or the default HardAgentMaxIterations when the policy, its execution block, or the field is absent.
+func policyIterationCeiling(p *spec.PolicySpec) int {
+	if p == nil || p.Execution == nil {
+		return spec.HardAgentMaxIterations
+	}
+	return spec.EffectiveMaxIterationsCeiling(p.Execution.MaxIterations)
 }
 
 func clonePolicySpec(p *spec.PolicySpec) *spec.PolicySpec {

@@ -21,10 +21,7 @@ const (
 // unset/zero maxIterations) resolves to DefaultAgentMaxIterations; the result never exceeds the
 // ceiling — including a policy ceiling set below the default, which then bounds even the default.
 func ResolveMaxIterations(c *AgentConstraints, policyCeiling int) int {
-	ceiling := HardAgentMaxIterations
-	if policyCeiling > 0 {
-		ceiling = policyCeiling
-	}
+	ceiling := EffectiveMaxIterationsCeiling(policyCeiling)
 	n := DefaultAgentMaxIterations
 	if c != nil && c.MaxIterations > 0 {
 		n = c.MaxIterations
@@ -35,8 +32,20 @@ func ResolveMaxIterations(c *AgentConstraints, policyCeiling int) int {
 	return n
 }
 
+// EffectiveMaxIterationsCeiling maps a policy's execution.maxIterations to its concrete ceiling.
+// Unlike cost/wall-clock, where 0 means "no limit", 0 here means "unset → the default hard cap"
+// (HardAgentMaxIterations). Every consumer that compares or composes iteration ceilings — stricter
+// subworkflow merge, plan's budget-relaxation risk — must use this mapping so 0 is never mistaken for
+// unbounded (issue #522).
+func EffectiveMaxIterationsCeiling(policyMaxIterations int) int {
+	if policyMaxIterations > 0 {
+		return policyMaxIterations
+	}
+	return HardAgentMaxIterations
+}
+
 // PolicyMaxIterations returns the iteration ceiling declared by a policy's execution block, or 0 when
-// unset (the caller then falls back to HardAgentMaxIterations via ResolveMaxIterations).
+// unset (the caller then falls back to HardAgentMaxIterations via EffectiveMaxIterationsCeiling).
 func PolicyMaxIterations(exec *PolicyExecution) int {
 	if exec == nil {
 		return 0
