@@ -15,6 +15,7 @@ type dispatchHandler func(ctx context.Context, with map[string]any, start time.T
 // When adding an operation, register it here and in operationCatalog (see operations.go).
 var dispatchHandlers = map[string]dispatchHandler{
 	"check_runs.list":            dispatchCheckRunsList,
+	"commit":                     dispatchGitCommit,
 	"commit_status.create":       dispatchGitHubJSON(githubCommitStatusCreate),
 	"create_branch":              dispatchGitCreateBranch,
 	"echo":                       dispatchEcho,
