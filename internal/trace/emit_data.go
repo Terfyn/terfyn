@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Shared trace-event data builders (issue #341). These are the single source of truth for the
@@ -69,6 +70,47 @@ func ToolExecutionData(uses, toolName string, durationMs int64, costUSD float64,
 // external turn is byte-shape-identical to an internal Generate turn.
 func LLMCompletionData(agent, model string, costUSD float64) map[string]any {
 	return map[string]any{"agent": agent, "model": model, "costUsd": costUSD}
+}
+
+// Detail-mode field keys (issue #525). These carry the SUBSTANCE of a turn — reasoning text, call
+// arguments, tool output — and are added only when terfyn run --trace-detail is set. Every value still
+// passes through the recorder's redaction (by key) and truncation (per-field + payload cap) before
+// storage, so a secret-bearing argument or an unbounded output cannot leak or balloon the DB.
+const (
+	FieldCompletionText = "text"
+	FieldToolArgs       = "args"
+	FieldToolOutput     = "output"
+)
+
+// AddCompletionText attaches the agent's natural-language narration to an llm_completion payload
+// (issue #525). An empty/whitespace completion (a pure tool_use turn) adds nothing, so the key is
+// present only when there is something to show.
+func AddCompletionText(data map[string]any, text string) {
+	if data == nil {
+		return
+	}
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	data[FieldCompletionText] = text
+}
+
+// AddToolArgs attaches the resolved call arguments to a tool_selection payload (issue #525),
+// alongside the existing digest. Empty args add nothing.
+func AddToolArgs(data map[string]any, args map[string]any) {
+	if data == nil || len(args) == 0 {
+		return
+	}
+	data[FieldToolArgs] = args
+}
+
+// AddToolOutput attaches the tool's structured result to a tool_execution payload (issue #525). Empty
+// output adds nothing.
+func AddToolOutput(data map[string]any, output map[string]any) {
+	if data == nil || len(output) == 0 {
+		return
+	}
+	data[FieldToolOutput] = output
 }
 
 // LimitHitData is the limit_hit payload for a budget/iteration breach (issues #163, #341): the

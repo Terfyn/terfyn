@@ -10,6 +10,7 @@ type engineRunConfig struct {
 	autoApprove     bool
 	hitlActor       string
 	hitlDecision    *runtime.HitlDecisionOptions
+	traceDetail     bool
 }
 
 func engineRunConfigFromInvoke(opts runtime.InvokeOptions) engineRunConfig {
@@ -17,6 +18,7 @@ func engineRunConfigFromInvoke(opts runtime.InvokeOptions) engineRunConfig {
 		approvedActions: opts.ApprovedActions,
 		autoApprove:     opts.AutoApprove,
 		hitlActor:       opts.HitlActor,
+		traceDetail:     opts.TraceDetail,
 	}
 }
 
@@ -26,5 +28,6 @@ func engineRunConfigFromResume(opts runtime.ResumeOptions) engineRunConfig {
 		autoApprove:     opts.AutoApprove,
 		hitlActor:       opts.HitlActor,
 		hitlDecision:    opts.HitlDecision,
+		traceDetail:     opts.TraceDetail,
 	}
 }

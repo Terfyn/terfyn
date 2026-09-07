@@ -45,6 +45,12 @@ type Executor struct {
 	Trace        *trace.Recorder
 	Telemetry    *telemetry.Tracer
 	Now          func() time.Time
+	// TraceDetail, when true, enriches the streamed/stored trace with the SUBSTANCE of each turn —
+	// the agent's reasoning text on llm_completion, the tool arguments on tool_selection, and a
+	// bounded tool output on tool_execution (issue #525). It is opt-in (terfyn run --trace-detail) so
+	// the default stays terse and the default audit-event byte shape is unchanged; when on, every
+	// added field still passes through the recorder's redaction+truncation pipeline before storage.
+	TraceDetail bool
 
 	stepPrefix string
 	rootWF     *spec.WorkflowResource

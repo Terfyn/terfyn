@@ -129,6 +129,7 @@ Exit codes (section 11.2):
 	cmd.Flags().StringVar(&runtimeName, "runtime", "", "runtime target: 'local' (default, the workflow's spec.runtime) or an external adapter such as 'claude-code'")
 	cmd.Flags().BoolVar(&requireAttribution, "require-attribution", false, "require explicit --tenant-id, --thread-id, and --actor-id (or set TERFYN_REQUIRE_ATTRIBUTION=1)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "stream each trace event (tool calls, completions, limits) to stderr as it happens")
+	cmd.Flags().Bool("trace-detail", false, "expand each streamed event with its substance — agent reasoning, tool arguments (edit diffs, run_tests command), and bounded tool output — and store the same detail for 'terfyn logs' (issue #525); implies --verbose")
 	return cmd
 }
 
@@ -226,9 +227,12 @@ func runRun(cmd *cobra.Command, wfName, resumeRunID, inputFile string, inputPair
 
 	// --verbose (-v) streams each trace event to stderr as it is appended (#450), so an agent run is
 	// watchable in real time. stdout stays clean for -o json. nil sink = today's behavior.
+	// --trace-detail (#525) expands each line with the turn's substance and implies the live stream.
+	verboseOn, _ := cmd.Flags().GetBool("verbose")
+	traceDetail, _ := cmd.Flags().GetBool("trace-detail")
 	var eventSink trace.EventSink
-	if verbose, _ := cmd.Flags().GetBool("verbose"); verbose {
-		eventSink = newVerboseSink(cmd.ErrOrStderr(), g != nil && g.NoColor)
+	if verboseOn || traceDetail {
+		eventSink = newVerboseSink(cmd.ErrOrStderr(), g != nil && g.NoColor, traceDetail)
 	}
 
 	resumeID := strings.TrimSpace(resumeRunID)
@@ -330,6 +334,7 @@ func runRun(cmd *cobra.Command, wfName, resumeRunID, inputFile string, inputPair
 				ApprovedActions: approves,
 				AutoApprove:     autoApprove,
 				EventSink:       eventSink,
+				TraceDetail:     traceDetail,
 			}
 			if err := applyHitlResumeOptions(&resOpts, autoApprove, decision, decisionEditJSON, decisionSwitchTarget); err != nil {
 				return NewExitError(ExitValidationError, err)
@@ -352,6 +357,7 @@ func runRun(cmd *cobra.Command, wfName, resumeRunID, inputFile string, inputPair
 				AutoApprove:     autoApprove,
 				WorkflowName:    wfName,
 				EventSink:       eventSink,
+				TraceDetail:     traceDetail,
 			}
 			applyRunAttributionInvokeOpts(&invOpts, tenantID, threadID, actorID, parentRunID, requestID, idempotencyKey, source, requireAttribution)
 			warnAttributionDefaults(cmd.ErrOrStderr(), state.RunAttribution{

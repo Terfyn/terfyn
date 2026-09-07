@@ -26,6 +26,30 @@ const (
 	defaultMaxPayloadBytes = 65536
 )
 
+const (
+	// DetailMaxStringChars / DetailMaxPayloadBytes are the raised per-field and per-event caps used
+	// when a run opts into terfyn run --trace-detail (issue #525). The audit defaults (256 chars,
+	// 64 KiB) were tuned for terse digests and would cut an edit's diff or the reasoning text to a
+	// stub before it could be shown; detail mode raises the ceilings so the substance actually
+	// survives. Only the truncation budget changes — the redaction key set (secret masking) is
+	// untouched, and these ceilings still bound the event so the DB cannot balloon.
+	DetailMaxStringChars  = 8192
+	DetailMaxPayloadBytes = 262144
+)
+
+// ApplyDetailBudget raises o's per-field string and per-event payload caps to at least the detail-mode
+// floors, never lowering a larger configured value (issue #525). Used only for a --trace-detail run so
+// the surfaced substance (diffs, reasoning, output) is not shredded by the terse audit defaults.
+func ApplyDetailBudget(o RedactionOptions) RedactionOptions {
+	if o.MaxStringChars < DetailMaxStringChars {
+		o.MaxStringChars = DetailMaxStringChars
+	}
+	if o.MaxPayloadBytes < DetailMaxPayloadBytes {
+		o.MaxPayloadBytes = DetailMaxPayloadBytes
+	}
+	return o
+}
+
 // DefaultRedactKeys is the built-in case-insensitive key set merged with project/call keys.
 var DefaultRedactKeys = []string{
 	"password", "secret", "credential", "token", "api_key", "apikey",

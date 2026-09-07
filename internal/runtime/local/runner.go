@@ -123,6 +123,11 @@ func (r *Runtime) Invoke(ctx context.Context, cfg *config.ResolvedConfig, opts r
 
 	rec := trace.NewRecorderForGraph(r.Store, prep.graph)
 	rec.Sink = opts.EventSink // stream events live when the caller opted in (terfyn run --verbose, #450)
+	if opts.TraceDetail {
+		// --trace-detail surfaces substance (diffs, reasoning, output); raise the truncation ceilings so
+		// the terse audit defaults don't shred it (#525). Redaction (secret masking) is unchanged.
+		rec.Redaction = trace.ApplyDetailBudget(rec.Redaction)
+	}
 	startedData := map[string]any{"workflow": wfName, "environment": cfg.Environment()}
 	if snapshotDigest != "" {
 		// Cover the pinned deployment identity by the run's tamper-evident audit chain (#207): the
@@ -220,6 +225,9 @@ func (r *Runtime) Resume(ctx context.Context, cfg *config.ResolvedConfig, opts r
 
 	rec := trace.NewRecorderForGraph(r.Store, prep.graph)
 	rec.Sink = opts.EventSink // stream events live when the caller opted in (terfyn run --verbose, #450)
+	if opts.TraceDetail {
+		rec.Redaction = trace.ApplyDetailBudget(rec.Redaction) // raise truncation ceilings for detail (#525)
+	}
 	if _, err := rec.Append(ctx, runID, "", trace.EventRunStarted, trace.ActorAgent, map[string]any{
 		"workflow": wfName,
 		"resumed":  true,
@@ -263,6 +271,7 @@ func (r *Runtime) executeEngine(
 		Trace:       rec,
 		Telemetry:   tel,
 		Now:         r.Now,
+		TraceDetail: cfg.traceDetail,
 	}
 	hitl, err := buildEngineHitlOptions(cfg)
 	if err != nil {
