@@ -87,6 +87,10 @@ type ContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	// IsError, on a tool_result block, marks the call as failed (Messages API tool_result.is_error)
+	// so the model reads the content as an error observation. It is emitted only for tool_result
+	// blocks and only when true (issue #524).
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // MarshalJSON keeps tool_result.content present even when empty. Anthropic
@@ -100,6 +104,7 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 		Input     json.RawMessage `json:"input,omitempty"`
 		ToolUseID string          `json:"tool_use_id,omitempty"`
 		Content   *string         `json:"content,omitempty"`
+		IsError   bool            `json:"is_error,omitempty"`
 	}
 	w := wire{
 		Type:      b.Type,
@@ -112,6 +117,7 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 	if b.Type == "tool_result" {
 		c := b.Content
 		w.Content = &c
+		w.IsError = b.IsError
 	}
 	return json.Marshal(w)
 }

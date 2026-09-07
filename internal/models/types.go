@@ -47,6 +47,12 @@ type ToolCall struct {
 type ToolResult struct {
 	ToolCallID string `json:"tool_call_id"`
 	Content    string `json:"content"`
+	// IsError marks this result as a failed tool call. Providers that model it (Anthropic's
+	// tool_result.is_error) receive the flag so the model treats the content as an error observation
+	// to correct from, not a successful output; providers without the concept (OpenAI) ignore it and
+	// carry the content alone. A failed or malformed tool call must always be answered by a
+	// well-formed tool_result — never left as a dangling tool_use that poisons the next request (#524).
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // ChatMessage is one turn in the prompt payload.

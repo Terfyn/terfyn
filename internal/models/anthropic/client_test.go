@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +113,18 @@ func TestClient_Generate_HTTPError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("got %v", err)
+	}
+	// The error is a typed *APIError carrying the status so a caller can tell a rejected request (4xx)
+	// from a transient 5xx and attach diagnostics on the former (issue #524).
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error is not *APIError: %T", err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StatusCode = %d, want 401", apiErr.StatusCode)
+	}
+	if apiErr.IsClientError() != true {
+		t.Fatalf("401 must be a client error")
 	}
 }
 

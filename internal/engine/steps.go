@@ -413,7 +413,7 @@ func (e *Executor) runAgentToolLoop(
 
 		results := make([]models.ToolResult, 0, len(resp.ToolCalls))
 		for _, call := range resp.ToolCalls {
-			content, tmeta, fatalErr := e.runAgentToolCall(ctx2, runHandle, pol, wf, runID, step, pctx, loopPctx, acc, advertised, call)
+			content, isErr, tmeta, fatalErr := e.runAgentToolCall(ctx2, runHandle, pol, wf, runID, step, pctx, loopPctx, acc, advertised, call)
 			if fatalErr != nil {
 				return nil, acc, fatalErr
 			}
@@ -423,7 +423,7 @@ func (e *Executor) runAgentToolLoop(
 			if err != nil {
 				return nil, acc, err
 			}
-			results = append(results, models.ToolResult{ToolCallID: call.ID, Content: content})
+			results = append(results, models.ToolResult{ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
 		messages = append(messages,
 			models.ChatMessage{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls},
@@ -497,7 +497,8 @@ func (e *Executor) finalizeAgentAtCap(
 //     rejection, a nil executor — is fatal, so an adapter diagnostic never becomes prompt text.
 //
 // The returned content is the tool-result payload for the model (a model-safe {"error": …} object on
-// a recoverable miss); tmeta is the step metadata to fold into the loop's cost.
+// a recoverable miss); isErr is true for that recoverable-miss case so the loop marks the tool_result
+// is_error (#524); tmeta is the step metadata to fold into the loop's cost.
 func (e *Executor) runAgentToolCall(
 	ctx2 context.Context,
 	runHandle *telemetry.RunHandle,
@@ -509,7 +510,7 @@ func (e *Executor) runAgentToolCall(
 	acc models.GenerateMeta,
 	advertised map[string]string,
 	call models.ToolCall,
-) (content string, tmeta tools.ToolCallMeta, fatalErr error) {
+) (content string, isErr bool, tmeta tools.ToolCallMeta, fatalErr error) {
 	// Resolving the call name and parsing its arguments are PRE-execution and always fatal: an
 	// unadvertised tool name is a capability-boundary violation (ADR 002 — no operation is
 	// agent-callable unless advertised) and arguments that are not a JSON object are a broken call.
@@ -517,23 +518,25 @@ func (e *Executor) runAgentToolCall(
 	// there the default is fatal — an execution error is an observation only if an adapter marked it.
 	uses, err := resolveAgentToolCall(call.Name, advertised)
 	if err != nil {
-		return "", tools.ToolCallMeta{}, err
+		return "", false, tools.ToolCallMeta{}, err
 	}
 	args, err := parseToolCallArgs(call.Arguments)
 	if err != nil {
-		return "", tools.ToolCallMeta{}, fmt.Errorf("engine: tool call %q: %w", call.Name, err)
+		return "", false, tools.ToolCallMeta{}, fmt.Errorf("engine: tool call %q: %w", call.Name, err)
 	}
 	if _, err := e.checkAgentLoopRun(ctx2, pol, runID, step.ID, pctx, acc); err != nil {
-		return "", tools.ToolCallMeta{}, err // run-level budget breach — fatal
+		return "", false, tools.ToolCallMeta{}, err // run-level budget breach — fatal
 	}
 	out, tmeta, err := e.runToolStep(ctx2, runHandle, pol, wf, runID, step, args, loopPctx, uses, args)
 	if err != nil {
 		if toolErrorIsRecoverable(err) {
-			return recoverableToolObservation(err), tmeta, nil
+			// A recoverable failure is answered as a well-formed is_error tool_result so the model
+			// reads it as an error observation to correct from, never a successful output (#524).
+			return recoverableToolObservation(err), true, tmeta, nil
 		}
-		return "", tmeta, err
+		return "", false, tmeta, err
 	}
-	return encodeToolResultContent(out), tmeta, nil
+	return encodeToolResultContent(out), false, tmeta, nil
 }
 
 // maxRecoverableObservationBytes bounds the observation text handed back to the agent so a
