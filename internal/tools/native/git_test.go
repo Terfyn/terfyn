@@ -264,6 +264,294 @@ func TestGitPushBranch_refusesDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestGitCommit is the core of the #528 fix: an agent's edit lives only in the working tree, and
+// commit materializes it onto the branch so a later push has something to push. It reports the new
+// HEAD sha and committed=true.
+func TestGitCommit(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	// The commit uses the ambient git identity; configure it locally so the op does not depend on a
+	// developer's global gitconfig.
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+	before := gitCfg(t, root, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{"message": "apply the fix"})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out["committed"] != true {
+		t.Fatalf("result %#v, want committed=true", out)
+	}
+	after := gitCfg(t, root, "rev-parse", "HEAD")
+	if after == before {
+		t.Fatal("HEAD did not advance after commit")
+	}
+	if out["sha"] != after {
+		t.Fatalf("result sha = %v, want HEAD %q", out["sha"], after)
+	}
+	// A clean tree afterwards proves the change was staged and committed, not left behind.
+	if st := gitCfg(t, root, "status", "--porcelain"); st != "" {
+		t.Fatalf("working tree not clean after commit: %q", st)
+	}
+	if msg := gitCfg(t, root, "log", "-1", "--pretty=%s"); msg != "apply the fix" {
+		t.Fatalf("commit subject = %q, want %q", msg, "apply the fix")
+	}
+}
+
+// A no-op change is a graceful outcome, not a failure: commit reports committed=false with a reason
+// and leaves HEAD where it was, so a run does not crash when the deliverable already existed (#528).
+func TestGitCommit_nothingToCommit(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	before := gitCfg(t, root, "rev-parse", "HEAD")
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{"message": "nothing here"})
+	if err != nil {
+		t.Fatalf("commit with no changes must not fail: %v", err)
+	}
+	if out["committed"] != false || out["reason"] != "nothing to commit" {
+		t.Fatalf("result %#v, want committed=false reason=nothing to commit", out)
+	}
+	if after := gitCfg(t, root, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("HEAD moved on a no-op commit: %s -> %s", before, after)
+	}
+}
+
+// An explicit paths list stages only those files; other working-tree changes are left uncommitted.
+func TestGitCommit_explicitPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "later.txt"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "only keep.txt",
+		"paths":   []any{"keep.txt"},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out["committed"] != true {
+		t.Fatalf("result %#v", out)
+	}
+	// keep.txt is committed; later.txt remains an untracked working-tree change.
+	if st := gitCfg(t, root, "status", "--porcelain"); st != "?? later.txt" {
+		t.Fatalf("status = %q, want only later.txt left untracked", st)
+	}
+}
+
+// An explicit paths list scopes the commit itself, not just staging: an unrelated change already
+// staged in the index is not swept into the commit (it still commits only the requested paths).
+func TestGitCommit_explicitPathsDoNotSweepPreStaged(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	// An unrelated change is staged before the op runs, plus the requested change.
+	if err := os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("staged already\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "unrelated.txt")
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "only keep.txt",
+		"paths":   []any{"keep.txt"},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out["committed"] != true {
+		t.Fatalf("result %#v", out)
+	}
+	// The commit records keep.txt only; unrelated.txt is still a staged index entry, not committed.
+	files := gitCfg(t, root, "show", "--name-only", "--pretty=format:", "HEAD")
+	if strings.Contains(files, "unrelated.txt") {
+		t.Fatalf("commit swept in the pre-staged unrelated.txt: files=%q", files)
+	}
+	if !strings.Contains(files, "keep.txt") {
+		t.Fatalf("commit missing the requested keep.txt: files=%q", files)
+	}
+	if st := gitCfg(t, root, "status", "--porcelain", "unrelated.txt"); st != "A  unrelated.txt" {
+		t.Fatalf("unrelated.txt should remain staged (uncommitted), status=%q", st)
+	}
+}
+
+// commit requires a message.
+func TestGitCommit_missingMessage(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{}); err == nil {
+		t.Fatal("commit without a message must be rejected")
+	}
+}
+
+// The author override is actually applied to the commit metadata, not silently dropped.
+func TestGitCommit_authorApplied(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	// A committer identity is still needed even when the author is overridden.
+	gitCfg(t, root, "config", "user.email", "committer@example.com")
+	gitCfg(t, root, "config", "user.name", "Committer")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "authored fix",
+		"author":  "Ada Lovelace <ada@example.com>",
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if got := gitCfg(t, root, "log", "-1", "--pretty=%an <%ae>"); got != "Ada Lovelace <ada@example.com>" {
+		t.Fatalf("commit author = %q, want the override", got)
+	}
+	// The committer is still the ambient identity — only authorship was overridden.
+	if got := gitCfg(t, root, "log", "-1", "--pretty=%cn"); got != "Committer" {
+		t.Fatalf("committer = %q, want the ambient identity", got)
+	}
+}
+
+// A control character in the author is rejected before it can slip a newline into commit metadata.
+func TestGitCommit_rejectsControlCharAuthor(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "msg",
+		"author":  "Evil\nUser <e@example.com>",
+	})
+	if err == nil {
+		t.Fatal("an author with a control character must be rejected")
+	}
+	if !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("error should name the control character, got: %v", err)
+	}
+	// The bad input never produced a commit: HEAD is still the seed.
+	if n := gitCfg(t, root, "rev-list", "--count", "HEAD"); n != "1" {
+		t.Fatalf("a rejected author must not commit; commit count = %q", n)
+	}
+}
+
+// paths accepts a single string as well as an array, staging just that pathspec.
+func TestGitCommit_pathsAsString(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "later.txt"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "only keep.txt",
+		"paths":   "keep.txt",
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if st := gitCfg(t, root, "status", "--porcelain"); st != "?? later.txt" {
+		t.Fatalf("status = %q, want only later.txt left untracked", st)
+	}
+}
+
+// A malformed paths entry (empty or containing a control character) is rejected.
+func TestGitCommit_rejectsBadPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]any{
+		"empty entry":        []any{"  "},
+		"control-char entry": []any{"a\tb.txt"},
+		"non-string entry":   []any{42},
+		"wrong type":         42,
+	}
+	for name, paths := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+				"message": "msg",
+				"paths":   paths,
+			}); err == nil {
+				t.Fatalf("paths %v must be rejected", paths)
+			}
+		})
+	}
+	// None of the rejected inputs produced a commit.
+	if n := gitCfg(t, root, "rev-list", "--count", "HEAD"); n != "1" {
+		t.Fatalf("rejected paths must not commit; commit count = %q", n)
+	}
+}
+
+// TestGitCommit_thenPush is the whole #528 happy path: edit -> commit -> push lands a branch that is
+// ahead of its base, which is exactly the state pull_request.create needs (the missing commit was
+// why it returned 422 "No commits").
+func TestGitCommit_thenPush(t *testing.T) {
+	requireGit(t)
+	remote := t.TempDir()
+	gitCfg(t, remote, "init", "--bare")
+
+	root := initRepoWithCommit(t)
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	gitCfg(t, root, "remote", "add", "origin", remote)
+	gitCfg(t, root, "switch", "-c", "fix/528")
+	t.Setenv(envWorkspaceRoot, root)
+	reg := NewRegistry()
+
+	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reg.Dispatch(context.Background(), "commit", map[string]any{"message": "fix #528"}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, _, err := reg.Dispatch(context.Background(), "push_branch", map[string]any{"branch": "fix/528"}); err != nil {
+		t.Fatalf("push_branch: %v", err)
+	}
+	// The pushed branch carries the commit — the fix.txt blob is reachable from the remote ref.
+	if out, err := exec.Command("git", "--git-dir="+remote, "log", "-1", "--pretty=%s", "refs/heads/fix/528").Output(); err != nil {
+		t.Fatalf("remote should have the fix/528 commit: %v", err)
+	} else if got := strings.TrimSpace(string(out)); got != "fix #528" {
+		t.Fatalf("remote HEAD subject = %q, want %q", got, "fix #528")
+	}
+}
+
 func TestGit_missingRoot(t *testing.T) {
 	t.Setenv(envWorkspaceRoot, "")
 	if _, _, err := NewRegistry().Dispatch(context.Background(), "create_branch", map[string]any{"name": "x"}); err == nil {

@@ -33,6 +33,7 @@ var operationInputSchemas = map[string]json.RawMessage{
 
 	// git adapter
 	"create_branch": json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Branch name. Idempotent: if it already exists the op switches to it (not an error)."},"reset":{"type":"boolean","description":"Force-recreate the branch at base, discarding a prior attempt's commits. Opt-in (destructive); requires base."},"base":{"type":"string","description":"Start point (ref/branch/sha) to create the branch from, e.g. \"main\". Required when reset is true; otherwise optional (defaults to the current HEAD)."}},"required":["name"],"additionalProperties":false}`),
+	"commit":        json.RawMessage(`{"type":"object","properties":{"message":{"type":"string","description":"Commit message."},"paths":{"type":"array","items":{"type":"string"},"description":"Optional pathspecs to stage; omit to stage all working-tree changes (git add -A)."},"author":{"type":"string","description":"Optional author override in \"Name <email>\" form; omit to use the ambient git identity."}},"required":["message"],"additionalProperties":false}`),
 	"push_branch":   json.RawMessage(`{"type":"object","properties":{"branch":{"type":"string","description":"Branch to push to the configured remote."}},"required":["branch"],"additionalProperties":false}`),
 }
 

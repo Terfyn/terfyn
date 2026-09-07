@@ -43,6 +43,7 @@ var operationCatalog = map[string][]string{
 	"message.send":               {"channel", "text", "thread_ts"},
 	"message.update":             {"channel", "ts", "text"},
 	"create_branch":              {"name", "reset", "base"},
+	"commit":                     {"message", "paths", "author"},
 	"push_branch":                {"branch"},
 	"read_file":                  {"path", "offset", "limit"},
 	"write_file":                 {"path", "content"},
