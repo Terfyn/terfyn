@@ -1234,10 +1234,15 @@ state plus the audit chain is) and not a project source — under [ADR 007](adr/
 (`internal/project/loader.go`).
 
 `--output DIR` instead writes a **loadable** project. Because `.agent` is the sole executable source,
-that directory is a consolidated `project.agent` (plus a `schemas/` directory for typed inputs/outputs),
-re-raised from the graph via the same lossless-or-refuses path as `terfyn migrate --to-agent`; so
-`terfyn validate/plan/apply/run --project DIR` works (#507). The project's `metadata.name` is not
-preserved (`.agent` has no project-name authoring form) — a reloaded project is named after DIR.
+that directory is a consolidated `project.agent` (plus a `schemas/` directory holding each resolved
+agent input/output and workflow input schema), re-raised from the graph via the same lossless-or-refuses
+path as `terfyn migrate --to-agent`; so `terfyn validate/plan/apply/run --project DIR` works (#507). Some
+things are not preserved, all inherited from the graph model and `raise` (the same as `migrate --to-agent`):
+the project's `metadata.name` (`.agent` has no project-name authoring form, so a reloaded project is named
+after DIR); a workflow's declared return type (`-> Type` is not carried in the graph, so a reloaded
+workflow is untyped on its output — its inputs and every agent input/output survive); and a workflow's
+`parallel` concurrency (`raise` linearizes the step DAG, so parallel steps reload as a behavior-equivalent
+sequential chain).
 
 ### MVP
 

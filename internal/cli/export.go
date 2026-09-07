@@ -24,10 +24,14 @@ project.yaml.
 
 Pass --output DIR to write a loadable project instead. Because .agent is the sole executable
 source under ADR 007, the directory is a consolidated project.agent (plus a schemas/ directory
-for any typed inputs/outputs), so 'terfyn validate/plan/apply/run --project DIR' works. DIR is
-treated as generated output: its schemas/ directory is replaced, and a directory that already
-contains a foreign .agent source is refused. The project's metadata.name is not preserved
-(.agent has no project-name authoring form); a reloaded project is named after DIR.`,
+holding each resolved agent input/output and workflow input schema), so
+'terfyn validate/plan/apply/run --project DIR' works. DIR is treated as generated output: its
+schemas/ directory is replaced, and a directory that already contains a foreign .agent source
+is refused. Some things are not preserved (inherited raise/ADR-007 limitations, the same as
+'terfyn migrate --to-agent', not new): the project's metadata.name (.agent has no project-name
+form; a reloaded project is named after DIR), a workflow's declared return type (-> Type is not
+carried in the graph, so the reloaded workflow is untyped on its output), and a workflow's
+'parallel' concurrency (raise linearizes the step DAG, so parallel steps reload as a chain).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runExport(cmd, format, output)
 		},

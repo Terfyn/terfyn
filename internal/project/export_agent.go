@@ -21,15 +21,26 @@ const exportSchemasDir = "schemas"
 
 // WriteAgentProjectDir writes the graph as a loadable .agent project under dir (issue #507): a single
 // consolidated project.agent holding every resource, plus a schemas/ directory with one JSON Schema
-// file per resolved typed agent/workflow input or output. Under ADR 007 .agent is the sole executable
+// file per resolved agent input/output and workflow input. Under ADR 007 .agent is the sole executable
 // source, so — unlike a project.yaml directory, which LoadProject now refuses — this is a directory
 // LoadProject(dir) can re-execute (`terfyn validate/plan/apply/run --project dir`). The source is
 // re-raised from the graph via the same lossless-or-refuses path `terfyn migrate --to-agent` uses:
 // a construct with no .agent authoring form is an error, never a silent lossy write.
 //
-// The project's metadata.name is NOT preserved — .agent has no project-name authoring surface (ADR
-// 007), so a reloaded project takes its name from the export directory. Positions and the import list
-// are likewise not identity.
+// Some things are NOT preserved, all inherited from the graph model and raise — the same behavior
+// `terfyn migrate --to-agent` has, not new here:
+//
+//   - the project's metadata.name — .agent has no project-name authoring surface, so a reloaded
+//     project takes its name from the export directory;
+//   - a workflow's declared return type (`-> Type`) — the graph's WorkflowOutput stores only the
+//     return value, not its schema, and raise emits no `-> Type`, so a reloaded workflow is untyped
+//     on its output (its inputs and every agent input/output are preserved);
+//   - a workflow's `parallel` concurrency — raise linearizes the step DAG into a valid topological
+//     order and emits no `parallel` block, so parallel steps come back as a sequential chain (the
+//     result is behavior-equivalent for a pure DAG but no longer runs those steps concurrently).
+//
+// Fixing the latter two needs the graph to persist the return schema / a fan-out marker and raise to
+// emit them; until then export inherits the gap. Positions and the import list are likewise not identity.
 //
 // dir is treated as generated output and must form a CLOSED set on reload:
 //
@@ -65,7 +76,29 @@ func WriteAgentProjectDir(dir string, g *spec.ProjectGraph) error {
 	if err := writeExportedSchemas(dir, g); err != nil {
 		return err
 	}
-	return os.WriteFile(target, []byte(source), 0o644)
+	// Write project.agent last, and atomically (temp + rename): if a schema write above failed we
+	// never got here, and the project source — the file LoadProject keys on — lands whole or not at
+	// all, so a mid-write failure cannot leave a half-written project.agent over the fresh schemas/.
+	return writeFileAtomic(target, []byte(source))
+}
+
+// writeFileAtomic writes data to target via a temp file in the same directory and a rename, so a
+// reader never observes a partially written file and a failed write leaves the prior file intact.
+func writeFileAtomic(target string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".terfyn-export-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, target)
 }
 
 // refuseForeignAgentSources refuses dir when it already holds any .agent file other than the export

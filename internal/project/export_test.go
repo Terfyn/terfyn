@@ -46,17 +46,45 @@ func canonicalGraph(t *testing.T, g *spec.ProjectGraph) string {
 // asserts an equivalent graph, modulo the project name, which .agent cannot author (ADR 007).
 func TestExport_RoundTripsThroughLoader(t *testing.T) {
 	root := t.TempDir()
+	// A realistic fixture: a declared tool, two tool calls, an agent step, a multi-step dependency
+	// chain with interpolated args, a policy + effects clause, and an object return — the constructs
+	// most likely to expose a raise -> print -> parse -> lower gap through the user-facing loader. It
+	// is deliberately a linear chain: raise linearizes the step DAG and emits no `parallel` block, so a
+	// parallel workflow does NOT round-trip its concurrency (it comes back as a chain) — a known,
+	// documented raise/migrate limitation covered separately by TestExport_ParallelStepsSerialize.
 	writeFile(t, root, "src/pr.agent", `
-agent Reviewer {
-    model openai/gpt-5
-    grants {
-        tool.github.read_pr
+tool github {
+    type native
+    safety {
+        trusted true
+        sideEffects false
+    }
+    operations {
+        get_pr { effects { github.read } }
+        post_comment { effects { github.write external.visible } }
     }
 }
 
-workflow Review(input: PullRequest) -> Review {
-    pr = Reviewer(input)
-    return pr
+policy guarded {
+    effects {
+        permit { github.read github.write external.visible }
+    }
+}
+
+agent Reviewer {
+    model openai/gpt-5
+    grants {
+        tool.github.get_pr
+    }
+}
+
+workflow Review(input: PullRequest) -> Report policy guarded
+    effects { github.read github.write external.visible }
+{
+    pr = github.get_pr(input)
+    review = Reviewer(pr)
+    github.post_comment(review)
+    return review
 }
 `)
 
@@ -81,6 +109,67 @@ workflow Review(input: PullRequest) -> Review {
 	if a, b := canonicalGraph(t, g1), canonicalGraph(t, g2); a != b {
 		t.Fatalf("graph changed across export round-trip:\n before: %s\n after:  %s", a, b)
 	}
+}
+
+// TestExport_ParallelStepsSerialize pins a KNOWN limitation the export inherits from raise/migrate:
+// raise linearizes the step DAG and emits no `parallel` block, so a workflow's parallel steps come
+// back from export → reload as a sequential chain — the concurrency is lost, not preserved and not
+// refused. This is why TestExport_RoundTripsThroughLoader uses a linear fixture. The test documents
+// the behavior so a future fix (raise emitting `parallel`) flips it deliberately, not by accident.
+func TestExport_ParallelStepsSerialize(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.agent", `
+agent A { model openai/gpt-5 }
+agent B { model openai/gpt-5 }
+
+workflow Fan(input: Thing) -> Thing {
+    parallel {
+        a = A(input)
+        b = B(input)
+    }
+    return a
+}
+`)
+	g1, err := LoadProject(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// In the source both parallel steps fork from the workflow input — neither depends on the other.
+	if got := stepNeeds(t, g1, "Fan", "b"); len(got) != 0 {
+		t.Fatalf("precondition: source step b should have no needs (parallel with a), got %v", got)
+	}
+
+	out := filepath.Join(t.TempDir(), "exported")
+	if err := WriteAgentProjectDir(out, g1); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	g2, err := LoadProject(out)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	// After the round-trip the parallel block is gone: b now depends on a (a sequential chain), so the
+	// two steps no longer run concurrently. If this ever changes to preserve `parallel`, update the
+	// docs/CHANGELOG that call the limitation out, and revisit the linear round-trip fixture.
+	if got := stepNeeds(t, g2, "Fan", "b"); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("expected reloaded step b to be serialized after a (concurrency lost), got needs %v", got)
+	}
+}
+
+// stepNeeds returns the declared needs of a workflow step by id, failing the test if absent.
+func stepNeeds(t *testing.T, g *spec.ProjectGraph, workflow, stepID string) []string {
+	t.Helper()
+	wf := g.Workflows[workflow]
+	if wf == nil {
+		t.Fatalf("workflow %q not found", workflow)
+	}
+	for _, s := range wf.Spec.Steps {
+		if s.ID == stepID {
+			return s.Needs
+		}
+	}
+	t.Fatalf("step %q not found in workflow %q", stepID, workflow)
+	return nil
 }
 
 // TestWriteAgentProjectDir_ReExportSmallerGraphLeavesNoLeftovers proves the output directory is a
