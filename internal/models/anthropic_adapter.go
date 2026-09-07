@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -44,9 +45,22 @@ func (a *anthropicClient) Generate(ctx context.Context, req GenerateRequest) (Ge
 	}
 	out, err := a.inner.Generate(ctx, innerReq)
 	if err != nil {
-		return GenerateResponse{}, err
+		return GenerateResponse{}, annotateAnthropicRequestError(err, innerReq)
 	}
 	resp := mapFromAnthropicResponse(out)
 	resp.Meta.CostUSD = estimateAnthropicCostUSD(req.Model, resp.Meta.PromptTokens, resp.Meta.CompletionTokens)
 	return resp, nil
+}
+
+// annotateAnthropicRequestError attaches redacted structural diagnostics to a provider 4xx (issue
+// #524). A 4xx means the provider rejected the request we sent, and a bare "Invalid request data"
+// carries no clue why; the appended context (message count, trailing block types, tool_use/tool_result
+// pairing) makes it diagnosable. Non-4xx errors (5xx, transport, context cancel) are returned
+// unchanged — they are not about request construction.
+func annotateAnthropicRequestError(err error, req anthropic.Request) error {
+	var apiErr *anthropic.APIError
+	if !errors.As(err, &apiErr) || !apiErr.IsClientError() {
+		return err
+	}
+	return fmt.Errorf("%w [request: %s]", err, diagnoseAnthropicRequest(req.Messages))
 }

@@ -71,7 +71,63 @@ func mapFromAnthropicResponse(in anthropic.Response) GenerateResponse {
 	}
 }
 
+// unexecutedToolResultContent answers a tool_use the engine never paired with a result. Anthropic
+// rejects a request whose assistant tool_use block has no matching tool_result in the next user turn
+// (an opaque HTTP 400), so a failed or malformed call left dangling would poison the *next* generate.
+// The backstop below synthesizes this well-formed is_error result instead (issue #524).
+const unexecutedToolResultContent = `{"error":"tool call was not executed"}`
+
+// ensureToolResultsAnswered guarantees every assistant tool_use is answered by a tool_result in the
+// immediately-following user turn, synthesizing a well-formed is_error result for any that the caller
+// left unanswered. This is a robustness backstop, not the normal path — the engine already pairs every
+// executed call — but it means a malformed/failed tool call can never leave a dangling tool_use that
+// the provider rejects on the next request (issue #524). Ordering is preserved: missing results are
+// prepended to an existing follow-up tool-result turn, or a fresh user turn is inserted right after
+// the tool_use turn when none follows.
+func ensureToolResultsAnswered(msgs []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, 0, len(msgs))
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
+		out = append(out, m)
+		if len(m.ToolCalls) == 0 {
+			continue
+		}
+		// Answers may span several consecutive following tool-result turns (OpenAI-style, one result
+		// per turn, merged into one Anthropic user turn later), so gather the whole run.
+		answered := make(map[string]bool)
+		firstResults := -1
+		for j := i + 1; j < len(msgs) && len(msgs[j].ToolResults) > 0 && len(msgs[j].ToolCalls) == 0; j++ {
+			if firstResults < 0 {
+				firstResults = j
+			}
+			for _, r := range msgs[j].ToolResults {
+				answered[strings.TrimSpace(r.ToolCallID)] = true
+			}
+		}
+		var missing []ToolResult
+		for _, c := range m.ToolCalls {
+			id := strings.TrimSpace(c.ID)
+			if id == "" || answered[id] {
+				continue
+			}
+			missing = append(missing, ToolResult{ToolCallID: id, Content: unexecutedToolResultContent, IsError: true})
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		if firstResults >= 0 {
+			next := msgs[firstResults]
+			next.ToolResults = append(append([]ToolResult(nil), missing...), next.ToolResults...)
+			msgs[firstResults] = next
+			continue
+		}
+		out = append(out, ChatMessage{Role: "user", ToolResults: missing})
+	}
+	return out
+}
+
 func mapAnthropicMessages(msgs []ChatMessage) (system string, out []anthropic.ChatMessage, err error) {
+	msgs = ensureToolResultsAnswered(msgs)
 	var sys []string
 	for _, m := range msgs {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
@@ -282,6 +338,7 @@ func encodeAnthropicToolResults(results []ToolResult) ([]anthropic.ContentBlock,
 			Type:      "tool_result",
 			ToolUseID: id,
 			Content:   r.Content,
+			IsError:   r.IsError,
 		})
 	}
 	return out, nil

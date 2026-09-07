@@ -732,6 +732,11 @@ func TestRun_agentToolLoop_toolCallErrorEmitsExecution(t *testing.T) {
 	if !strings.Contains(obs, `"error"`) || !strings.Contains(obs, "does not exist") {
 		t.Fatalf("recovery observation is not the constructed {\"error\":…} object: %q", obs)
 	}
+	// The recoverable failure is answered by a well-formed is_error tool_result, so the model treats
+	// it as an error observation and a failed call can never leave a dangling tool_use (issue #524).
+	if r := findToolResult(second, "c1"); r == nil || !r.IsError {
+		t.Fatalf("recovered tool result for c1 must be is_error: %+v", r)
+	}
 
 	// (2) The security contract: none of the secrets from the underlying error appear anywhere in the
 	// second Generate the provider sees (the channel the old test never inspected).
@@ -779,14 +784,21 @@ func TestRun_agentToolLoop_unmarkedToolErrorAborts(t *testing.T) {
 
 // findToolResultContent returns the tool-result content for callID in req, or "" if absent.
 func findToolResultContent(req models.GenerateRequest, callID string) string {
+	if r := findToolResult(req, callID); r != nil {
+		return r.Content
+	}
+	return ""
+}
+
+func findToolResult(req models.GenerateRequest, callID string) *models.ToolResult {
 	for _, msg := range req.Messages {
-		for _, r := range msg.ToolResults {
-			if r.ToolCallID == callID {
-				return r.Content
+		for i := range msg.ToolResults {
+			if msg.ToolResults[i].ToolCallID == callID {
+				return &msg.ToolResults[i]
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 // assertNoSecretsInRequest fails if any known tool-error secret appears anywhere in req — a message

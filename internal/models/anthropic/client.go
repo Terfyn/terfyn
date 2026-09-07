@@ -82,7 +82,7 @@ func (c *Client) Generate(ctx context.Context, req Request) (Response, error) {
 	}
 	durationMs := time.Since(start).Milliseconds()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Response{DurationMs: durationMs}, fmt.Errorf("anthropic: HTTP %d: %s", resp.StatusCode, truncateErrBody(b))
+		return Response{DurationMs: durationMs}, &APIError{StatusCode: resp.StatusCode, Body: truncateErrBody(b)}
 	}
 
 	out, err := parseResponse(b)
@@ -92,6 +92,24 @@ func (c *Client) Generate(ctx context.Context, req Request) (Response, error) {
 	}
 	out.DurationMs = durationMs
 	return out, nil
+}
+
+// APIError is a non-2xx Messages API response. It preserves the status code so a caller can attach
+// diagnostic context on a 4xx (a request the provider rejected — issue #524) while keeping the same
+// "anthropic: HTTP <code>: <body>" Error() string the adapter has always surfaced.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("anthropic: HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+// IsClientError reports whether the status is a 4xx — a request the provider rejected as malformed,
+// as opposed to a 5xx/transport failure that a retry might clear.
+func (e *APIError) IsClientError() bool {
+	return e != nil && e.StatusCode >= 400 && e.StatusCode < 500
 }
 
 func truncateErrBody(b []byte) string {
