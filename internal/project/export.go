@@ -3,22 +3,12 @@ package project
 import (
 	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/Terfyn/terfyn/internal/spec"
 )
-
-// exportResourcesDir is the directory the exported project.yaml imports; it
-// holds one YAML file per non-Project resource. Each file is a single document —
-// the loader rejects multi-document files (spec.ErrMultipleDocuments) — so the
-// on-disk form is one resource per file even though the stdout stream is a
-// single multi-document stream.
-const exportResourcesDir = "resources"
 
 // ExportYAML materializes a resource graph as a multi-document YAML stream (ADR
 // 003 decision 1: YAML is compilation output produced on demand, never written
@@ -30,8 +20,9 @@ const exportResourcesDir = "resources"
 //
 // The emitted Project clears spec.imports: every resource is inline in the
 // stream, so the import list (which named the original source files) would be
-// stale. This stream is for inspection and handoff; WriteProjectDir produces the
-// loadable on-disk form.
+// stale. This stream is one-way YAML for inspection and handoff; a loadable
+// on-disk project is produced by WriteAgentProjectDir (a .agent project, the
+// sole executable source under ADR 007).
 func ExportYAML(g *spec.ProjectGraph) ([]byte, error) {
 	if g == nil {
 		return nil, fmt.Errorf("project: nil graph")
@@ -46,93 +37,12 @@ func ExportYAML(g *spec.ProjectGraph) ([]byte, error) {
 	return marshalDocs(docs)
 }
 
-// WriteProjectDir writes the graph as a loadable project under dir: a
-// project.yaml holding the Project resource (importing the resources/ directory)
-// and one single-document YAML file per other resource under resources/.
-// LoadProject(dir) reconstructs an identical graph (modulo source positions and
-// the rewritten import list, which are not identity). Each resource is its own
-// file because the loader rejects multi-document files.
-//
-// dir is treated as generated output, so it must form a CLOSED set on reload:
-//
-//   - a dir that already contains .agent sources is refused — LoadProject scans
-//     the whole tree for .agent and would merge those alongside the exported
-//     YAML, duplicating every resource;
-//   - the resources/ directory is fully replaced, so re-exporting a smaller graph
-//     into the same dir cannot leave an orphaned resource file that reloads;
-//   - two resources that would sanitize to the same filename are an error rather
-//     than a silent overwrite.
-func WriteProjectDir(dir string, g *spec.ProjectGraph) error {
-	if g == nil {
-		return fmt.Errorf("project: nil graph")
-	}
-	if agents, err := discoverAgentFiles(dir); err == nil && len(agents) > 0 {
-		return fmt.Errorf("project: refusing to export into %q: it contains .agent sources, which LoadProject would merge alongside the exported YAML (duplicate resources) — export to an empty or non-source directory", dir)
-	}
-
-	resDir := filepath.Join(dir, exportResourcesDir)
-	// Treat resources/ as generated output: remove any prior contents so a
-	// re-export of a smaller graph leaves no orphaned resource files.
-	if err := os.RemoveAll(resDir); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(resDir, 0o755); err != nil {
-		return err
-	}
-
-	proj := projectResource(g)
-	proj.Spec.Imports = []string{exportResourcesDir}
-	projBytes, err := marshalDocs([]any{proj})
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "project.yaml"), projBytes, 0o644); err != nil {
-		return err
-	}
-
-	written := map[string]string{}
-	for _, r := range nonProjectResourceEntries(g) {
-		name := r.kind + "-" + sanitizeFilename(r.name) + ".yaml"
-		if prev, clash := written[name]; clash {
-			return fmt.Errorf("project: resources %q and %q both map to file %q; rename one to export", prev, r.kind+"/"+r.name, name)
-		}
-		written[name] = r.kind + "/" + r.name
-		body, err := marshalDocs([]any{r.resource})
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(resDir, name), body, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // resourceEntry pairs a resource with its kind and name for deterministic
 // per-file emission.
 type resourceEntry struct {
 	kind     string
 	name     string
 	resource any
-}
-
-// sanitizeFilename replaces characters unsafe in a filename. Resource names are
-// DNS-style identifiers in practice, but a defensive replacement keeps the write
-// robust for any metadata.name.
-func sanitizeFilename(name string) string {
-	repl := func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			return r
-		default:
-			return '_'
-		}
-	}
-	out := strings.Map(repl, name)
-	if out == "" {
-		return "unnamed"
-	}
-	return out
 }
 
 // projectResource reconstructs the Project resource envelope from the graph's

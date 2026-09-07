@@ -779,8 +779,10 @@ reconstructed from applied spec (`graphFromApplied`, and the #207 snapshot). So 
 interchange codec preserves it too (ADR 003): `ToolSpec.MarshalYAML` emits an explicit
 `operations: {}` for a declared-but-empty manifest — so a `terfyn export` and the deployment
 snapshot both carry the closed world rather than dropping the empty mapping and silently reopening
-the callable set. (`terfyn export` is one-way output; the round-trip is through the private YAML
-codec and the applied-spec reconstruction, not a re-load of exported YAML as project source — ADR 007.)
+the callable set. The closed-empty manifest also survives `terfyn export --output DIR` (a loadable
+`.agent` project, #507) reloaded through `LoadProject`: `raise` emits `operations {}` and the loader
+reconstructs the closed manifest — so the exported project agrees with the deployment snapshot and
+`CheckToolCall`, not just the private YAML codec.
 
 Runtime enforcement is on the policy path
 (`[policy.PolicyEvaluator.CheckToolCall]` → `ReasonOperationNotInManifest`, in **both** the
@@ -1218,18 +1220,29 @@ yes
 
 ## `terfyn export`
 
-Materialize the compiled resource graph as YAML (ADR 003): compilation output produced on
-demand, never written to disk by default.
+Materialize the compiled resource graph (ADR 003): compilation output produced on demand,
+never written to disk by default.
 
 ```bash
-terfyn export --format yaml            # multi-document YAML stream to stdout
-terfyn export --format yaml --output out/   # a YAML project directory (interchange output; NOT executable source — ADR 007)
+terfyn export --format yaml            # multi-document YAML stream to stdout (one-way interchange)
+terfyn export --output out/            # a loadable .agent project directory (re-executable — #507)
 ```
 
-The generated YAML is not the trustworthy record (applied deployment state plus the audit chain
-is) and is not committed. It is a **one-way output**: under [ADR 007](adr/007-remove-yaml-ingestion.md)
-`.agent` is the only executable source, so `LoadProject` refuses a `project.yaml` (`internal/project/loader.go`)
-and an exported directory is for inspection/interchange, not re-execution — see #507.
+The default stdout form is YAML: **one-way output**, not the trustworthy record (applied deployment
+state plus the audit chain is) and not a project source — under [ADR 007](adr/007-remove-yaml-ingestion.md)
+`.agent` is the only executable source, so `LoadProject` refuses a `project.yaml`
+(`internal/project/loader.go`).
+
+`--output DIR` instead writes a **loadable** project. Because `.agent` is the sole executable source,
+that directory is a consolidated `project.agent` (plus a `schemas/` directory holding each resolved
+agent input/output and workflow input schema), re-raised from the graph via the same lossless-or-refuses
+path as `terfyn migrate --to-agent`; so `terfyn validate/plan/apply/run --project DIR` works (#507). Some
+things are not preserved, all inherited from the graph model and `raise` (the same as `migrate --to-agent`):
+the project's `metadata.name` (`.agent` has no project-name authoring form, so a reloaded project is named
+after DIR); a workflow's declared return type (`-> Type` is not carried in the graph, so a reloaded
+workflow is untyped on its output — its inputs and every agent input/output survive); and a workflow's
+`parallel` concurrency (`raise` linearizes the step DAG, so parallel steps reload as a behavior-equivalent
+sequential chain).
 
 ### MVP
 
