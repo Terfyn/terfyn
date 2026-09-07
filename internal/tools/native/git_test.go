@@ -355,6 +355,48 @@ func TestGitCommit_explicitPaths(t *testing.T) {
 	}
 }
 
+// An explicit paths list scopes the commit itself, not just staging: an unrelated change already
+// staged in the index is not swept into the commit (it still commits only the requested paths).
+func TestGitCommit_explicitPathsDoNotSweepPreStaged(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	// An unrelated change is staged before the op runs, plus the requested change.
+	if err := os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("staged already\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "unrelated.txt")
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "only keep.txt",
+		"paths":   []any{"keep.txt"},
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out["committed"] != true {
+		t.Fatalf("result %#v", out)
+	}
+	// The commit records keep.txt only; unrelated.txt is still a staged index entry, not committed.
+	files := gitCfg(t, root, "show", "--name-only", "--pretty=format:", "HEAD")
+	if strings.Contains(files, "unrelated.txt") {
+		t.Fatalf("commit swept in the pre-staged unrelated.txt: files=%q", files)
+	}
+	if !strings.Contains(files, "keep.txt") {
+		t.Fatalf("commit missing the requested keep.txt: files=%q", files)
+	}
+	if st := gitCfg(t, root, "status", "--porcelain", "unrelated.txt"); st != "A  unrelated.txt" {
+		t.Fatalf("unrelated.txt should remain staged (uncommitted), status=%q", st)
+	}
+}
+
 // commit requires a message.
 func TestGitCommit_missingMessage(t *testing.T) {
 	requireGit(t)

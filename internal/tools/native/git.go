@@ -246,10 +246,10 @@ func gitCommit(ctx context.Context, with map[string]any) (map[string]any, error)
 		return nil, err
 	}
 
-	// Nothing staged is a graceful outcome, not a failure: report it so the workflow can skip the
-	// push instead of a 422 later. Checked against the index (staged), so unrelated unstaged changes
-	// left over when explicit paths were given do not count as "something to commit".
-	staged, err := hasStagedChanges(ctx, root)
+	// Nothing to commit is a graceful outcome, not a failure: report it so the workflow can skip the
+	// push instead of a 422 later. Scoped to the same pathspecs as the commit (against the index), so
+	// unrelated staged or unstaged changes never count as — nor get swept into — "something to commit".
+	staged, err := hasStagedChanges(ctx, root, paths)
 	if err != nil {
 		return nil, fmt.Errorf("native: commit: %w", err)
 	}
@@ -261,10 +261,16 @@ func gitCommit(ctx context.Context, with map[string]any) (map[string]any, error)
 	if author != "" {
 		args = append(args, "--author="+author)
 	}
+	// Scope the commit to the requested pathspecs (after "--") so it records exactly what was staged
+	// here and never sweeps in an unrelated pre-staged index entry; empty paths commits the whole index.
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, paths...)
+	}
 	if _, err := runGit(ctx, root, args...); err != nil {
 		return nil, err
 	}
-	sha := strings.TrimSpace(mustHeadSHA(ctx, root))
+	sha := strings.TrimSpace(headSHA(ctx, root))
 	out := map[string]any{"committed": true, "message": message}
 	if sha != "" {
 		out["sha"] = sha
@@ -272,12 +278,18 @@ func gitCommit(ctx context.Context, with map[string]any) (map[string]any, error)
 	return out, nil
 }
 
-// hasStagedChanges reports whether the index differs from HEAD (something is staged to commit).
-// `git diff --cached --quiet` exits 0 when the index is clean and 1 when it has staged changes;
-// any other exit is a real error. Distinguishing exit 1 from failure is why this does not go
-// through runGit (which treats every non-zero exit as an error).
-func hasStagedChanges(ctx context.Context, root string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+// hasStagedChanges reports whether the index differs from HEAD (something is staged to commit),
+// restricted to paths when non-empty so the check matches the scope of the commit that follows.
+// `git diff --cached --quiet` exits 0 when the (scoped) index is clean and 1 when it has staged
+// changes; any other exit is a real error. Distinguishing exit 1 from failure is why this does not
+// go through runGit (which treats every non-zero exit as an error).
+func hasStagedChanges(ctx context.Context, root string, paths []string) (bool, error) {
+	args := []string{"diff", "--cached", "--quiet"}
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, paths...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
 	err := cmd.Run()
 	if err == nil {
@@ -290,9 +302,9 @@ func hasStagedChanges(ctx context.Context, root string) (bool, error) {
 	return false, fmt.Errorf("git diff --cached: %w", err)
 }
 
-// mustHeadSHA returns the current HEAD sha, or "" if it cannot be resolved. The commit already
+// headSHA returns the current HEAD sha, or "" if it cannot be resolved. The commit already
 // succeeded, so a failure here only omits the sha from the result — it is not a run-ending error.
-func mustHeadSHA(ctx context.Context, root string) string {
+func headSHA(ctx context.Context, root string) string {
 	out, err := runGit(ctx, root, "rev-parse", "HEAD")
 	if err != nil {
 		return ""
@@ -300,10 +312,10 @@ func mustHeadSHA(ctx context.Context, root string) string {
 	return out
 }
 
-// pathsFromWith reads an optional pathspec list. It accepts a JSON array (arriving as []any), a
-// []string, or a single string for convenience; absent/nil yields nil (stage everything). Each
-// entry must be a non-empty string with no control characters — pathspecs are passed after "--",
-// so this is hygiene, not injection defense.
+// pathsFromWith reads an optional pathspec list. It accepts a JSON array (arriving as []any) or a
+// single string for convenience; absent/nil yields nil (stage everything). Each entry must be a
+// non-empty string with no control characters — pathspecs are passed after "--", so this is
+// hygiene, not injection defense.
 func pathsFromWith(with map[string]any, key string) ([]string, error) {
 	v, ok := with[key]
 	if !ok || v == nil {
@@ -313,11 +325,6 @@ func pathsFromWith(with map[string]any, key string) ([]string, error) {
 	switch t := v.(type) {
 	case []any:
 		raw = t
-	case []string:
-		raw = make([]any, len(t))
-		for i, s := range t {
-			raw[i] = s
-		}
 	case string:
 		raw = []any{t}
 	default:
