@@ -148,7 +148,9 @@ func detailLinesFor(evType trace.EventType, data map[string]any) []string {
 }
 
 // detailArgsLines renders a tool call's arguments. An edit (old_string→new_string) is shown as a
-// unified diff — the single most useful thing to see (#525) — everything else as key: value lines.
+// unified diff — the single most useful thing to see (#525); everything else as key: value lines,
+// headed by the tool label so a non-edit selection (run_tests, grep, …) shows which tool the args
+// belong to instead of a bare `command: …`.
 func detailArgsLines(uses string, args map[string]any) []string {
 	if old, oOK := args["old_string"].(string); oOK {
 		if nw, nOK := args["new_string"].(string); nOK {
@@ -156,7 +158,21 @@ func detailArgsLines(uses string, args map[string]any) []string {
 			return detailEditDiffLines(path, old, nw)
 		}
 	}
-	return detailMapLines(args)
+	lines := detailMapLines(args)
+	if label := detailToolLabel(uses); label != "" && len(lines) > 0 {
+		lines = append([]string{verboseDetailIndent + label}, lines...)
+	}
+	return lines
+}
+
+// detailToolLabel shortens a uses string to its operation name for a detail header: the segment after
+// the last '.' (tool.workspace.run_tests → run_tests), or the whole string when it has no dot.
+func detailToolLabel(uses string) string {
+	uses = strings.TrimSpace(uses)
+	if i := strings.LastIndex(uses, "."); i >= 0 && i < len(uses)-1 {
+		return uses[i+1:]
+	}
+	return uses
 }
 
 // detailEditDiffLines renders an edit as a compact unified-diff hunk: the path, then old lines

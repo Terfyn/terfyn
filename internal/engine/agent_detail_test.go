@@ -77,6 +77,38 @@ func TestRun_traceDetail_surfacesSubstance(t *testing.T) {
 	}
 }
 
+// TestRun_traceDetail_longEditSurvivesDetailBudget proves the feature is USEFUL, not just safe: under
+// the detail budget (the ceilings a --trace-detail run applies) an edit larger than the 256-char audit
+// default survives to be shown, instead of being cut to a stub (#525).
+func TestRun_traceDetail_longEditSurvivesDetailBudget(t *testing.T) {
+	graph := agentLoopGraph(t, spec.AgentSpec{Tools: []string{"helper"}}, spec.PolicySpec{})
+	old := strings.Repeat("a", 2000)
+	nw := strings.Repeat("b", 2000)
+	mock := &models.MockClient{
+		Script: []models.MockTurn{
+			{ToolCalls: []models.ToolCall{{
+				ID:        "c1",
+				Name:      "helper",
+				Arguments: json.RawMessage(`{"path":"foo.go","old_string":"` + old + `","new_string":"` + nw + `"}`),
+			}}},
+			{Content: `{"summary":"done"}`},
+		},
+	}
+	extra := &tools.MockExecutor{Resp: tools.ToolCallResponse{Output: map[string]any{"ok": true}}}
+	_, events, err := runAgentLoopCfg(t, graph, mock, extra, func(e *Executor) {
+		e.TraceDetail = true
+		e.Trace.Redaction = trace.ApplyDetailBudget(e.Trace.Redaction) // what the runtime applies for a --trace-detail run
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	sel, _ := requireToolTracePair(t, events, "helper", "tool.helper.default")
+	args := eventData(t, sel)[trace.FieldToolArgs].(map[string]any)
+	if got := args["old_string"].(string); len(got) < 2000 {
+		t.Fatalf("edit old_string was truncated under the detail budget: len=%d", len(got))
+	}
+}
+
 // TestRun_traceDetail_offKeepsTerseShape proves the default (no --trace-detail) is unchanged: none of
 // the substance fields appear, so the audit-event byte shape and privacy posture are preserved.
 func TestRun_traceDetail_offKeepsTerseShape(t *testing.T) {

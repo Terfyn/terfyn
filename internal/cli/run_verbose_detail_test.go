@@ -43,14 +43,19 @@ func TestVerboseDetailLines(t *testing.T) {
 		}
 	})
 
-	t.Run("non-edit args render as key: value", func(t *testing.T) {
+	t.Run("non-edit args render as key: value headed by the tool label", func(t *testing.T) {
 		ev := trace.StreamEvent{Type: trace.EventToolSelection, Data: map[string]any{
 			"uses":              "tool.workspace.run_tests",
 			trace.FieldToolArgs: map[string]any{"command": "go test ./..."},
 		}}
-		joined := strings.Join(verboseDetailLines(ev), "\n")
+		lines := verboseDetailLines(ev)
+		joined := strings.Join(lines, "\n")
 		if !strings.Contains(joined, "command: go test ./...") {
 			t.Fatalf("run_tests command not rendered: %q", joined)
+		}
+		// The uses parameter labels the block so it's clear which tool the args belong to (finding #1).
+		if !strings.Contains(lines[0], "run_tests") {
+			t.Fatalf("non-edit args block not headed by the tool label: %q", joined)
 		}
 	})
 
