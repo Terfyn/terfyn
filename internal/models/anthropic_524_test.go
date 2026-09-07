@@ -93,6 +93,62 @@ func TestAnthropic_DanglingToolUse_BackstopAnswered(t *testing.T) {
 	})
 }
 
+// The actual #524 repro is the graceful-finalization shape (#518): at the iteration cap the pending
+// tool_use is NOT executed and a finalize-text user turn is appended, leaving [assistant tool_use]
+// [user text] — a dangling tool_use the Messages API rejects. This locks the end-to-end contract that
+// the backstop and the consecutive-turn merge compose into ONE valid user turn with the synthesized
+// is_error tool_result BEFORE the finalize text (the ordering Anthropic requires).
+func TestAnthropic_FinalizeShape_ToolResultBeforeText(t *testing.T) {
+	t.Parallel()
+	const finalize = "You have reached your budget. Return your final answer now."
+	_, msgs, err := mapAnthropicMessages([]ChatMessage{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "toolu_1", Name: "edit", Arguments: json.RawMessage(`{}`)}}},
+		{Role: "user", Content: finalize},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Fatalf("final turn role = %q, want user: %+v", last.Role, last)
+	}
+	if len(last.Blocks) != 2 {
+		t.Fatalf("final user turn must merge into 2 blocks (tool_result, text), got %+v", last.Blocks)
+	}
+	if last.Blocks[0].Type != "tool_result" || last.Blocks[0].ToolUseID != "toolu_1" || !last.Blocks[0].IsError {
+		t.Fatalf("first block must be the synthesized is_error tool_result: %+v", last.Blocks[0])
+	}
+	if last.Blocks[1].Type != "text" || last.Blocks[1].Text != finalize {
+		t.Fatalf("second block must be the finalize text: %+v", last.Blocks[1])
+	}
+}
+
+// A tool_result that does not immediately follow its tool_use (an interposed turn) is still recognized
+// as answered — the backstop keys off every result id in the conversation, not adjacency — so it never
+// synthesizes a duplicate result (a different malformation than the one being fixed).
+func TestAnthropic_NonAdjacentResult_NoDuplicate(t *testing.T) {
+	t.Parallel()
+	_, msgs, err := mapAnthropicMessages([]ChatMessage{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "toolu_1", Name: "x", Arguments: json.RawMessage(`{}`)}}},
+		{Role: "user", ToolResults: []ToolResult{{ToolCallID: "toolu_1", Content: "real result"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == "tool_result" && b.ToolUseID == "toolu_1" {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("toolu_1 answered %d times, want exactly 1 (no synthesized duplicate)", count)
+	}
+}
+
 func TestDiagnoseAnthropicRequest(t *testing.T) {
 	t.Parallel()
 	msgs := []anthropic.ChatMessage{

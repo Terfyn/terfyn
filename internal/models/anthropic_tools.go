@@ -77,32 +77,33 @@ func mapFromAnthropicResponse(in anthropic.Response) GenerateResponse {
 // The backstop below synthesizes this well-formed is_error result instead (issue #524).
 const unexecutedToolResultContent = `{"error":"tool call was not executed"}`
 
-// ensureToolResultsAnswered guarantees every assistant tool_use is answered by a tool_result in the
-// immediately-following user turn, synthesizing a well-formed is_error result for any that the caller
-// left unanswered. This is a robustness backstop, not the normal path — the engine already pairs every
-// executed call — but it means a malformed/failed tool call can never leave a dangling tool_use that
-// the provider rejects on the next request (issue #524). Ordering is preserved: missing results are
-// prepended to an existing follow-up tool-result turn, or a fresh user turn is inserted right after
-// the tool_use turn when none follows.
+// ensureToolResultsAnswered guarantees every assistant tool_use is answered by a tool_result,
+// synthesizing a well-formed is_error result for any the caller left unanswered. This is a robustness
+// backstop, not the normal path — the engine already pairs every executed call — but it means a
+// malformed/failed tool call can never leave a dangling tool_use that the provider rejects on the next
+// request (issue #524).
+//
+// It is a PURE mapping: the input slice and its messages are never mutated, so a caller (the engine)
+// can safely reuse its live messages slice after mapping. Whether a call is already answered is decided
+// by a set of every tool_result id ANYWHERE in the conversation, not by an adjacency assumption — so a
+// result that does not immediately follow its tool_use (or is interposed by another turn) is still
+// recognized and never gets a duplicate synthesized. A synthesized result is inserted as its own user
+// turn right after the tool_use turn; mergeConsecutiveAnthropicMessages then folds it into any adjacent
+// real tool-result turn (tool_result blocks first, then text — the ordering Anthropic requires).
 func ensureToolResultsAnswered(msgs []ChatMessage) []ChatMessage {
+	answered := make(map[string]bool)
+	for _, m := range msgs {
+		for _, r := range m.ToolResults {
+			if id := strings.TrimSpace(r.ToolCallID); id != "" {
+				answered[id] = true
+			}
+		}
+	}
 	out := make([]ChatMessage, 0, len(msgs))
-	for i := 0; i < len(msgs); i++ {
-		m := msgs[i]
+	for _, m := range msgs {
 		out = append(out, m)
 		if len(m.ToolCalls) == 0 {
 			continue
-		}
-		// Answers may span several consecutive following tool-result turns (OpenAI-style, one result
-		// per turn, merged into one Anthropic user turn later), so gather the whole run.
-		answered := make(map[string]bool)
-		firstResults := -1
-		for j := i + 1; j < len(msgs) && len(msgs[j].ToolResults) > 0 && len(msgs[j].ToolCalls) == 0; j++ {
-			if firstResults < 0 {
-				firstResults = j
-			}
-			for _, r := range msgs[j].ToolResults {
-				answered[strings.TrimSpace(r.ToolCallID)] = true
-			}
 		}
 		var missing []ToolResult
 		for _, c := range m.ToolCalls {
@@ -111,17 +112,11 @@ func ensureToolResultsAnswered(msgs []ChatMessage) []ChatMessage {
 				continue
 			}
 			missing = append(missing, ToolResult{ToolCallID: id, Content: unexecutedToolResultContent, IsError: true})
+			answered[id] = true // guard against a repeated tool_use id synthesizing twice
 		}
-		if len(missing) == 0 {
-			continue
+		if len(missing) > 0 {
+			out = append(out, ChatMessage{Role: "user", ToolResults: missing})
 		}
-		if firstResults >= 0 {
-			next := msgs[firstResults]
-			next.ToolResults = append(append([]ToolResult(nil), missing...), next.ToolResults...)
-			msgs[firstResults] = next
-			continue
-		}
-		out = append(out, ChatMessage{Role: "user", ToolResults: missing})
 	}
 	return out
 }
