@@ -207,8 +207,10 @@ func remoteDefaultBranch(ctx context.Context, root, remote string) string {
 // "No commits". Like create_branch it is a local repository.write — it runs unattended; the gated
 // publication ops (push_branch, pull_request.create) are unchanged.
 //
-// message is required. paths (optional) restricts staging to those pathspecs; absent, it stages all
-// working-tree changes (git add -A). author (optional, "Name <email>") overrides the committer's
+// message is required. paths (optional) restricts staging and the commit to those pathspecs;
+// absent, it stages ALL working-tree changes (git add -A) — including any non-ignored incidental
+// dirt in the root, not just the agent's edits, so an unattended caller that cannot assume a clean
+// tree should pass explicit paths. author (optional, "Name <email>") overrides the committer's
 // authorship, else the ambient git config identity is used. "Nothing to commit" is a graceful,
 // non-fatal result ({committed:false, reason:"nothing to commit"}) so a no-op change — the agent
 // decided the deliverable already existed — does not crash the run; the workflow can branch on it
@@ -236,7 +238,9 @@ func gitCommit(ctx context.Context, with map[string]any) (map[string]any, error)
 	}
 
 	// Stage: an explicit pathspec set restricts staging (git add -- <paths>), else stage everything
-	// including untracked (git add -A). Pathspecs go after "--" so none can be read as a flag.
+	// including untracked (git add -A). Pathspecs go after "--" so none can be read as an option; note
+	// "--" ends option parsing, not git pathspec magic (a leading ":" like :(exclude) is still honored),
+	// so these are pathspecs, not guaranteed-literal paths — not an escalation for in-sandbox git add.
 	if len(paths) > 0 {
 		addArgs := append([]string{"add", "--"}, paths...)
 		if _, err := runGit(ctx, root, addArgs...); err != nil {

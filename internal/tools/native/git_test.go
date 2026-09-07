@@ -410,6 +410,114 @@ func TestGitCommit_missingMessage(t *testing.T) {
 	}
 }
 
+// The author override is actually applied to the commit metadata, not silently dropped.
+func TestGitCommit_authorApplied(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	// A committer identity is still needed even when the author is overridden.
+	gitCfg(t, root, "config", "user.email", "committer@example.com")
+	gitCfg(t, root, "config", "user.name", "Committer")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	if err := os.WriteFile(filepath.Join(root, "fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "authored fix",
+		"author":  "Ada Lovelace <ada@example.com>",
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if got := gitCfg(t, root, "log", "-1", "--pretty=%an <%ae>"); got != "Ada Lovelace <ada@example.com>" {
+		t.Fatalf("commit author = %q, want the override", got)
+	}
+	// The committer is still the ambient identity — only authorship was overridden.
+	if got := gitCfg(t, root, "log", "-1", "--pretty=%cn"); got != "Committer" {
+		t.Fatalf("committer = %q, want the ambient identity", got)
+	}
+}
+
+// A control character in the author is rejected before it can slip a newline into commit metadata.
+func TestGitCommit_rejectsControlCharAuthor(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "msg",
+		"author":  "Evil\nUser <e@example.com>",
+	})
+	if err == nil {
+		t.Fatal("an author with a control character must be rejected")
+	}
+	if !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("error should name the control character, got: %v", err)
+	}
+	// The bad input never produced a commit: HEAD is still the seed.
+	if n := gitCfg(t, root, "rev-list", "--count", "HEAD"); n != "1" {
+		t.Fatalf("a rejected author must not commit; commit count = %q", n)
+	}
+}
+
+// paths accepts a single string as well as an array, staging just that pathspec.
+func TestGitCommit_pathsAsString(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	gitCfg(t, root, "config", "user.email", "t@example.com")
+	gitCfg(t, root, "config", "user.name", "Test")
+	gitCfg(t, root, "config", "commit.gpgsign", "false")
+	t.Setenv(envWorkspaceRoot, root)
+
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "later.txt"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+		"message": "only keep.txt",
+		"paths":   "keep.txt",
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if st := gitCfg(t, root, "status", "--porcelain"); st != "?? later.txt" {
+		t.Fatalf("status = %q, want only later.txt left untracked", st)
+	}
+}
+
+// A malformed paths entry (empty or containing a control character) is rejected.
+func TestGitCommit_rejectsBadPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]any{
+		"empty entry":        []any{"  "},
+		"control-char entry": []any{"a\tb.txt"},
+		"non-string entry":   []any{42},
+		"wrong type":         42,
+	}
+	for name, paths := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := NewRegistry().Dispatch(context.Background(), "commit", map[string]any{
+				"message": "msg",
+				"paths":   paths,
+			}); err == nil {
+				t.Fatalf("paths %v must be rejected", paths)
+			}
+		})
+	}
+	// None of the rejected inputs produced a commit.
+	if n := gitCfg(t, root, "rev-list", "--count", "HEAD"); n != "1" {
+		t.Fatalf("rejected paths must not commit; commit count = %q", n)
+	}
+}
+
 // TestGitCommit_thenPush is the whole #528 happy path: edit -> commit -> push lands a branch that is
 // ahead of its base, which is exactly the state pull_request.create needs (the missing commit was
 // why it returned 422 "No commits").
