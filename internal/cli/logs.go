@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,6 +26,7 @@ func newLogsCmd() *cobra.Command {
 	var threadID string
 	var actorID string
 	var eventTypes []string
+	var detail bool
 
 	cmd := &cobra.Command{
 		Use:          "logs",
@@ -52,7 +54,7 @@ Exit codes (section 11.2):
   2 — validation failure (unknown run id, invalid flags)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_ = args
-			return runLogs(cmd, runID, workflow, tenantID, threadID, actorID, eventTypes)
+			return runLogs(cmd, runID, workflow, tenantID, threadID, actorID, eventTypes, detail)
 		},
 	}
 	cmd.Flags().StringVar(&runID, "run", "", "show trace events for this run id")
@@ -61,10 +63,11 @@ Exit codes (section 11.2):
 	cmd.Flags().StringVar(&threadID, "thread-id", "", "filter runs by thread id")
 	cmd.Flags().StringVar(&actorID, "actor-id", "", "filter runs by actor id")
 	cmd.Flags().StringArrayVar(&eventTypes, "event", nil, "filter trace events by event type (repeatable)")
+	cmd.Flags().BoolVar(&detail, "detail", false, "in the table view, expand each event with the substance stored by 'terfyn run --trace-detail' — reasoning text, tool arguments (edit diffs), tool output (issue #525)")
 	return cmd
 }
 
-func runLogs(cmd *cobra.Command, runID, workflow, tenantID, threadID, actorID string, eventTypes []string) error {
+func runLogs(cmd *cobra.Command, runID, workflow, tenantID, threadID, actorID string, eventTypes []string, detail bool) error {
 	ctx := context.Background()
 	g := Globals()
 
@@ -113,15 +116,15 @@ func runLogs(cmd *cobra.Command, runID, workflow, tenantID, threadID, actorID st
 
 	switch {
 	case runID != "":
-		return writeLogsForRun(cmd, ctx, st, dsn, runID, eventFilter, g)
+		return writeLogsForRun(cmd, ctx, st, dsn, runID, eventFilter, g, detail)
 	case workflow != "" || tenantID != "" || threadID != "" || actorID != "":
-		return writeLogsFiltered(cmd, ctx, st, dsn, filter, eventFilter, g)
+		return writeLogsFiltered(cmd, ctx, st, dsn, filter, eventFilter, g, detail)
 	default:
 		return writeLogsRunList(cmd, ctx, st, dsn, g)
 	}
 }
 
-func writeLogsForRun(cmd *cobra.Command, ctx context.Context, st *sqlite.Store, dsn, runID string, eventFilter map[string]struct{}, g *Global) error {
+func writeLogsForRun(cmd *cobra.Command, ctx context.Context, st *sqlite.Store, dsn, runID string, eventFilter map[string]struct{}, g *Global, detail bool) error {
 	if _, err := st.GetRun(ctx, runID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewExitErrorf(ExitValidationError, "logs: unknown run %q", runID)
@@ -134,10 +137,10 @@ func writeLogsForRun(cmd *cobra.Command, ctx context.Context, st *sqlite.Store, 
 	}
 	events = trace.NormalizeEvents(events)
 	events = filterTraceEvents(events, eventFilter)
-	return writeLogsEventsOutput(cmd, dsn, runID, "", events, g)
+	return writeLogsEventsOutput(cmd, dsn, runID, "", events, g, detail)
 }
 
-func writeLogsFiltered(cmd *cobra.Command, ctx context.Context, st *sqlite.Store, dsn string, filter state.RunListFilter, eventFilter map[string]struct{}, g *Global) error {
+func writeLogsFiltered(cmd *cobra.Command, ctx context.Context, st *sqlite.Store, dsn string, filter state.RunListFilter, eventFilter map[string]struct{}, g *Global, detail bool) error {
 	filter.Limit = state.DefaultRunListLimit
 	runs, err := st.ListRunsFiltered(ctx, filter)
 	if err != nil {
@@ -199,7 +202,7 @@ func writeLogsFiltered(cmd *cobra.Command, ctx context.Context, st *sqlite.Store
 		ev = trace.NormalizeEvents(ev)
 		ev = filterTraceEvents(ev, eventFilter)
 		fmt.Fprintf(&b, "=== Run %s (%s, %s) ===\n", r.RunID, r.WorkflowName, r.Status)
-		b.WriteString(formatTraceTable(ev))
+		b.WriteString(formatTraceTable(ev, detail))
 	}
 	_, err = fmt.Fprint(cmd.OutOrStdout(), b.String())
 	return err
@@ -261,7 +264,7 @@ func writeLogsRunList(cmd *cobra.Command, ctx context.Context, st *sqlite.Store,
 	}
 }
 
-func writeLogsEventsOutput(cmd *cobra.Command, dsn, runID, workflow string, events []state.TraceEvent, g *Global) error {
+func writeLogsEventsOutput(cmd *cobra.Command, dsn, runID, workflow string, events []state.TraceEvent, g *Global, detail bool) error {
 	out := cmd.OutOrStdout()
 	payload := statejson.RunEventsPayload{
 		StatePath: dsn,
@@ -280,13 +283,13 @@ func writeLogsEventsOutput(cmd *cobra.Command, dsn, runID, workflow string, even
 		if workflow != "" {
 			fmt.Fprintf(&b, "Workflow filter: %s\n\n", workflow)
 		}
-		b.WriteString(formatTraceTable(events))
+		b.WriteString(formatTraceTable(events, detail))
 		_, err := fmt.Fprint(out, b.String())
 		return err
 	}
 }
 
-func formatTraceTable(events []state.TraceEvent) string {
+func formatTraceTable(events []state.TraceEvent, detail bool) string {
 	if len(events) == 0 {
 		return "No trace events.\n"
 	}
@@ -310,9 +313,33 @@ func formatTraceTable(events []state.TraceEvent) string {
 			step,
 			clipJSONForTable(e.DataJSON, 96),
 		)
+		if detail {
+			// Expand the substance (#525) stored by `terfyn run --trace-detail`, flushed after the row so
+			// the sub-lines are not squeezed into the tabwriter's DATA column.
+			for _, sub := range traceEventDetailLines(e) {
+				fmt.Fprintf(w, "\t\t\t\t\t%s\n", sub)
+			}
+		}
 	}
 	_ = w.Flush()
 	return b.String()
+}
+
+// traceEventDetailLines parses a stored event's DataJSON and renders its detail sub-lines, reusing the
+// same renderer as the live --verbose stream (#525). A row with no detail returns nil.
+func traceEventDetailLines(e state.TraceEvent) []string {
+	if strings.TrimSpace(e.DataJSON) == "" {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(e.DataJSON), &data); err != nil {
+		return nil
+	}
+	evType, known := trace.ParseEventType(trace.NormalizeStoredEventType(e.Type))
+	if !known {
+		return nil
+	}
+	return detailLinesFor(evType, data)
 }
 
 func parseLogsEventFilter(raw []string) (map[string]struct{}, error) {

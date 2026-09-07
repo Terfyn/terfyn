@@ -263,6 +263,7 @@ func (r *Runtime) executeEngine(
 		Trace:       rec,
 		Telemetry:   tel,
 		Now:         r.Now,
+		TraceDetail: cfg.traceDetail,
 	}
 	hitl, err := buildEngineHitlOptions(cfg)
 	if err != nil {

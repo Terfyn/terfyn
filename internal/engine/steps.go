@@ -153,13 +153,20 @@ func (e *Executor) runToolStep(ctx context.Context, runHandle *telemetry.RunHand
 		return nil, tools.ToolCallMeta{}, err
 	}
 	if e.Trace != nil {
-		_, _ = e.Trace.Append(ctx, runID, tid, trace.EventToolSelection, trace.ActorAgent, toolSelectionData(uses, withArgs))
+		sel := toolSelectionData(uses, withArgs)
+		if e.TraceDetail {
+			// The actual call arguments (issue #525) — an edit's old/new strings, a run_tests command,
+			// a grep pattern — so the trace shows WHAT the call operated on, not just a digest. Redacted
+			// by key and truncated by the recorder; the digest stays for auditors.
+			trace.AddToolArgs(sel, withArgs)
+		}
+		_, _ = e.Trace.Append(ctx, runID, tid, trace.EventToolSelection, trace.ActorAgent, sel)
 	}
 	started := e.now()
 	if e.Tools == nil {
 		err := fmt.Errorf("engine: nil tool executor")
 		meta := tools.ToolCallMeta{DurationMs: e.now().Sub(started).Milliseconds()}
-		e.appendToolExecution(ctx, runID, tid, uses, meta, err)
+		e.appendToolExecution(ctx, runID, tid, uses, meta, err, nil)
 		return nil, meta, err
 	}
 	toolCtx := ctx
@@ -185,10 +192,10 @@ func (e *Executor) runToolStep(ctx context.Context, runHandle *telemetry.RunHand
 		meta.DurationMs = e.now().Sub(started).Milliseconds()
 	}
 	if err != nil {
-		e.appendToolExecution(ctx, runID, tid, uses, meta, err)
+		e.appendToolExecution(ctx, runID, tid, uses, meta, err, nil)
 		return nil, meta, err
 	}
-	e.appendToolExecution(ctx, runID, tid, uses, meta, nil)
+	e.appendToolExecution(ctx, runID, tid, uses, meta, nil, resp.Output)
 	out, err := e.enforceToolOutput(ctx, wf, runID, tid, uses, resp.Output)
 	if err != nil {
 		return nil, meta, err
@@ -638,8 +645,13 @@ func (e *Executor) generateAgentTurn(
 		return models.GenerateResponse{}, err
 	}
 	if e.Trace != nil {
-		_, _ = e.Trace.Append(ctx, runID, step.ID, trace.EventLLMCompletion, trace.ActorAgent,
-			trace.LLMCompletionData(step.Agent, modelRef, resp.Meta.CostUSD))
+		data := trace.LLMCompletionData(step.Agent, modelRef, resp.Meta.CostUSD)
+		if e.TraceDetail {
+			// The model's own narration of what it is about to do (issue #525). Redacted+truncated by
+			// the recorder; the "text" key is absent on an empty (pure tool_use) completion.
+			trace.AddCompletionText(data, resp.Content)
+		}
+		_, _ = e.Trace.Append(ctx, runID, step.ID, trace.EventLLMCompletion, trace.ActorAgent, data)
 	}
 	return resp, nil
 }
@@ -718,11 +730,18 @@ func toolCallIDs(calls []models.ToolCall) []string {
 	return out
 }
 
-func (e *Executor) appendToolExecution(ctx context.Context, runID, stepID, uses string, meta tools.ToolCallMeta, callErr error) {
+func (e *Executor) appendToolExecution(ctx context.Context, runID, stepID, uses string, meta tools.ToolCallMeta, callErr error, output map[string]any) {
 	if e == nil || e.Trace == nil {
 		return
 	}
-	_, _ = e.Trace.Append(ctx, runID, stepID, trace.EventToolExecution, trace.ActorAgent, toolExecutionData(uses, meta, callErr))
+	data := toolExecutionData(uses, meta, callErr)
+	if e.TraceDetail && callErr == nil && output != nil {
+		// The tool's result (issue #525) — run_tests pass/fail + output tail, a grep hit count, a
+		// read_file head — so a checkmark is backed by what actually came back. Redacted+truncated by
+		// the recorder; a failed call still records only the stable redacted reason, never raw output.
+		trace.AddToolOutput(data, output)
+	}
+	_, _ = e.Trace.Append(ctx, runID, stepID, trace.EventToolExecution, trace.ActorAgent, data)
 }
 
 // toolSelectionData / toolExecutionData / argumentsDigest delegate to the shared trace builders

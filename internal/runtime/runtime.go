@@ -74,6 +74,10 @@ type InvokeOptions struct {
 	// EventSink, when set, streams each trace event live as it is appended (issue #450, terfyn run
 	// --verbose). Nil is today's behavior (events only persisted). It never changes what is stored.
 	EventSink trace.EventSink
+	// TraceDetail enriches the streamed/stored trace with each turn's substance — reasoning text,
+	// tool arguments, bounded tool output (issue #525, terfyn run --trace-detail). Opt-in; the added
+	// fields still pass through redaction+truncation. It DOES change what is stored (by design).
+	TraceDetail bool
 }
 
 // ResumeOptions continues an existing run from its latest checkpoint.
@@ -96,6 +100,8 @@ type ResumeOptions struct {
 	ActorID  string
 	// EventSink streams each trace event live as it is appended (issue #450). Nil = persist only.
 	EventSink trace.EventSink
+	// TraceDetail enriches the streamed/stored trace with each turn's substance (issue #525).
+	TraceDetail bool
 }
 
 // HitlDecisionOptions configures a non-interactive HITL resolution on resume.

@@ -82,6 +82,10 @@ func agentLoopGraph(t *testing.T, agent spec.AgentSpec, pol spec.PolicySpec) *sp
 }
 
 func runAgentLoop(t *testing.T, graph *spec.ProjectGraph, mock *models.MockClient, extra tools.ToolExecutor) (*state.Run, []trace.Event, error) {
+	return runAgentLoopCfg(t, graph, mock, extra, nil)
+}
+
+func runAgentLoopCfg(t *testing.T, graph *spec.ProjectGraph, mock *models.MockClient, extra tools.ToolExecutor, configure func(*Executor)) (*state.Run, []trace.Event, error) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "agent-loop.db"))
@@ -109,6 +113,9 @@ func runAgentLoop(t *testing.T, graph *spec.ProjectGraph, mock *models.MockClien
 		ModelResolve: func(string) (models.ModelClient, string, error) { return mock, "gpt-4", nil },
 		Store:        st,
 		Trace:        trace.NewRecorder(st),
+	}
+	if configure != nil {
+		configure(ex)
 	}
 	runErr := ex.Run(ctx, RunInput{
 		RunID: runID, WorkflowName: "demo", Env: "dev", StartedAt: started,

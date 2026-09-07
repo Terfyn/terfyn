@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/Terfyn/terfyn/internal/trace"
@@ -13,10 +14,22 @@ import (
 // stdout stays clean and parseable. Only the events worth watching live are rendered (model
 // completions, tool selection/execution, limit hits, approval pauses, errors); the rest are skipped
 // to keep the stream focused. noColor swaps the leading glyphs for ASCII.
-func newVerboseSink(w io.Writer, noColor bool) trace.EventSink {
+//
+// When detail is true (--trace-detail, issue #525) each rendered event is followed by indented
+// sub-lines carrying its substance: the agent's reasoning text, the tool call arguments (an edit as a
+// unified diff), and a bounded tool output. The fields are present only because the run was recorded
+// with --trace-detail; a run without it streams the terse one-liners regardless.
+func newVerboseSink(w io.Writer, noColor, detail bool) trace.EventSink {
 	return func(ev trace.StreamEvent) {
-		if line, ok := formatVerboseEvent(ev, noColor); ok {
-			fmt.Fprintln(w, line)
+		line, ok := formatVerboseEvent(ev, noColor)
+		if !ok {
+			return
+		}
+		fmt.Fprintln(w, line)
+		if detail {
+			for _, sub := range verboseDetailLines(ev) {
+				fmt.Fprintln(w, sub)
+			}
 		}
 	}
 }
@@ -93,6 +106,123 @@ func formatVerboseEvent(ev trace.StreamEvent, noColor bool) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+const (
+	// verboseDetailIndent prefixes every substance sub-line so it reads as a child of its event.
+	verboseDetailIndent = "      ⤷ "
+	// verboseDetailWidth clips each sub-line for terminal readability; the stored value is already
+	// bounded by the recorder's per-field truncation, this only keeps the live view tidy.
+	verboseDetailWidth = 120
+	// verboseDetailMaxLines caps how many lines one field expands to (a big diff / long output),
+	// so a single event cannot flood the stream.
+	verboseDetailMaxLines = 20
+)
+
+// verboseDetailLines renders the substance fields (#525) of one event as indented sub-lines: the
+// reasoning text on llm_completion, the arguments (an edit as a unified diff) on tool_selection, and
+// the output on tool_execution. It returns nil when the event carries no detail (a run recorded
+// without --trace-detail, or a field that was empty).
+func verboseDetailLines(ev trace.StreamEvent) []string {
+	return detailLinesFor(ev.Type, ev.Data)
+}
+
+// detailLinesFor renders the substance sub-lines for one event's data, shared by the live --verbose
+// stream and `terfyn logs --detail` (#525). It returns nil when the event carries no detail.
+func detailLinesFor(evType trace.EventType, data map[string]any) []string {
+	switch evType {
+	case trace.EventLLMCompletion:
+		if text := stringField(data, trace.FieldCompletionText); text != "" {
+			return detailTextLines("", text)
+		}
+	case trace.EventToolSelection:
+		if args, ok := data[trace.FieldToolArgs].(map[string]any); ok {
+			return detailArgsLines(stringField(data, "uses", "tool"), args)
+		}
+	case trace.EventToolExecution:
+		if out, ok := data[trace.FieldToolOutput].(map[string]any); ok {
+			return detailMapLines(out)
+		}
+	}
+	return nil
+}
+
+// detailArgsLines renders a tool call's arguments. An edit (old_string→new_string) is shown as a
+// unified diff — the single most useful thing to see (#525) — everything else as key: value lines.
+func detailArgsLines(uses string, args map[string]any) []string {
+	if old, oOK := args["old_string"].(string); oOK {
+		if nw, nOK := args["new_string"].(string); nOK {
+			path, _ := args["path"].(string)
+			return detailEditDiffLines(path, old, nw)
+		}
+	}
+	return detailMapLines(args)
+}
+
+// detailEditDiffLines renders an edit as a compact unified-diff hunk: the path, then old lines
+// prefixed '-' and new lines prefixed '+'. Bounded by verboseDetailMaxLines.
+func detailEditDiffLines(path, old, nw string) []string {
+	var lines []string
+	if strings.TrimSpace(path) != "" {
+		lines = append(lines, verboseDetailIndent+"edit "+path)
+	}
+	add := func(sign, s string) {
+		for _, ln := range strings.Split(s, "\n") {
+			lines = append(lines, verboseDetailIndent+sign+clipDetail(ln))
+		}
+	}
+	add("-", old)
+	add("+", nw)
+	return capDetailLines(lines)
+}
+
+// detailMapLines renders a map as sorted `key: value` sub-lines, each clipped. A multi-line string
+// value (e.g. a run_tests stdout tail) is kept across lines under a `key:` header so its structure
+// survives, rather than being collapsed onto one line.
+func detailMapLines(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var lines []string
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && strings.Contains(strings.TrimRight(s, "\n"), "\n") {
+			lines = append(lines, verboseDetailIndent+k+":")
+			for _, ln := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+				lines = append(lines, verboseDetailIndent+"  "+clipDetail(ln))
+			}
+			continue
+		}
+		lines = append(lines, verboseDetailIndent+k+": "+clipDetail(fmt.Sprintf("%v", m[k])))
+	}
+	return capDetailLines(lines)
+}
+
+// detailTextLines renders a free-text field (reasoning) across up to verboseDetailMaxLines lines,
+// each clipped, preserving the model's own line breaks.
+func detailTextLines(prefix, text string) []string {
+	var lines []string
+	for _, ln := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		lines = append(lines, verboseDetailIndent+prefix+clipDetail(ln))
+	}
+	return capDetailLines(lines)
+}
+
+func capDetailLines(lines []string) []string {
+	if len(lines) <= verboseDetailMaxLines {
+		return lines
+	}
+	out := append([]string(nil), lines[:verboseDetailMaxLines]...)
+	return append(out, verboseDetailIndent+fmt.Sprintf("… (%d more lines)", len(lines)-verboseDetailMaxLines))
+}
+
+func clipDetail(s string) string {
+	r := []rune(s)
+	if len(r) <= verboseDetailWidth {
+		return s
+	}
+	return string(r[:verboseDetailWidth-1]) + "…"
 }
 
 // verboseLabel picks a short actor label: the agent name when present, else the step id, else the
