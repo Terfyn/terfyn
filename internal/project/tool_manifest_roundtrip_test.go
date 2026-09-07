@@ -8,9 +8,10 @@ import (
 )
 
 // ADR 003 acceptance for the closed-world capability manifest (#204 / PR #251 review): a
-// declared-but-empty operations: {} manifest must round-trip through export → load unchanged, so
-// the YAML interchange path agrees with plan/apply identity and CheckToolCall. Without
-// ToolSpec.MarshalYAML the empty map is dropped and reload reopens every live tools/list name.
+// declared-but-empty operations: {} manifest must round-trip through export → load unchanged, so the
+// exported project agrees with plan/apply identity and CheckToolCall. This exercises the .agent export
+// path (issue #507) reloaded through the user-facing LoadProject — the closed-empty manifest must
+// survive raise → print → parse → lower, not just the YAML codec.
 func TestExport_ClosedEmptyManifestRoundTrips(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "project.yaml", `apiVersion: agentic.dev/v0
@@ -38,12 +39,12 @@ spec:
 		t.Fatalf("loaded closed-empty tool not closed: closed=%v allows=%v", m.IsClosed(), m.Allows("delete_repo"))
 	}
 
-	// Export the graph, then reload from the exported directory (ADR 003 identity contract).
+	// Export the graph as a .agent project, then reload it through the user-facing loader.
 	out := t.TempDir()
-	if err := WriteProjectDir(out, g); err != nil {
+	if err := WriteAgentProjectDir(out, g); err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	reloaded, _, err := LoadYAMLResources(out)
+	reloaded, err := LoadProject(out)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
