@@ -509,6 +509,63 @@ func TestRun_badInputPair_exit2(t *testing.T) {
 	}
 }
 
+func TestParseInputPair(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantKey   string
+		wantValue string
+		wantError bool
+	}{
+		{name: "empty value", input: "key=", wantKey: "key"},
+		{name: "value contains equals", input: "key=a=b", wantKey: "key", wantValue: "a=b"},
+		{name: "empty key", input: "=value", wantError: true},
+		{name: "missing delimiter", input: "key", wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, value, err := parseInputPair(tt.input)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("parseInputPair(%q) succeeded with key=%q value=%q", tt.input, key, value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseInputPair(%q): %v", tt.input, err)
+			}
+			if key != tt.wantKey || value != tt.wantValue {
+				t.Fatalf("parseInputPair(%q) = key=%q value=%q, want key=%q value=%q", tt.input, key, value, tt.wantKey, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestRun_emptyInputValue_succeeds(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "run-empty-input.db")
+	root := runProjRoot(t)
+
+	ResetGlobalsForTest()
+	var out bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{
+		"run", "workflow/demo",
+		"--project", root,
+		"-e", "staging",
+		"--state", db,
+		"--input", "topic=",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Status: succeeded") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
 func TestRun_inputFile_succeeds(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "run-file.db")
 	root := runProjRoot(t)

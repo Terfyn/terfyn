@@ -149,7 +149,7 @@ func parseWorkflowTarget(s string) (name string, err error) {
 func parseInputPair(p string) (key, val string, err error) {
 	p = strings.TrimSpace(p)
 	i := strings.IndexByte(p, '=')
-	if i <= 0 || i == len(p)-1 {
+	if i <= 0 {
 		return "", "", fmt.Errorf("run: --input must be key=value, got %q", p)
 	}
 	return strings.TrimSpace(p[:i]), strings.TrimSpace(p[i+1:]), nil
