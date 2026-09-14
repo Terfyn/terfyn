@@ -166,7 +166,7 @@ func buildRunInputJSON(inputFile string, pairs []string) ([]byte, error) {
 			return nil, fmt.Errorf("run: input-file must be a JSON object: %w", err)
 		}
 		if m == nil {
-			m = map[string]any{}
+			return nil, fmt.Errorf("run: input-file must be a JSON object: got null")
 		}
 	}
 	for _, p := range pairs {
