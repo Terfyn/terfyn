@@ -153,7 +153,7 @@ func parseInputPair(p string) (key, val string, err error) {
 	}
 	key = strings.TrimSpace(p[:i])
 	val = p[i+1:]
-	if key == "" || val == "" {
+	if key == "" {
 		return "", "", fmt.Errorf("run: --input must be key=value, got %q", p)
 	}
 	return key, val, nil

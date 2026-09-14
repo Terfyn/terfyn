@@ -521,8 +521,9 @@ func TestParseInputPair(t *testing.T) {
 		{name: "whitespace-only value", input: "key=   ", wantKey: "key", wantValue: "   "},
 		{name: "value contains equals", input: "key=a=b", wantKey: "key", wantValue: "a=b"},
 		{name: "key whitespace", input: "  key  =value", wantKey: "key", wantValue: "value"},
-		{name: "empty value", input: "key=", wantError: true},
+		{name: "empty value", input: "key=", wantKey: "key"},
 		{name: "empty key", input: "=value", wantError: true},
+		{name: "whitespace-only key", input: "   =value", wantError: true},
 		{name: "missing delimiter", input: "key", wantError: true},
 	}
 
@@ -540,6 +541,35 @@ func TestParseInputPair(t *testing.T) {
 			}
 			if key != tt.wantKey || value != tt.wantValue {
 				t.Fatalf("parseInputPair(%q) = key=%q value=%q, want key=%q value=%q", tt.input, key, value, tt.wantKey, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestRun_emptyInputValue_succeeds(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "run-empty-input.db")
+	root := runProjRoot(t)
+
+	ResetGlobalsForTest()
+	var out bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{
+		"run", "workflow/demo",
+		"--project", root,
+		"-e", "staging",
+		"--state", db,
+		"--input", "topic=",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Status: succeeded") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
 func TestRun_inputFile_succeeds(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "run-file.db")
 	root := runProjRoot(t)
