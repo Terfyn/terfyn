@@ -594,6 +594,45 @@ func TestRun_inputFile_succeeds(t *testing.T) {
 	}
 }
 
+func TestBuildRunInputJSON_requiresObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		want      string
+		wantError bool
+	}{
+		{name: "object", content: `{"topic":"from-file"}`, want: `{"topic":"from-file"}`},
+		{name: "empty object", content: `{}`},
+		{name: "null", content: `null`, wantError: true},
+		{name: "array", content: `[]`, wantError: true},
+		{name: "scalar", content: `42`, wantError: true},
+		{name: "malformed", content: `{`, wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := filepath.Join(t.TempDir(), "input.json")
+			if err := os.WriteFile(f, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := buildRunInputJSON(f, nil)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("buildRunInputJSON(%q) succeeded with %q", tt.content, got)
+				}
+				if !strings.Contains(err.Error(), "run: input-file must be a JSON object") {
+					t.Fatalf("error = %v, want object validation error", err)
+				}
+				return
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRun_resume_missingRun_exit1(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "resume-missing.db")
 	root := runProjRoot(t)
