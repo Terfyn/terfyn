@@ -517,9 +517,13 @@ func TestParseInputPair(t *testing.T) {
 		wantValue string
 		wantError bool
 	}{
-		{name: "empty value", input: "key=", wantKey: "key"},
+		{name: "value whitespace", input: "key=  value  ", wantKey: "key", wantValue: "  value  "},
+		{name: "whitespace-only value", input: "key=   ", wantKey: "key", wantValue: "   "},
 		{name: "value contains equals", input: "key=a=b", wantKey: "key", wantValue: "a=b"},
+		{name: "key whitespace", input: "  key  =value", wantKey: "key", wantValue: "value"},
+		{name: "empty value", input: "key=", wantKey: "key"},
 		{name: "empty key", input: "=value", wantError: true},
+		{name: "whitespace-only key", input: "   =value", wantError: true},
 		{name: "missing delimiter", input: "key", wantError: true},
 	}
 
