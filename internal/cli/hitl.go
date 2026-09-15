@@ -95,9 +95,11 @@ func parseHitlDecisionOptions(decision, editJSON, switchTarget string) (*runtime
 	return hd, nil
 }
 
-// maxHitlLineBytes bounds a single interactive HITL input line, sized to
-// maxDecisionEditJSONBytes plus 1 byte newline delimiter overhead.
-const maxHitlLineBytes = maxDecisionEditJSONBytes + 1
+// maxHitlLineBytes bounds a single interactive HITL input line.
+// bufio.Scanner measures the raw bytes in the buffer before ScanLines strips
+// the line ending, so the cap must accommodate both Unix LF (+1) and Windows
+// CRLF (+2) termination of a maximum-length payload.
+const maxHitlLineBytes = maxDecisionEditJSONBytes + 2
 
 func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
 	if !isatty.IsTerminal(os.Stdin.Fd()) {

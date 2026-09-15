@@ -24,35 +24,58 @@ func TestReadLineHonorsDecisionEditLimit(t *testing.T) {
 }
 
 func TestReadLine_Boundaries(t *testing.T) {
+	// The scanner buffer is maxDecisionEditJSONBytes+2 to accommodate both LF (+1)
+	// and CRLF (+2) endings on a maximum-size payload. Content above
+	// maxDecisionEditJSONBytes is still rejected by the application-layer check in
+	// parseHitlDecisionOptions / promptHitlDecision; the scanner's contract is that
+	// it does NOT truncate a valid-sized payload regardless of line-ending style.
 	tests := []struct {
 		name    string
 		size    int
+		lineEnd string
 		wantErr bool
 	}{
 		{
-			name:    "scanner default 64 KiB",
+			name:    "64 KiB payload LF — well below limit",
 			size:    64 * 1024,
+			lineEnd: "\n",
 			wantErr: false,
 		},
 		{
-			name:    "application limit 1 MiB",
+			name:    "64 KiB payload CRLF — well below limit",
+			size:    64 * 1024,
+			lineEnd: "\r\n",
+			wantErr: false,
+		},
+		{
+			name:    "exact application limit LF",
 			size:    maxDecisionEditJSONBytes,
+			lineEnd: "\n",
 			wantErr: false,
 		},
 		{
-			name:    "one byte above application limit",
+			name:    "exact application limit CRLF",
+			size:    maxDecisionEditJSONBytes,
+			lineEnd: "\r\n",
+			wantErr: false,
+		},
+		{
+			// maxDecisionEditJSONBytes+1 bytes + "\r\n" = maxDecisionEditJSONBytes+3
+			// raw bytes, which exceeds the scanner cap of maxDecisionEditJSONBytes+2.
+			name:    "one byte above limit CRLF",
 			size:    maxDecisionEditJSONBytes + 1,
+			lineEnd: "\r\n",
 			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			input := strings.Repeat("a", tt.size) + "\n"
+			input := strings.Repeat("a", tt.size) + tt.lineEnd
 			got, err := readLine(strings.NewReader(input))
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("readLine accepted %d bytes, want error", tt.size)
+					t.Fatalf("readLine accepted %d bytes (%q ending), want error", tt.size, tt.lineEnd)
 				}
 				if !errors.Is(err, bytes.ErrTooLarge) && !strings.Contains(err.Error(), "token too long") {
 					t.Fatalf("readLine returned unexpected error: %v", err)
@@ -60,7 +83,7 @@ func TestReadLine_Boundaries(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("readLine failed on %d bytes: %v", tt.size, err)
+				t.Fatalf("readLine failed on %d bytes (%q ending): %v", tt.size, tt.lineEnd, err)
 			}
 			if len(got) != tt.size {
 				t.Fatalf("readLine returned %d bytes, want %d", len(got), tt.size)
@@ -68,6 +91,8 @@ func TestReadLine_Boundaries(t *testing.T) {
 		})
 	}
 }
+
+
 
 func TestReadLine_UnexpectedEOF(t *testing.T) {
 	_, err := readLine(strings.NewReader(""))
