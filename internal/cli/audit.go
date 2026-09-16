@@ -79,7 +79,7 @@ func runAuditVerify(cmd *cobra.Command, runID string, limit int) error {
 		return fmt.Errorf("audit verify: resolve state path: %w", err)
 	}
 
-	st, err := sqlite.Open(ctx, dsn)
+	st, err := sqlite.OpenReadOnly(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("audit verify: open sqlite %q: %w", dsn, err)
 	}
