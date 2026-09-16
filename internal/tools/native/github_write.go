@@ -144,10 +144,22 @@ func githubIssuesUpdate(ctx context.Context, with map[string]any) (map[string]an
 }
 
 // githubMutablePatch collects the given optional string fields present in with into a
-// PATCH payload, so an update sends only the fields the caller set.
+// PATCH payload, so an update sends only the fields the caller set. An explicitly
+// supplied body (including empty string or whitespace) is preserved so callers can
+// clear or update descriptions.
 func githubMutablePatch(with map[string]any, fields ...string) map[string]any {
 	payload := map[string]any{}
 	for _, f := range fields {
+		if f == "body" {
+			v, ok := with["body"]
+			if !ok || v == nil {
+				continue
+			}
+			if s, err := scalarToString(v); err == nil {
+				payload["body"] = s
+			}
+			continue
+		}
 		if v, ok := tryStringFromWith(with, f); ok {
 			payload[f] = v
 		}
