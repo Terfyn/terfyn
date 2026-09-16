@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
+- **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.
+
+- **Native `issues.update` and `pull_request.update` can clear a description** (issue #554): passing an explicit empty body (`"body": ""`) or whitespace-only string is preserved in the PATCH payload rather than discarded by `tryStringFromWith`. Missing body fields remain omitted, empty titles and other required identifiers continue to be rejected, and create-operation behavior remains unchanged.
+
 - **`terfyn logs` and `terfyn audit verify` no longer create missing state databases** (issue #545): both read-only commands now fail clearly when the configured state database cannot be opened.
 
 - **`terfyn run --input` preserves whitespace in values** (issue #557): input values now retain all bytes after the first `=`, while keys continue to be trimmed and validated.

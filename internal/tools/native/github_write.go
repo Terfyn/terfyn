@@ -97,7 +97,10 @@ func githubPullRequestUpdate(ctx context.Context, with map[string]any) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("native: pull_request.update %w", err)
 	}
-	payload := githubMutablePatch(with, "title", "body", "base", "state")
+	payload, err := githubMutablePatch(with, "title", "body", "base", "state")
+	if err != nil {
+		return nil, fmt.Errorf("native: pull_request.update %w", err)
+	}
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("native: pull_request.update requires one of title, body, base, state")
 	}
@@ -124,7 +127,10 @@ func githubIssuesUpdate(ctx context.Context, with map[string]any) (map[string]an
 	if err != nil {
 		return nil, fmt.Errorf("native: issues.update %w", err)
 	}
-	payload := githubMutablePatch(with, "title", "body", "state")
+	payload, err := githubMutablePatch(with, "title", "body", "state")
+	if err != nil {
+		return nil, fmt.Errorf("native: issues.update %w", err)
+	}
 	if labels, ok := with["labels"]; ok && labels != nil {
 		payload["labels"] = labels
 	}
@@ -144,15 +150,29 @@ func githubIssuesUpdate(ctx context.Context, with map[string]any) (map[string]an
 }
 
 // githubMutablePatch collects the given optional string fields present in with into a
-// PATCH payload, so an update sends only the fields the caller set.
-func githubMutablePatch(with map[string]any, fields ...string) map[string]any {
+// PATCH payload, so an update sends only the fields the caller set. An explicitly
+// supplied body (including empty string or whitespace) is preserved so callers can
+// clear or update descriptions.
+func githubMutablePatch(with map[string]any, fields ...string) (map[string]any, error) {
 	payload := map[string]any{}
 	for _, f := range fields {
+		if f == "body" {
+			v, ok := with["body"]
+			if !ok || v == nil {
+				continue
+			}
+			s, err := scalarToString(v)
+			if err != nil {
+				return nil, fmt.Errorf("field %q: %w", f, err)
+			}
+			payload["body"] = s
+			continue
+		}
 		if v, ok := tryStringFromWith(with, f); ok {
 			payload[f] = v
 		}
 	}
-	return payload
+	return payload, nil
 }
 
 // githubIssuesComment comments on an issue or PR: POST /repos/{owner}/{repo}/issues/{number}/comments.
