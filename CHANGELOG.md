@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Native `issues.update` and `pull_request.update` can clear a description** (issue #554): passing an explicit empty body (`"body": ""`) or whitespace-only string is preserved in the PATCH payload rather than discarded by `tryStringFromWith`. Missing body fields remain omitted, empty titles and other required identifiers continue to be rejected, and create-operation behavior remains unchanged.
+
 - **`terfyn logs` and `terfyn audit verify` no longer create missing state databases** (issue #545): both read-only commands now fail clearly when the configured state database cannot be opened.
 
 - **`terfyn run --input` preserves whitespace in values** (issue #557): input values now retain all bytes after the first `=`, while keys continue to be trimmed and validated.
