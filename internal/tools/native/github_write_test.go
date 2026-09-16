@@ -160,7 +160,10 @@ func TestGithubWrite_requiresToken(t *testing.T) {
 }
 
 func TestMutablePatchCanClearBody(t *testing.T) {
-	got := githubMutablePatch(map[string]any{"body": ""}, "body")
+	got, err := githubMutablePatch(map[string]any{"body": ""}, "body")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if body, ok := got["body"]; !ok || body != "" {
 		t.Fatalf("githubMutablePatch omitted explicit empty body: %#v", got)
 	}
@@ -503,4 +506,55 @@ func TestGithubCreateOperations_bodyBehaviorUnchanged(t *testing.T) {
 			t.Fatal("expected error for empty title in pull_request.create without issue")
 		}
 	})
+}
+
+func TestGithubUpdateRejectsMalformedBody(t *testing.T) {
+	updates := []struct {
+		name   string
+		number float64
+		run    func(context.Context, map[string]any) (map[string]any, error)
+	}{
+		{"issues", 42, githubIssuesUpdate},
+		{"pull_request", 101, githubPullRequestUpdate},
+	}
+
+	for _, update := range updates {
+		t.Run(update.name, func(t *testing.T) {
+			values := []struct {
+				name  string
+				value any
+			}{
+				{"object", map[string]any{"nested": "object"}},
+				{"array", []any{1, 2, 3}},
+			}
+
+			for _, value := range values {
+				for _, withTitle := range []bool{false, true} {
+					name := value.name + "/body_only"
+					if withTitle {
+						name = value.name + "/with_title"
+					}
+
+					t.Run(name, func(t *testing.T) {
+						stub := newGitHubStub(t, 200, `{}`)
+						input := map[string]any{
+							"owner": "acme", "repo": "api",
+							"number": update.number, "body": value.value,
+						}
+						if withTitle {
+							input["title"] = "Valid title"
+						}
+
+						_, err := update.run(context.Background(), input)
+						if err == nil || !strings.Contains(err.Error(), `field "body"`) {
+							t.Fatalf("expected explicit body validation error, got %v", err)
+						}
+						if stub.method != "" {
+							t.Fatalf("malformed body triggered HTTP request: %s %s", stub.method, stub.path)
+						}
+					})
+				}
+			}
+		})
+	}
 }
