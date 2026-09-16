@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -129,5 +130,136 @@ func TestCompleteAgentOutput_ambiguousFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("error = %v, want an ambiguity error", err)
+	}
+}
+
+func TestParseAgentJSONObject(t *testing.T) {
+	cases := []struct {
+		name       string
+		content    string
+		want       map[string]any
+		wantErrSub string
+	}{
+		{
+			name:    "valid object",
+			content: `{"key":"val"}`,
+			want:    map[string]any{"key": "val"},
+		},
+		{
+			name:    "empty object",
+			content: `{}`,
+			want:    map[string]any{},
+		},
+		{
+			name:    "nested object",
+			content: `{"nested":{"a":1}}`,
+			want:    map[string]any{"nested": map[string]any{"a": float64(1)}},
+		},
+		{
+			name:    "whitespace-wrapped valid object",
+			content: "  \n\t{\"x\":\"ok\"}  \n",
+			want:    map[string]any{"x": "ok"},
+		},
+		{
+			name:       "null rejected",
+			content:    "null",
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "whitespace-wrapped null rejected",
+			content:    "  \n null \t \n",
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "array rejected",
+			content:    `[1, 2]`,
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "string scalar rejected",
+			content:    `"hello"`,
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "number scalar rejected",
+			content:    `42`,
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "boolean true rejected",
+			content:    `true`,
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "boolean false rejected",
+			content:    `false`,
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+		{
+			name:       "empty string rejected",
+			content:    "",
+			wantErrSub: "engine: empty agent response",
+		},
+		{
+			name:       "whitespace-only rejected",
+			content:    "   \n\t  ",
+			wantErrSub: "engine: empty agent response",
+		},
+		{
+			name:       "malformed JSON rejected",
+			content:    `{"unclosed":`,
+			wantErrSub: "engine: agent response is not a JSON object",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAgentJSONObject(tc.content)
+			if tc.wantErrSub != "" {
+				if err == nil {
+					t.Fatalf("parseAgentJSONObject(%q) = %#v, want error containing %q", tc.content, got, tc.wantErrSub)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("parseAgentJSONObject(%q) error = %v, want substring %q", tc.content, err, tc.wantErrSub)
+				}
+				if got != nil {
+					t.Fatalf("parseAgentJSONObject(%q) unexpected non-nil result on error: %#v", tc.content, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseAgentJSONObject(%q) unexpected error: %v", tc.content, err)
+			}
+			if got == nil {
+				t.Fatalf("parseAgentJSONObject(%q) returned nil map, want non-nil map", tc.content)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseAgentJSONObject(%q) = %#v, want %#v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompleteAgentOutput_nullRejectedWithoutSchema(t *testing.T) {
+	agent := &spec.AgentResource{
+		Metadata: spec.Metadata{Name: "a"},
+		Spec:     spec.AgentSpec{},
+	}
+	e := &Executor{}
+	step := spec.WorkflowStep{ID: "s1"}
+
+	for _, content := range []string{"null", "  null\n"} {
+		t.Run(content, func(t *testing.T) {
+			out, _, err := e.completeAgentOutput(context.Background(), policy.NewEvaluator(nil, nil), agent, step, content, models.GenerateMeta{})
+			if err == nil {
+				t.Fatalf("completeAgentOutput(%q) succeeded with %#v, want rejection of null", content, out)
+			}
+			if !strings.Contains(err.Error(), "engine: agent response is not a JSON object") {
+				t.Fatalf("completeAgentOutput(%q) error = %v, want object error", content, err)
+			}
+			if out != nil {
+				t.Fatalf("completeAgentOutput(%q) returned non-nil output %#v on error", content, out)
+			}
+		})
 	}
 }
