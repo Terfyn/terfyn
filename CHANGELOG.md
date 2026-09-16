@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
+- **`terfyn logs` and `terfyn audit verify` no longer create missing state databases** (issue #545): both read-only commands now fail clearly when the configured state database cannot be opened.
+
 - **`terfyn run --input` preserves whitespace in values** (issue #557): input values now retain all bytes after the first `=`, while keys continue to be trimmed and validated.
 
 - **`terfyn run --input` now accepts empty-string values** (issue #547): `--input key=` is valid and is treated consistently with an input file containing `{"key":""}`. Keys must still be non-empty, values containing `=` are preserved, and arguments without `=` remain invalid.

@@ -97,7 +97,7 @@ func runLogs(cmd *cobra.Command, runID, workflow, tenantID, threadID, actorID st
 		return fmt.Errorf("logs: resolve state path: %w", err)
 	}
 
-	st, err := sqlite.Open(ctx, dsn)
+	st, err := sqlite.OpenReadOnly(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("logs: open sqlite %q: %w", dsn, err)
 	}
