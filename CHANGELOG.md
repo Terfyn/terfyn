@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.
+
 - **`terfyn run --input` preserves whitespace in values** (issue #557): input values now retain all bytes after the first `=`, while keys continue to be trimmed and validated.
 
 - **`terfyn run --input` now accepts empty-string values** (issue #547): `--input key=` is valid and is treated consistently with an input file containing `{"key":""}`. Keys must still be non-empty, values containing `=` are preserved, and arguments without `=` remain invalid.

@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -84,11 +82,8 @@ func runStateList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("state: resolve state path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
-		return fmt.Errorf("state: create state directory: %w", err)
-	}
 
-	st, err := sqlite.Open(ctx, dsn)
+	st, err := sqlite.OpenReadOnly(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("state: open sqlite %q: %w", dsn, err)
 	}
@@ -132,11 +127,8 @@ func runStateShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("state: resolve state path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
-		return fmt.Errorf("state: create state directory: %w", err)
-	}
 
-	st, err := sqlite.Open(ctx, dsn)
+	st, err := sqlite.OpenReadOnly(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("state: open sqlite %q: %w", dsn, err)
 	}
