@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +19,11 @@ import (
 
 func TestStateList_emptyStore(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "state-empty.db")
+	st, err := sqlite.Open(t.Context(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
 
 	ResetGlobalsForTest()
 	cmd := NewRootCmd()
@@ -221,13 +228,18 @@ func TestStateShow_json_fullSpec(t *testing.T) {
 
 func TestStateShow_notFound_exit2(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "state-nope.db")
+	st, err := sqlite.Open(t.Context(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
 
 	ResetGlobalsForTest()
 	cmd := NewRootCmd()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"state", "show", "Agent/missing", "--project", testdataPath(t, "validate_ok"), "--state", db})
-	err := cmd.Execute()
+	err = cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -250,5 +262,180 @@ func TestStateShow_wrongArgCount_exit2(t *testing.T) {
 	}
 	if ExitCodeOf(err) != ExitValidationError {
 		t.Fatalf("code=%d err=%v", ExitCodeOf(err), err)
+	}
+}
+
+func TestStateList_missingParentDir(t *testing.T) {
+	parentDir := filepath.Join(t.TempDir(), "nested")
+	db := filepath.Join(parentDir, "state.db")
+
+	ResetGlobalsForTest()
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"state", "list", "--project", testdataPath(t, "validate_ok"), "--state", db})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected missing state database error, got nil")
+	}
+	if ExitCodeOf(err) == 0 {
+		t.Fatalf("error=%v has zero exit code", err)
+	}
+	if !strings.Contains(err.Error(), "state: open sqlite") {
+		t.Fatalf("error=%v, want 'state: open sqlite' diagnostic", err)
+	}
+	if _, statErr := os.Stat(parentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("parent directory was created: stat error=%v", statErr)
+	}
+	if _, statErr := os.Stat(db); !os.IsNotExist(statErr) {
+		t.Fatalf("state database file was created: stat error=%v", statErr)
+	}
+}
+
+func TestStateList_missingDBFile(t *testing.T) {
+	parentDir := t.TempDir()
+	db := filepath.Join(parentDir, "state.db")
+
+	ResetGlobalsForTest()
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"state", "list", "--project", testdataPath(t, "validate_ok"), "--state", db})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected missing state database error, got nil")
+	}
+	if ExitCodeOf(err) == 0 {
+		t.Fatalf("error=%v has zero exit code", err)
+	}
+	if !strings.Contains(err.Error(), "state: open sqlite") {
+		t.Fatalf("error=%v, want 'state: open sqlite' diagnostic", err)
+	}
+	if _, statErr := os.Stat(db); !os.IsNotExist(statErr) {
+		t.Fatalf("state database file was created: stat error=%v", statErr)
+	}
+}
+
+func TestStateShow_missingParentDir(t *testing.T) {
+	parentDir := filepath.Join(t.TempDir(), "nested")
+	db := filepath.Join(parentDir, "state.db")
+
+	ResetGlobalsForTest()
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"state", "show", "Agent/missing", "--project", testdataPath(t, "validate_ok"), "--state", db})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected missing state database error, got nil")
+	}
+	if ExitCodeOf(err) == 0 {
+		t.Fatalf("error=%v has zero exit code", err)
+	}
+	if !strings.Contains(err.Error(), "state: open sqlite") {
+		t.Fatalf("error=%v, want 'state: open sqlite' diagnostic", err)
+	}
+	if _, statErr := os.Stat(parentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("parent directory was created: stat error=%v", statErr)
+	}
+	if _, statErr := os.Stat(db); !os.IsNotExist(statErr) {
+		t.Fatalf("state database file was created: stat error=%v", statErr)
+	}
+}
+
+func TestStateShow_missingDBFile(t *testing.T) {
+	parentDir := t.TempDir()
+	db := filepath.Join(parentDir, "state.db")
+
+	ResetGlobalsForTest()
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"state", "show", "Agent/missing", "--project", testdataPath(t, "validate_ok"), "--state", db})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected missing state database error, got nil")
+	}
+	if ExitCodeOf(err) == 0 {
+		t.Fatalf("error=%v has zero exit code", err)
+	}
+	if !strings.Contains(err.Error(), "state: open sqlite") {
+		t.Fatalf("error=%v, want 'state: open sqlite' diagnostic", err)
+	}
+	if _, statErr := os.Stat(db); !os.IsNotExist(statErr) {
+		t.Fatalf("state database file was created: stat error=%v", statErr)
+	}
+}
+
+func TestStateInspection_doesNotAlterExistingDB(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	root = copyPlanFixture(t, root)
+	db := filepath.Join(t.TempDir(), "state-inspect.db")
+
+	g := &Global{ProjectRoot: root}
+	graph, _, err := prepareProjectGraph(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.Open(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, err := plan.NewPlanner(st).ComputePlan(ctx, "local", graph, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apply.NewApplier(st).ApplyPlan(ctx, "local", graph, pl, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeBytes, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHash := sha256.Sum256(beforeBytes)
+
+	ResetGlobalsForTest()
+	cmdList := NewRootCmd()
+	var listOut bytes.Buffer
+	cmdList.SetOut(&listOut)
+	cmdList.SetErr(&listOut)
+	cmdList.SetArgs([]string{"state", "list", "--project", root, "--state", db})
+	if err := cmdList.Execute(); err != nil {
+		t.Fatalf("state list failed: %v", err)
+	}
+	if !strings.Contains(listOut.String(), "Policy") {
+		t.Fatalf("unexpected state list output:\n%s", listOut.String())
+	}
+
+	ResetGlobalsForTest()
+	cmdShow := NewRootCmd()
+	var showOut bytes.Buffer
+	cmdShow.SetOut(&showOut)
+	cmdShow.SetErr(&showOut)
+	cmdShow.SetArgs([]string{"state", "show", "Policy/default", "--project", root, "--state", db})
+	if err := cmdShow.Execute(); err != nil {
+		t.Fatalf("state show failed: %v", err)
+	}
+	if !strings.Contains(showOut.String(), "Policy") {
+		t.Fatalf("unexpected state show output:\n%s", showOut.String())
+	}
+
+	afterBytes, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterHash := sha256.Sum256(afterBytes)
+
+	if beforeHash != afterHash {
+		t.Fatalf("database content altered by inspection: before=%x, after=%x", beforeHash, afterHash)
 	}
 }
