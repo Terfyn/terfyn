@@ -92,8 +92,6 @@ func TestReadLine_Boundaries(t *testing.T) {
 	}
 }
 
-
-
 func TestReadLine_UnexpectedEOF(t *testing.T) {
 	_, err := readLine(strings.NewReader(""))
 	if err == nil {
