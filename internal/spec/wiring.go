@@ -223,6 +223,23 @@ func checkConsumerType(
 			wfName, strings.TrimSpace(st.ID), withKey, consumerSchemaName(st),
 		)}
 	}
+	if cons.Impossible {
+		if schema.CompatibleLookup(prod, cons) {
+			return nil
+		}
+		srcType := "any"
+		if prod.Impossible {
+			srcType = "never"
+		} else if prod.Known {
+			srcType = prod.Types.String()
+		} else if !wholeField {
+			srcType = "string"
+		}
+		return []error{st.Pos.Errorf(
+			"workflow %s step %q: ${%s} (%s) does not match %s input %q (never)",
+			wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), withKey,
+		)}
+	}
 	if !cons.Known {
 		return nil
 	}

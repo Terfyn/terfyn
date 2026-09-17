@@ -31,6 +31,29 @@ func TestValidate_fixtureValidAndInvalid(t *testing.T) {
 	}
 }
 
+func TestValidate_booleanSchemas(t *testing.T) {
+	dir := t.TempDir()
+	truePath := filepath.Join(dir, "true.json")
+	falsePath := filepath.Join(dir, "false.json")
+	if err := os.WriteFile(truePath, []byte("true"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(falsePath, []byte("false"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(truePath, []byte(`{"x":1}`)); err != nil {
+		t.Fatalf("true schema must accept any instance: %v", err)
+	}
+	if err := Validate(truePath, []byte(`null`)); err != nil {
+		t.Fatalf("true schema must accept null: %v", err)
+	}
+	err := Validate(falsePath, []byte(`{}`))
+	var verr *ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("false schema must reject every instance, got %T: %v", err, err)
+	}
+}
+
 func TestLoadDocument_missingFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.schema.json")
 	_, err := LoadDocument(missing)
