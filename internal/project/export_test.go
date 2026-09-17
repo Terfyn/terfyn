@@ -2,11 +2,13 @@ package project
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Terfyn/terfyn/internal/schema"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
 
@@ -302,5 +304,160 @@ workflow W(input: X) { return input.x }
 	}
 	if string(first) != string(second) {
 		t.Fatalf("ExportYAML is not deterministic")
+	}
+}
+
+func typedExportGraph() *spec.ProjectGraph {
+	doc := &schema.Document{Raw: map[string]any{"type": "object"}}
+	return &spec.ProjectGraph{
+		Meta: spec.Metadata{Name: "demo"},
+		Agents: map[string]*spec.AgentResource{"A": {
+			APIVersion: spec.APIVersionV0, Kind: spec.KindAgent,
+			Metadata: spec.Metadata{Name: "A"},
+			Spec: spec.AgentSpec{Model: "openai/gpt-5", Input: &spec.AgentIO{
+				Schema:   "schemas/T.json",
+				Resolved: doc,
+			}},
+		}},
+	}
+}
+
+func snapshotExportDir(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		out[rel] = b
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func assertExportUnchanged(t *testing.T, dir string, before map[string][]byte) {
+	t.Helper()
+	after := snapshotExportDir(t, dir)
+	if len(after) != len(before) {
+		t.Fatalf("export tree changed: before %d files, after %d files (%v vs %v)", len(before), len(after), keysOf(before), keysOf(after))
+	}
+	for rel, want := range before {
+		got, ok := after[rel]
+		if !ok {
+			t.Fatalf("failed re-export deleted %s", rel)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("failed re-export changed %s", rel)
+		}
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func restoreExportHooks(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		exportMarshalIndent = json.MarshalIndent
+		exportMkdirAll = os.MkdirAll
+		exportWriteFile = os.WriteFile
+		exportRename = os.Rename
+		exportCommitAgent = writeFileAtomic
+	})
+}
+
+func successfulTypedExport(t *testing.T) (out string, g *spec.ProjectGraph, before map[string][]byte) {
+	t.Helper()
+	g = typedExportGraph()
+	out = filepath.Join(t.TempDir(), "out")
+	if err := WriteAgentProjectDir(out, g); err != nil {
+		t.Fatal(err)
+	}
+	schemaPath := filepath.Join(out, "schemas", "T.json")
+	if _, err := os.ReadFile(schemaPath); err != nil {
+		t.Fatalf("first export missing schema: %v", err)
+	}
+	return out, g, snapshotExportDir(t, out)
+}
+
+// TestFailedReExportPreservesPreviousSchemas is the issue #561 repro: a failed re-export
+// (unencodable schema value) must not delete or mutate the previous successful schemas/.
+func TestFailedReExportPreservesPreviousSchemas(t *testing.T) {
+	out, g, before := successfulTypedExport(t)
+	g.Agents["A"].Spec.Input.Resolved.Raw["unencodable"] = make(chan int)
+	if err := WriteAgentProjectDir(out, g); err == nil {
+		t.Fatal("unexpected success")
+	}
+	assertExportUnchanged(t, out, before)
+}
+
+func TestFailedReExportPreservesPreviousSchemas_Mkdir(t *testing.T) {
+	restoreExportHooks(t)
+	out, g, before := successfulTypedExport(t)
+	exportMkdirAll = func(path string, perm os.FileMode) error {
+		if filepath.Base(path) == exportSchemasDir {
+			return errors.New("injected mkdir failure")
+		}
+		return os.MkdirAll(path, perm)
+	}
+	if err := WriteAgentProjectDir(out, g); err == nil {
+		t.Fatal("unexpected success")
+	}
+	assertExportUnchanged(t, out, before)
+}
+
+func TestFailedReExportPreservesPreviousSchemas_SchemaWrite(t *testing.T) {
+	restoreExportHooks(t)
+	out, g, before := successfulTypedExport(t)
+	exportWriteFile = func(name string, data []byte, perm os.FileMode) error {
+		return errors.New("injected schema write failure")
+	}
+	if err := WriteAgentProjectDir(out, g); err == nil {
+		t.Fatal("unexpected success")
+	}
+	assertExportUnchanged(t, out, before)
+}
+
+func TestFailedReExportPreservesPreviousSchemas_SourceCommit(t *testing.T) {
+	restoreExportHooks(t)
+	out, g, before := successfulTypedExport(t)
+	exportCommitAgent = func(target string, data []byte) error {
+		return errors.New("injected source commit failure")
+	}
+	if err := WriteAgentProjectDir(out, g); err == nil {
+		t.Fatal("unexpected success")
+	}
+	assertExportUnchanged(t, out, before)
+}
+
+// TestWriteAgentProjectDir_ReExportDropsOrphanedSchemas proves a successful smaller re-export
+// still replaces schemas/ so an unused type file cannot reload.
+func TestWriteAgentProjectDir_ReExportDropsOrphanedSchemas(t *testing.T) {
+	out, g, _ := successfulTypedExport(t)
+	g.Agents["A"].Spec.Input = nil
+	if err := WriteAgentProjectDir(out, g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "schemas", "T.json")); !os.IsNotExist(err) {
+		t.Fatalf("orphaned schema survived successful re-export: %v", err)
 	}
 }
