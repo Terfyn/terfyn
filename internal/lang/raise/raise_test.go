@@ -32,6 +32,7 @@ func lowerToGraph(t *testing.T, src string) *spec.ProjectGraph {
 func TestRaise_RoundTrip(t *testing.T) {
 	src := `provider corporate-claude {
     type anthropic
+    baseUrl "https://api.anthropic.com"
     apiKeyFrom "env:CORP_KEY"
     workspaceIdFrom "env:CORP_WS"
 }
