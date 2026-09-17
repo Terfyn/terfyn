@@ -1,6 +1,10 @@
 package lower
 
 import (
+	"fmt"
+	"net/url"
+	"strings"
+
 	"github.com/Terfyn/terfyn/internal/lang"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
@@ -298,9 +302,10 @@ func lowerInterruptConfig(c *lang.InterruptConfig) *spec.HitlInterruptConfig {
 	return cfg
 }
 
-// provider lowers a `provider <alias> { type … apiKeyFrom … workspaceIdFrom … }` declaration to a
-// spec.ModelProviderConfig destined for spec.ProjectSpec.Providers.Models[alias] (issue #440). The
-// second return is false (with a diagnostic) when the alias or the required type is missing.
+// provider lowers a `provider <alias> { type … baseUrl … apiKeyFrom … workspaceIdFrom … }` declaration
+// to a spec.ModelProviderConfig destined for spec.ProjectSpec.Providers.Models[alias] (issue #440,
+// #546). The second return is false (with a diagnostic) when the alias or the required type is
+// missing, or when baseUrl is present but not an HTTP(S) endpoint.
 func (l *lowerer) provider(d *lang.ProviderDecl) (LoweredProvider, bool) {
 	name := identName(d.Name)
 	if name == "" {
@@ -312,15 +317,39 @@ func (l *lowerer) provider(d *lang.ProviderDecl) (LoweredProvider, bool) {
 		l.diag(d.Pos, "provider %q must declare a type (e.g. type anthropic)", name)
 		return LoweredProvider{}, false
 	}
+	baseURL := stringLitValue(d.BaseURL)
+	if baseURL != "" {
+		if err := validateProviderBaseURL(baseURL); err != nil {
+			pos := d.Pos
+			if d.BaseURL != nil {
+				pos = d.BaseURL.Pos
+			}
+			l.diag(pos, "provider %q %s", name, err.Error())
+			return LoweredProvider{}, false
+		}
+	}
 	return LoweredProvider{
 		Name: name,
 		Pos:  d.Pos,
 		Config: spec.ModelProviderConfig{
 			Type:            typ,
+			BaseURL:         baseURL,
 			APIKeyFrom:      stringLitValue(d.APIKeyFrom),
 			WorkspaceIDFrom: stringLitValue(d.WorkspaceIDFrom),
 		},
 	}, true
+}
+
+// validateProviderBaseURL requires an absolute http or https URL with a host (issue #546).
+func validateProviderBaseURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("baseUrl is not a valid URL: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("baseUrl must be an http(s) URL with a host, got %q", raw)
+	}
+	return nil
 }
 
 // defaults lowers the singleton `defaults { policy … model … runtime … }` block to a

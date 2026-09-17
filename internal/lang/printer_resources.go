@@ -370,13 +370,18 @@ func printEnvironment(p *printer, d *EnvironmentDecl) {
 	p.WriteString("}\n")
 }
 
-// printProvider renders `provider <alias> { type … apiKeyFrom "…" workspaceIdFrom "…" }` (issue #440).
+// printProvider renders `provider <alias> { type … baseUrl "…" apiKeyFrom "…" workspaceIdFrom "…" }`
+// (issue #440, #546).
 func printProvider(p *printer, d *ProviderDecl) {
 	fmt.Fprintf(p, "provider %s {\n", identName(d.Name))
 	if d.Type != nil {
 		p.leadingBefore(d.Type.Pos.Line, "    ")
 		p.field("    ", "type "+identName(d.Type), d.Type.Pos.Line)
 	}
+	if d.BaseURL != nil {
+		p.leadingBefore(d.BaseURL.Pos.Line, "    ")
+	}
+	printStringLitField(p, "    ", "baseUrl", d.BaseURL)
 	if d.APIKeyFrom != nil {
 		p.leadingBefore(d.APIKeyFrom.Pos.Line, "    ")
 	}

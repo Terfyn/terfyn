@@ -261,6 +261,7 @@ func TestPrint_ProviderRoundTrip(t *testing.T) {
 	t.Parallel()
 	src := `provider corporate-claude {
     type anthropic
+    baseUrl "https://api.anthropic.com"
     apiKeyFrom "env:CORP_ANTHROPIC_KEY"
     workspaceIdFrom "env:CORP_WORKSPACE"
 }
@@ -279,6 +280,7 @@ func TestPrint_ProviderRoundTrip(t *testing.T) {
 	}
 	for _, want := range []string{
 		"provider corporate-claude {", "type anthropic",
+		"baseUrl \"https://api.anthropic.com\"",
 		"apiKeyFrom \"env:CORP_ANTHROPIC_KEY\"", "workspaceIdFrom \"env:CORP_WORKSPACE\"",
 	} {
 		if !strings.Contains(once, want) {
