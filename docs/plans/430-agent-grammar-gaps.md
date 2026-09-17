@@ -35,7 +35,7 @@ Categorized by #430's framework. "Examples" = how many of the 15 example project
 | **Tool `mcp` transport** (`command`/`args`/`url`/`headers`) | `ToolSpec.MCP` | 0 | ✅ Closed by #447 — `tool { mcp { … } }`. |
 | **Tool `http` transport** (`baseURL`/headers/methods) | `ToolSpec.HTTP` | 0 | ✅ Closed by #447 — `tool { http { … } }`. |
 | **Policy `hitl`** (interrupt-on, review config) | `PolicySpec.Hitl` | 1 | ✅ Closed by this PR — `policy { hitl { … } }`. |
-| **Custom model providers / aliases** (`type` + `baseURL` + key) | `Providers.models` | 0 | ✅ Closed by this PR — top-level `provider <alias> { type … apiKeyFrom … workspaceIdFrom … }`. Built-ins stay implicit. |
+| **Custom model providers / aliases** (`type` + `baseURL` + key) | `Providers.models` | 0 | ✅ Closed by #440 + #546 — top-level `provider <alias> { type … baseUrl … apiKeyFrom … workspaceIdFrom … }`. `baseUrl` is an HTTP(S) endpoint passed to the selected adapter. Built-ins stay implicit. |
 
 ### B. Softer gaps (program semantics, but a workaround exists)
 
