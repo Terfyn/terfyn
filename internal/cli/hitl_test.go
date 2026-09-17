@@ -125,7 +125,7 @@ func TestPromptHitlDecision_MultiLineWithLargeEdit(t *testing.T) {
 	input := "edit\n" + string(editPayload) + "\n"
 	var out bytes.Buffer
 
-	dec, err := promptHitlDecision(strings.NewReader(input), &out, gate)
+	dec, err := promptHitlDecision(newHitlScanner(strings.NewReader(input)), &out, gate)
 	if err != nil {
 		t.Fatalf("promptHitlDecision failed on multi-line large edit: %v", err)
 	}
@@ -137,5 +137,37 @@ func TestPromptHitlDecision_MultiLineWithLargeEdit(t *testing.T) {
 	}
 	if gotVal, ok := dec.EditedWith["orig"].(string); !ok || gotVal != largeVal {
 		t.Fatalf("edited value mismatch: got len %d, want len %d", len(gotVal), len(largeVal))
+	}
+}
+
+func TestPromptHitlDecision_MultiGateSessionSharedScanner(t *testing.T) {
+	gate := policy.HitlGate{
+		Uses: "tool.demo.action",
+		With: map[string]any{"orig": "val"},
+		Review: policy.ResolvedHitlReview{
+			Description:      "Approve action",
+			AllowedDecisions: []spec.HitlDecisionKind{spec.HitlDecisionApprove},
+		},
+	}
+
+	// Two consecutive gates approved in a single session from a single reader.
+	input := "approve\napprove\n"
+	sc := newHitlScanner(strings.NewReader(input))
+	var out bytes.Buffer
+
+	dec1, err := promptHitlDecision(sc, &out, gate)
+	if err != nil {
+		t.Fatalf("gate 1 promptHitlDecision failed: %v", err)
+	}
+	if dec1 == nil || dec1.Kind != spec.HitlDecisionApprove {
+		t.Fatalf("gate 1 decision = %v, want approve", dec1)
+	}
+
+	dec2, err := promptHitlDecision(sc, &out, gate)
+	if err != nil {
+		t.Fatalf("gate 2 promptHitlDecision failed (buffered input dropped): %v", err)
+	}
+	if dec2 == nil || dec2.Kind != spec.HitlDecisionApprove {
+		t.Fatalf("gate 2 decision = %v, want approve", dec2)
 	}
 }

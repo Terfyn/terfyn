@@ -101,14 +101,14 @@ func parseHitlDecisionOptions(decision, editJSON, switchTarget string) (*runtime
 // CRLF (+2) termination of a maximum-length payload.
 const maxHitlLineBytes = maxDecisionEditJSONBytes + 2
 
-func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
+func maybePromptHitlDecision(sc *bufio.Scanner, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		return nil, nil
 	}
-	return promptHitlDecision(in, out, gate)
+	return promptHitlDecision(sc, out, gate)
 }
 
-func promptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
+func promptHitlDecision(sc *bufio.Scanner, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
 	actor := hitlActorFromEnv()
 	display := policy.RedactHitlArgs(gate.With, gate.Review.RedactKeys)
 	fmt.Fprintf(out, "\n%s\n", gate.Review.Description)
@@ -117,7 +117,9 @@ func promptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) (*pol
 	if len(gate.Review.SwitchTargets) > 0 {
 		fmt.Fprintf(out, "Switch targets: %v\n", gate.Review.SwitchTargets)
 	}
-	sc := newHitlScanner(in)
+	if sc == nil {
+		sc = newHitlScanner(os.Stdin)
+	}
 	for {
 		fmt.Fprintf(out, "Decision [approve/reject/edit/switch]: ")
 		line, err := scanHitlLine(sc)
