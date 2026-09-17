@@ -144,6 +144,86 @@ func TestGitCreateBranch_resetDiscardsPriorWork(t *testing.T) {
 	}
 }
 
+// reset:true must not abort on leftover uncommitted edits (issue #531). A prior run that edited
+// files and died before commit leaves a dirty tree; `switch -C` then fails with "local changes
+// would be overwritten by checkout" unless the working tree is cleaned first.
+func TestGitCreateBranch_resetCleansDirtyWorkingTree(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	reg := NewRegistry()
+	mainSHA := gitCfg(t, root, "rev-parse", "HEAD")
+
+	if _, _, err := reg.Dispatch(context.Background(), "create_branch", map[string]any{"name": "fix/264"}); err != nil {
+		t.Fatal(err)
+	}
+	// Commit one change so the fix branch diverges from main (otherwise checkout has nothing to
+	// overwrite and git will keep the dirt). Then leave further uncommitted edits, matching a
+	// failed run that never reached git.commit.
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("committed-wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "-A")
+	gitCfg(t, root, "commit", "-m", "half-finished attempt")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("uncommitted-wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "leftover.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := reg.Dispatch(context.Background(), "create_branch", map[string]any{"name": "fix/264", "reset": true, "base": "main"})
+	if err != nil {
+		t.Fatalf("reset create_branch with a dirty tree: %v", err)
+	}
+	if out["reset"] != true {
+		t.Fatalf("result %#v", out)
+	}
+	if head := gitCfg(t, root, "rev-parse", "HEAD"); head != mainSHA {
+		t.Fatalf("HEAD = %q, want reset back to main %q", head, mainSHA)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "seed\n" {
+		t.Fatalf("README.md = %q, want seed content after reset", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "leftover.txt")); !os.IsNotExist(err) {
+		t.Fatalf("leftover.txt should be gone after reset, err=%v", err)
+	}
+}
+
+// Without reset, a dirty tree that would be overwritten still fails — reset is the opt-in
+// destructive recovery path; the default create/switch must not clobber in-progress edits.
+func TestGitCreateBranch_dirtyTreeStillBlocksWithoutReset(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	reg := NewRegistry()
+
+	if _, _, err := reg.Dispatch(context.Background(), "create_branch", map[string]any{"name": "fix/264"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("on-fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "-A")
+	gitCfg(t, root, "commit", "-m", "fix-branch work")
+	gitCfg(t, root, "switch", "main")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("dirty-on-main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := reg.Dispatch(context.Background(), "create_branch", map[string]any{"name": "fix/264"})
+	if err == nil {
+		t.Fatal("create_branch without reset must refuse to overwrite a dirty tree")
+	}
+	if !strings.Contains(err.Error(), "overwritten") && !strings.Contains(err.Error(), "local changes") {
+		t.Fatalf("error should mention the dirty tree, got: %v", err)
+	}
+}
+
 // reset:true without base is refused (a reset to the current HEAD would be a no-op that silently
 // keeps the prior attempt's commits) — fail closed rather than claim a reset that did nothing (#517).
 func TestGitCreateBranch_resetRequiresBase(t *testing.T) {

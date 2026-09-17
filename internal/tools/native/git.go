@@ -114,6 +114,16 @@ func gitCreateBranch(ctx context.Context, with map[string]any) (map[string]any, 
 		if base == "" {
 			return nil, fmt.Errorf("native: create_branch: reset requires base (the ref to reset the branch to, e.g. base \"main\"); resetting to the current HEAD is a no-op when already on the branch")
 		}
+		// reset:true is already destructive (issue #531). `switch -C` moves the branch ref but
+		// refuses when leftover uncommitted edits from a prior aborted run would be overwritten,
+		// which is the exact recovery case this flag exists for. Discard tracked and untracked
+		// working-tree dirt first so the switch cannot be blocked. The non-reset path is unchanged.
+		if _, err := runGit(ctx, root, "reset", "--hard"); err != nil {
+			return nil, err
+		}
+		if _, err := runGit(ctx, root, "clean", "-fd"); err != nil {
+			return nil, err
+		}
 		// `switch -C <name> <base>` creates the branch or resets an existing one to the start point.
 		if _, err := runGit(ctx, root, "switch", "-C", name, base); err != nil {
 			return nil, err

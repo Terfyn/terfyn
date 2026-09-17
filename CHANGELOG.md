@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`git.create_branch` with `reset: true` now cleans leftover uncommitted edits instead of aborting** (issue #531): `reset` already force-recreated the branch at `base` (`switch -C`), which discards a prior attempt's *commits*, but it did not touch the working tree. A prior run that edited files (`write_file`/`edit`) and failed before `git.commit` left dirty tracked files; the next run's `create_branch(reset: true, base: "main")` then died with `error: Your local changes to the following files would be overwritten by checkout`. `reset: true` now `git reset --hard` and `git clean -fd` before the switch, so a re-run starts genuinely clean off base. The non-reset path is unchanged and still refuses to clobber a dirty tree. Tests cover the dirty-tree recovery and that omitting `reset` still blocks.
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.
