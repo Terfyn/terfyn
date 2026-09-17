@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Native `issues.list` and `pull_request.list` no longer return only GitHub's first page** (issue #559): both operations now request `per_page=100` and follow `Link: rel="next"` up to 10 pages (the same bound as `githubFindAgenticReviewCommentID`). An empty terminal page ends the walk. Hitting the page cap with a remaining next link sets `truncated: true` so a partial list is not presented as complete.
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.

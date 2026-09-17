@@ -221,7 +221,8 @@ func scalarToString(v any) (string, error) {
 }
 
 func githubGET(ctx context.Context, path, accept string, maxBody int64) ([]byte, error) {
-	return githubRequestBody(ctx, http.MethodGet, path, accept, maxBody)
+	b, _, err := githubRequest(ctx, http.MethodGet, path, accept, maxBody)
+	return b, err
 }
 
 func githubGETString(ctx context.Context, path, accept string, maxBody int64) (string, error) {
@@ -233,14 +234,26 @@ func githubGETString(ctx context.Context, path, accept string, maxBody int64) (s
 }
 
 func githubRequestBody(ctx context.Context, method, path, accept string, maxBody int64) ([]byte, error) {
+	b, _, err := githubRequest(ctx, method, path, accept, maxBody)
+	return b, err
+}
+
+func githubAbsoluteURL(pathOrURL string) string {
+	if strings.HasPrefix(pathOrURL, "http://") || strings.HasPrefix(pathOrURL, "https://") {
+		return pathOrURL
+	}
+	return strings.TrimSuffix(githubAPIBase(), "/") + pathOrURL
+}
+
+func githubRequest(ctx context.Context, method, path, accept string, maxBody int64) ([]byte, http.Header, error) {
 	token, err := githubToken()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	fullURL := strings.TrimSuffix(githubAPIBase(), "/") + path
+	fullURL := githubAbsoluteURL(path)
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", githubUserAgent)
@@ -254,16 +267,16 @@ func githubRequestBody(ctx context.Context, method, path, accept string, maxBody
 	cli := defaultGitHubHTTPClient()
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("native: github request: %w", err)
+		return nil, nil, fmt.Errorf("native: github request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	b, err := readGitHubResponseBody(resp, maxBody)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("native: github HTTP %s: %s", resp.Status, truncateRunes(string(b), 512))
+		return nil, nil, fmt.Errorf("native: github HTTP %s: %s", resp.Status, truncateRunes(string(b), 512))
 	}
-	return b, nil
+	return b, resp.Header.Clone(), nil
 }
