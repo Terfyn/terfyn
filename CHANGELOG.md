@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Read-only `git.diff` and `git.status` so a Reviewer grades the actual working-tree delta** (issue #534): the native git adapter had `create_branch` / `commit` / `push_branch` but no way to *inspect* what changed, so an independent Reviewer could only read the post-edit tree (or trust the Implementer's prose summary). Two workspace.read ops close that: **`diff`** returns a unified diff (working tree vs HEAD by default, so staged and unstaged tracked edits both show; `staged: true` is `git diff --cached`; `base` names a ref such as `main`; `paths` scopes the pathspec) and **`status`** lists changed/added/deleted/untracked paths from porcelain v1 (the cheap "what changed" summary before deciding what to read). Both are bounded like `grep`/`read_file` (`truncated: true` past a 1 MiB diff or 1000 status entries), run in `TERFYN_WORKSPACE_ROOT`, and refuse flag-like `base` names. They are concrete capabilities: an author must declare and grant them on the Tool resource (effect `workspace.read`) — a git tool that lists only write ops does not gain them for free, and a read-only Reviewer can be granted them exactly like `read_file`. Untracked files appear in `status`, not in `diff` (git's own rule). Tests cover a dirty-tree listing, a clean empty status, a working-tree hunk, pathspec scoping, a `base` ref, staged-vs-unstaged, an invalid `base`, and a missing workspace root.
+
 ### Fixed
 
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
