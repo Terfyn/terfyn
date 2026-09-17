@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Nested execir subworkflows keep the interpreter return value** (issues #551, #552): `InvokeWorkflow` discarded `RunResumable`'s result and rebuilt output from the retired WorkflowStep projection, so an identity `return value` failed with `interpolation: path "input" must use input.<field>...`. Nested runs now go through `execIROutput` like the root path. Single-value `.agent` returns stay unwrapped for the caller so the parent does not double-wrap `{value: …}`. Object-literal returns use the interpreter map instead of interpolating flattened keys. A single-parameter positional call now passes the argument as the child's whole input document (`paramScope` whole-document rule) instead of wrapping it under the parameter name. YAML multi-key outputs are unchanged.
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.
