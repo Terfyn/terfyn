@@ -226,7 +226,8 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	ctx2, cancelWC := e.wallClockDeadline(ctx2, pol, pctx)
 	defer cancelWC()
 
-	payload, err := json.Marshal(with)
+	doc := agentInputDocument(with)
+	payload, err := json.Marshal(doc)
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
@@ -264,7 +265,7 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	if err != nil {
 		return nil, meta, err
 	}
-	out = e.restoreReadOnlyAgentOutput(ctx, runID, step, agent, with, out)
+	out = e.restoreReadOnlyAgentOutput(ctx, runID, step, agent, doc, out)
 	return out, meta, nil
 }
 

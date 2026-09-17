@@ -123,6 +123,28 @@ func TestReadOnlyPropertyNames(t *testing.T) {
 		{name: "sorted", raw: sorted, want: []string{"a", "z"}},
 		{name: "ref to defs", raw: ref, want: []string{"task"}},
 		{name: "readOnly false is ignored", raw: ignored, want: nil},
+		{name: "root $ref to object def", raw: map[string]any{
+			"$ref": "#/$defs/state",
+			"$defs": map[string]any{
+				"state": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task":    map[string]any{"type": "string", "readOnly": true},
+						"summary": map[string]any{"type": "string"},
+					},
+				},
+			},
+		}, want: []string{"task"}},
+		{name: "allOf merges readOnly properties", raw: map[string]any{
+			"allOf": []any{
+				map[string]any{"properties": map[string]any{
+					"task": map[string]any{"type": "string", "readOnly": true},
+				}},
+				map[string]any{"properties": map[string]any{
+					"summary": map[string]any{"type": "string"},
+				}},
+			},
+		}, want: []string{"task"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -101,34 +101,66 @@ func LoadDocument(schemaPath string) (*Document, error) {
 
 // ReadOnlyPropertyNames returns the top-level object property names marked readOnly
 // (JSON Schema draft 2020-12). Order is sorted. A $ref on a property is resolved locally
-// so `{"$ref":"#/$defs/task"}` with readOnly on the def is honored. Nested readOnly is
-// out of scope: the engine threads identity at the object-root fields of agent I/O
-// (issue #533).
+// so `{"$ref":"#/$defs/task"}` with readOnly on the def is honored. Root $ref and allOf
+// compositions are followed so a schema that validates via
+// `{"$ref":"#/$defs/state"}` or allOf still exposes the identity fields (issue #533).
+// Nested readOnly is out of scope: the engine threads identity at the object-root
+// fields of agent I/O.
 func ReadOnlyPropertyNames(raw map[string]any) []string {
 	if raw == nil {
 		return nil
 	}
-	props, ok := asObject(raw["properties"])
-	if !ok {
+	d := &Document{Raw: raw}
+	set := map[string]struct{}{}
+	collectReadOnlyNames(d, raw, set, 0)
+	if len(set) == 0 {
 		return nil
 	}
-	d := &Document{Raw: raw}
-	var names []string
-	for k, v := range props {
-		sm := asSchemaMap(v)
-		if sm == nil {
-			continue
-		}
-		sm = resolveLocalRef(d, sm, 0)
-		if sm == nil {
-			continue
-		}
-		if b, ok := sm["readOnly"].(bool); ok && b {
-			names = append(names, k)
-		}
+	names := make([]string, 0, len(set))
+	for k := range set {
+		names = append(names, k)
 	}
 	sort.Strings(names)
 	return names
+}
+
+func collectReadOnlyNames(d *Document, node map[string]any, set map[string]struct{}, depth int) {
+	if node == nil || depth > maxSchemaDepth {
+		return
+	}
+	// $ref siblings are independent applicators (draft 2020-12): follow the target
+	// without dropping properties/allOf on this node. resolveLocalRef returns the
+	// original node when the pointer cannot be followed — skip that to avoid a loop.
+	if ref, ok := node["$ref"].(string); ok && strings.HasPrefix(ref, "#/") {
+		if resolved := resolveLocalRef(d, node, depth); resolved != nil {
+			next, has := resolved["$ref"].(string)
+			if !has || next != ref {
+				collectReadOnlyNames(d, resolved, set, depth+1)
+			}
+		}
+	}
+	if props, ok := asObject(node["properties"]); ok {
+		for k, v := range props {
+			sm := asSchemaMap(v)
+			if sm == nil {
+				continue
+			}
+			sm = resolveLocalRef(d, sm, depth+1)
+			if sm == nil {
+				continue
+			}
+			if b, ok := sm["readOnly"].(bool); ok && b {
+				set[k] = struct{}{}
+			}
+		}
+	}
+	if allOf, ok := node["allOf"].([]any); ok {
+		for _, item := range allOf {
+			if sm := asSchemaMap(item); sm != nil {
+				collectReadOnlyNames(d, sm, set, depth+1)
+			}
+		}
+	}
 }
 
 // Lookup returns the schema constraint at a dotted property path from the document root.

@@ -143,7 +143,7 @@ func (e *Executor) restoreReadOnlyAgentOutput(ctx context.Context, runID string,
 	if len(names) == 0 {
 		return out
 	}
-	restored := restoreReadOnlyFields(out, prior, names)
+	restored := restoreReadOnlyFields(out, agentInputDocument(prior), names)
 	if len(restored) == 0 || e.Trace == nil {
 		return out
 	}
@@ -176,6 +176,24 @@ func restoreReadOnlyFields(out, prior map[string]any, names []string) []string {
 		restored = append(restored, name)
 	}
 	return restored
+}
+
+// agentInputDocument returns the object the agent is asked to transform.
+// A single positional argument is lowered under "arg0"; when that value is an
+// object, it is the whole input document (Implementer(state)), not a field named
+// arg0. Named multi-argument calls keep their map as-is. Used for both the
+// prompt payload and readOnly identity restore so the flagship positional path
+// sees prior["task"] rather than prior["arg0"]["task"] (issue #533).
+func agentInputDocument(with map[string]any) map[string]any {
+	if with == nil {
+		return nil
+	}
+	if len(with) == 1 {
+		if inner, ok := with["arg0"].(map[string]any); ok && inner != nil {
+			return inner
+		}
+	}
+	return with
 }
 
 func jsonValuesEqual(a, b any) bool {

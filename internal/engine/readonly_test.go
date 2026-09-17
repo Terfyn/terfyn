@@ -105,6 +105,106 @@ func TestRestoreReadOnlyAgentOutput_noReadOnlyIsNoop(t *testing.T) {
 	}
 }
 
+func TestRestoreReadOnlyAgentOutput_positionalArg0IsWholeDocument(t *testing.T) {
+	agent := &spec.AgentResource{
+		Metadata: spec.Metadata{Name: "Implementer"},
+		Spec:     spec.AgentSpec{Output: &spec.AgentIO{Schema: "./CodingState.json"}},
+	}
+	e := &Executor{PinnedGraph: true, Schemas: map[string]string{"./CodingState.json": codingStateSchema}}
+	// Flagship lowering: Implementer(state) arrives as Args["arg0"] = state.
+	prior := map[string]any{
+		"arg0": map[string]any{
+			"task":     "implement issue 533",
+			"approved": false,
+			"feedback": []any{},
+			"summary":  "",
+		},
+	}
+	out := map[string]any{
+		"task":     "placeholder",
+		"approved": false,
+		"feedback": []any{},
+		"summary":  "placeholder",
+	}
+	got := e.restoreReadOnlyAgentOutput(context.Background(), "run-1", spec.WorkflowStep{ID: "implement"}, agent, prior, out)
+	if got["task"] != "implement issue 533" {
+		t.Fatalf("task = %v, want prior identity restored from arg0 document", got["task"])
+	}
+}
+
+func TestAgentInputDocument_unwrapsPositionalObject(t *testing.T) {
+	inner := map[string]any{"task": "fix the parser"}
+	got := agentInputDocument(map[string]any{"arg0": inner})
+	if got["task"] != "fix the parser" {
+		t.Fatalf("positional document = %v, want unwrapped object", got)
+	}
+	named := map[string]any{"task": "x", "summary": "y"}
+	if agentInputDocument(named)["task"] != "x" {
+		t.Fatal("named multi-arg map must stay as-is")
+	}
+}
+
+const refRootSchema = `{
+  "$ref": "#/$defs/state",
+  "$defs": {
+    "state": {
+      "type": "object",
+      "properties": {
+        "task": {"type": "string", "readOnly": true},
+        "summary": {"type": "string"}
+      }
+    }
+  }
+}`
+
+const allOfRootSchema = `{
+  "allOf": [
+    {
+      "type": "object",
+      "properties": {
+        "task": {"type": "string", "readOnly": true}
+      }
+    },
+    {
+      "type": "object",
+      "properties": {
+        "summary": {"type": "string"}
+      }
+    }
+  ]
+}`
+
+func TestRestoreReadOnlyAgentOutput_rootRefSchema(t *testing.T) {
+	agent := &spec.AgentResource{
+		Metadata: spec.Metadata{Name: "Implementer"},
+		Spec:     spec.AgentSpec{Output: &spec.AgentIO{Schema: "./CodingState.json"}},
+	}
+	e := &Executor{PinnedGraph: true, Schemas: map[string]string{"./CodingState.json": refRootSchema}}
+	prior := map[string]any{"task": "implement issue 533", "summary": "old"}
+	out := map[string]any{"task": "placeholder", "summary": "new"}
+	got := e.restoreReadOnlyAgentOutput(context.Background(), "run-1", spec.WorkflowStep{ID: "implement"}, agent, prior, out)
+	if got["task"] != "implement issue 533" {
+		t.Fatalf("root $ref readOnly task = %v, want prior identity", got["task"])
+	}
+	if got["summary"] != "new" {
+		t.Fatalf("mutable summary should stay as emitted, got %v", got["summary"])
+	}
+}
+
+func TestRestoreReadOnlyAgentOutput_allOfSchema(t *testing.T) {
+	agent := &spec.AgentResource{
+		Metadata: spec.Metadata{Name: "Implementer"},
+		Spec:     spec.AgentSpec{Output: &spec.AgentIO{Schema: "./CodingState.json"}},
+	}
+	e := &Executor{PinnedGraph: true, Schemas: map[string]string{"./CodingState.json": allOfRootSchema}}
+	prior := map[string]any{"task": "implement issue 533", "summary": "old"}
+	out := map[string]any{"task": "placeholder", "summary": "new"}
+	got := e.restoreReadOnlyAgentOutput(context.Background(), "run-1", spec.WorkflowStep{ID: "implement"}, agent, prior, out)
+	if got["task"] != "implement issue 533" {
+		t.Fatalf("allOf readOnly task = %v, want prior identity", got["task"])
+	}
+}
+
 func TestRestoreReadOnlyAgentOutput_gradualNoSchema(t *testing.T) {
 	agent := &spec.AgentResource{Metadata: spec.Metadata{Name: "a"}}
 	e := &Executor{}
