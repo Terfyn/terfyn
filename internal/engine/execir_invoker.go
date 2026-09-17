@@ -436,7 +436,8 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	if depth > maxDepth {
 		return nil, fmt.Errorf("engine: step %q: workflow nesting depth %d exceeds maxWorkflowNesting %d", site.Bind, depth, maxDepth)
 	}
-	if err := a.e.validateWorkflowInputSchema(callee, args); err != nil {
+	childInput := unwrapSingleParamWorkflowInput(a.e.Executables[workflow], args)
+	if err := a.e.validateWorkflowInputSchema(callee, childInput); err != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q input: %w", site.Bind, workflow, err)
 	}
 
@@ -512,16 +513,17 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 			return nil, fmt.Errorf("engine: lower subworkflow %q to execir: %w", workflow, derr)
 		}
 		childProg = lowered
+		childInput = unwrapSingleParamWorkflowInput(childProg, args)
 	}
 
 	childInv := newEngineInvoker(&child, childIn, callee, wfPol, a.runHandle, a.cost, a.runStartedAt)
-	childInv.ictx = Context{Input: args, Steps: map[string]StepResult{}}
+	childInv.ictx = Context{Input: childInput, Steps: map[string]StepResult{}}
 
 	var childSeed *execir.RunState
 	if ns := a.claimNestedSeed(key); ns != nil && strings.TrimSpace(ns.Workflow) == workflow {
 		in := ns.Input
 		if in == nil {
-			in = args
+			in = childInput
 		}
 		steps := ns.Steps
 		if steps == nil {
@@ -538,7 +540,10 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	}
 
 	childInterp := &execir.Interp{Invoker: childInv, MaxConcurrency: a.in.MaxConcurrentSteps}
-	_, childState, rerr := childInterp.RunResumable(ctx, childProg, childInv.ictx.Input, childSeed)
+	// Keep the interpreter return value. The flattened WorkflowStep projection is
+	// inert for execir control flow, so rebuilding output from it (buildWorkflowOutput)
+	// drops identity/branch/loop returns (#551). Root already uses execIROutput.
+	returnValue, childState, rerr := childInterp.RunResumable(ctx, childProg, childInv.ictx.Input, childSeed)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -565,9 +570,26 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 		return nil, execir.ErrSuspend
 	}
 
-	out, oerr := buildWorkflowOutput(callee, childInv.snapshotIctx())
+	snap := childInv.snapshotIctx()
+	out, oerr := child.execIROutput(callee, returnValue, snap)
 	if oerr != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q output: %w", site.Bind, workflow, oerr)
+	}
+	// Caller-visible value is the child's Return (single-value .agent) or the
+	// multi-key YAML output map. Wrapping the Return in {value: …} here would
+	// double-wrap when the parent also goes through execIROutput.
+	caller := any(out)
+	if isSingleValueOutput(callee) {
+		caller = returnValue
+	} else if returnValue != nil {
+		// Object-literal returns flatten to multi-key output.value, so
+		// execIROutput would interpolate the inert projection. Use the Return.
+		if m, ok := returnValue.(map[string]any); ok {
+			out = m
+			caller = m
+		} else {
+			caller = returnValue
+		}
 	}
 	if a.e.Trace != nil {
 		_, _ = a.e.Trace.Append(ctx, a.in.RunID, a.e.qualID(site.Bind), trace.EventWorkflowCallFinished, trace.ActorSystem, map[string]any{
@@ -583,7 +605,27 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	a.mu.Lock()
 	a.ictx.Steps[site.Bind] = StepResult{Output: out, Meta: map[string]any{}}
 	a.mu.Unlock()
-	return out, nil
+	return caller, nil
+}
+
+// unwrapSingleParamWorkflowInput implements whole-document call semantics for a
+// single-parameter callee (#552). Positional lowering emits {param: document} (or
+// {arg0: document}); paramScope then binds the parameter to that wrapper. When
+// the callee has one parameter and the call supplied one map argument, pass the
+// argument as the child input document.
+func unwrapSingleParamWorkflowInput(prog *execir.Program, args map[string]any) map[string]any {
+	if args == nil {
+		return args
+	}
+	if prog == nil || len(prog.Params) != 1 || len(args) != 1 {
+		return args
+	}
+	for _, v := range args {
+		if m, ok := v.(map[string]any); ok {
+			return m
+		}
+	}
+	return args
 }
 
 // run wraps one leaf invocation with the admit/persist/cost/commit envelope the
