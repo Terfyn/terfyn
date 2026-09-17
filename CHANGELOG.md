@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Provider aliases accept `baseUrl` for custom model endpoints** (issue #546): `provider <alias> { type … baseUrl "https://…" … }` was documented and marked complete, but the parser rejected `baseUrl`, `ModelProviderConfig` had no field, and every adapter constructor hardcoded the vendor URL. The field now parses, round-trips through lower/raise/`fmt`, validates as an HTTP(S) URL with a host, participates in plan/deployment identity, and is passed to the OpenAI, OpenAI-compatible (Grok/Gemini/Kimi), and Anthropic adapters. Empty `baseUrl` still uses the vendor default.
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.

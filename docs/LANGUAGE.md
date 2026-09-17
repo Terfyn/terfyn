@@ -270,10 +270,11 @@ policy coding {
   agent/policy overrides applied by `--env`, lowering identically to the YAML `Environment` resource
   (ADR 005 §2). An agent override sets `model` and/or `constraints`; a policy override sets `execution`
   and/or `approvals` (its `requiredFor` entries union onto the base policy).
-- Provider: `provider <alias> { type <ident> apiKeyFrom "env:VAR" workspaceIdFrom "env:VAR" }` (#440) —
+- Provider: `provider <alias> { type <ident> baseUrl "https://…" apiKeyFrom "env:VAR" workspaceIdFrom "env:VAR" }` (#440, #546) —
   a custom/aliased model provider lowering into the project's `providers.models[<alias>]`. `type` is
-  required (the underlying provider — `anthropic` / `openai` / `mock` / …); the two credential
-  references are optional `env:VAR` strings. Built-in namespaces (`anthropic`, `openai`, `gemini`,
+  required (the underlying provider — `anthropic` / `openai` / `mock` / …); `baseUrl` is an optional
+  HTTP(S) model endpoint (empty means the adapter's vendor URL); the two credential references are
+  optional `env:VAR` strings. Built-in namespaces (`anthropic`, `openai`, `gemini`,
   `grok`, `kimi`, `mock`) resolve implicitly and need **no** declaration — `provider` is only for
   aliases, custom endpoints, and credentials. An agent then selects it as `model <alias>/<model-name>`.
 - Defaults: `defaults { policy <name> model <provider>/<name> runtime <name> }` (#440, [ADR 007](adr/007-remove-yaml-ingestion.md)) —

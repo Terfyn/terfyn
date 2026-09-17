@@ -31,7 +31,12 @@ func NewAnthropicClientFromConfig(cfg spec.ModelProviderConfig) (*anthropicClien
 		}
 	}
 	return &anthropicClient{
-		inner: &anthropic.Client{APIKey: key, WorkspaceID: workspaceID, HTTPClient: http.DefaultClient},
+		inner: &anthropic.Client{
+			APIKey:      key,
+			BaseURL:     ResolveProviderBaseURL(cfg, ""),
+			WorkspaceID: workspaceID,
+			HTTPClient:  http.DefaultClient,
+		},
 	}, nil
 }
 
