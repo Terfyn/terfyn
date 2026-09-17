@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Execution-IR integer comparisons stay exact above 2^53** (issue #560): `valuesEqual` and `compareOrdered` converted every `int`/`int64` operand to `float64` before `==`/`</>/<=/>=`, so distinct integers outside the binary64 exact range collapsed (`9007199254740992 == 9007199254740993` was true, and `<` was false). That could pick the wrong `if` arm, stop a bounded loop early, or take the wrong retry path on valid integer workflow data. Integer-vs-integer comparisons are now exact; mixed integer/float comparisons are range-aware and do not round the integer before deciding equality or order. `1 == 1.0` is unchanged. Tests cover ±2^53, `MaxInt64`/`MinInt64`, integer/float mixtures, negatives, ordinary floats, NaN, and a branch that takes the correct arm for the 2^53+1 pair.
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.

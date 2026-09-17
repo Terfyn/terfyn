@@ -3,6 +3,7 @@ package execir
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -231,13 +232,17 @@ func truthy(v any) bool {
 // carry, so `==` is defined on the JSON objects and arrays a workflow input
 // holds — a bare `a == b` on `any` would panic ("comparing uncomparable type")
 // for a map or slice operand. Numbers compare numerically across int64/float64
-// (1 == 1.0), strings/bools by value, arrays and objects structurally (element-
-// and key-wise, recursively, with the same numeric normalization), and anything
-// else via reflect.DeepEqual, which never panics. A type mismatch is unequal.
+// (1 == 1.0) without rounding integers through float64, so values above 2^53
+// stay distinct. strings/bools compare by value, arrays and objects structurally
+// (element- and key-wise, recursively, with the same numeric normalization),
+// and anything else via reflect.DeepEqual, which never panics. A type mismatch
+// is unequal.
 func valuesEqual(a, b any) bool {
-	if af, aok := toFloat(a); aok {
-		bf, bok := toFloat(b)
-		return bok && af == bf
+	if cmp, ok := tryCompareNumeric(a, b); ok {
+		return cmp == 0
+	}
+	if isNumeric(a) || isNumeric(b) {
+		return false
 	}
 	switch av := a.(type) {
 	case []any:
@@ -270,32 +275,49 @@ func valuesEqual(a, b any) bool {
 
 // compareOrdered evaluates <, <=, >, >= over numeric operands. A non-numeric
 // operand is an error — ordering strings or booleans is not defined in the
-// surface.
+// surface. Integer operands are compared exactly; mixed integer/float
+// comparisons do not round the integer through float64.
 func compareOrdered(op string, a, b any) (bool, error) {
-	af, aok := toFloat(a)
-	bf, bok := toFloat(b)
-	if !aok || !bok {
+	cmp, ok := tryCompareNumeric(a, b)
+	if !ok {
+		if isNumeric(a) && isNumeric(b) {
+			// NaN is unordered: every relational operator is false.
+			return false, nil
+		}
 		return false, fmt.Errorf("execir: operator %q needs numeric operands, got %T and %T", op, a, b)
 	}
 	switch op {
 	case "<":
-		return af < bf, nil
+		return cmp < 0, nil
 	case "<=":
-		return af <= bf, nil
+		return cmp <= 0, nil
 	case ">":
-		return af > bf, nil
+		return cmp > 0, nil
 	case ">=":
-		return af >= bf, nil
+		return cmp >= 0, nil
 	}
 	return false, fmt.Errorf("execir: unknown operator %q", op)
 }
 
-func toFloat(v any) (float64, bool) {
+func isNumeric(v any) bool {
+	_, i := asInt64(v)
+	_, f := asFloat64(v)
+	return i || f
+}
+
+func asInt64(v any) (int64, bool) {
 	switch x := v.(type) {
 	case int:
-		return float64(x), true
+		return int64(x), true
 	case int64:
-		return float64(x), true
+		return x, true
+	default:
+		return 0, false
+	}
+}
+
+func asFloat64(v any) (float64, bool) {
+	switch x := v.(type) {
 	case float64:
 		return x, true
 	case float32:
@@ -303,4 +325,104 @@ func toFloat(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// maxExactInt is the largest integer magnitude float64 can represent exactly
+// (the IEEE-754 binary64 significand is 53 bits, including the implicit bit).
+const maxExactInt int64 = 1 << 53
+
+// floatMinInt64 is MinInt64 as float64 (−2^63), which is exact.
+// floatMaxInt64Exclusive is 2^63: MaxInt64 is not a float64, and every finite
+// float64 ≥ 2^63 is strictly greater than any int64.
+const (
+	floatMinInt64          = -9223372036854775808.0
+	floatMaxInt64Exclusive = 9223372036854775808.0
+)
+
+// tryCompareNumeric compares two numeric values. ok is false when either
+// operand is non-numeric, or when a float operand is NaN (unordered).
+func tryCompareNumeric(a, b any) (int, bool) {
+	ai, aInt := asInt64(a)
+	bi, bInt := asInt64(b)
+	af, aFlt := asFloat64(a)
+	bf, bFlt := asFloat64(b)
+	switch {
+	case aInt && bInt:
+		return cmpInt64(ai, bi), true
+	case aInt && bFlt:
+		return compareIntFloat(ai, bf)
+	case aFlt && bInt:
+		c, ok := compareIntFloat(bi, af)
+		return -c, ok
+	case aFlt && bFlt:
+		switch {
+		case math.IsNaN(af) || math.IsNaN(bf):
+			return 0, false
+		case af < bf:
+			return -1, true
+		case af > bf:
+			return 1, true
+		default:
+			return 0, true
+		}
+	default:
+		return 0, false
+	}
+}
+
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// compareIntFloat compares an integer to a float without rounding the integer
+// through float64 when |i| > 2^53. ok is false when f is NaN.
+func compareIntFloat(i int64, f float64) (int, bool) {
+	if math.IsNaN(f) {
+		return 0, false
+	}
+	if math.IsInf(f, 1) {
+		return -1, true
+	}
+	if math.IsInf(f, -1) {
+		return 1, true
+	}
+	if i >= -maxExactInt && i <= maxExactInt {
+		fi := float64(i)
+		switch {
+		case fi < f:
+			return -1, true
+		case fi > f:
+			return 1, true
+		default:
+			return 0, true
+		}
+	}
+	if f >= floatMaxInt64Exclusive {
+		return -1, true
+	}
+	if f < floatMinInt64 {
+		return 1, true
+	}
+	trunc := math.Trunc(f)
+	ti := int64(trunc)
+	if f == trunc {
+		return cmpInt64(i, ti), true
+	}
+	if f > 0 {
+		if i <= ti {
+			return -1, true
+		}
+		return 1, true
+	}
+	if i < ti {
+		return -1, true
+	}
+	return 1, true
 }
