@@ -10,11 +10,12 @@ import (
 	"time"
 )
 
-// Native git adapter (issue #331): exactly two operations — create a local branch and push a
-// branch to a remote — so "propose a fix on a branch, human approves the push" is expressible with
-// no custom tool. Deliberately narrow: no push to the default branch, no --force, no branch delete,
-// no arbitrary git. push_branch is meant to sit in approvals.requiredFor, like
-// pull_request.post_comment, so the run suspends for approval before anything leaves the machine.
+// Native git adapter (issue #331): a narrow set of git operations so "propose a fix on a branch,
+// human approves the push" is expressible with no custom tool — plus read-only inspection so a
+// Reviewer can grade the actual working-tree delta (issue #534), not the Implementer's summary.
+// Deliberately narrow: no push to the default branch, no --force, no branch delete, no arbitrary
+// git. push_branch is meant to sit in approvals.requiredFor, like pull_request.post_comment, so the
+// run suspends for approval before anything leaves the machine.
 //
 // Both ops run in the workspace sandbox (TERFYN_WORKSPACE_ROOT, the same root the workspace adapter
 // uses); push uses the ambient git credentials / GITHUB_TOKEN, like the github adapter's live path.
@@ -368,6 +369,183 @@ func validateAuthor(author string) (string, error) {
 		}
 	}
 	return author, nil
+}
+
+// maxGitDiffRunes caps a git.diff result the same way grep/read_file cap theirs (1 MiB of runes
+// for ASCII diffs) so a huge working tree degrades to truncated=true rather than an unbounded
+// tool observation. maxGitStatusEntries caps git.status the same way glob caps match counts.
+const (
+	maxGitDiffRunes     = maxWorkspaceReadBytes
+	maxGitStatusEntries = 1000
+)
+
+// gitDiff returns a unified diff of the workspace repository (issue #534). Default is working
+// tree vs HEAD (staged + unstaged tracked changes). staged:true diffs the index vs HEAD (or vs
+// base). base names a ref to diff against (e.g. "main"). paths optionally scopes the pathspec.
+// Untracked files do not appear in the diff — git.status lists those. The result is truncated
+// like grep rather than unbounded.
+func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
+	root, err := workspaceRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := pathsFromWith(with, "paths")
+	if err != nil {
+		return nil, fmt.Errorf("native: diff: %w", err)
+	}
+	staged, _, err := optionalBoolFromWith(with, "staged")
+	if err != nil {
+		return nil, fmt.Errorf("native: diff: %w", err)
+	}
+	rawBase, _, err := optionalStringFromWith(with, "base")
+	if err != nil {
+		return nil, fmt.Errorf("native: diff: %w", err)
+	}
+	var base string
+	if rawBase != "" {
+		if base, err = validateBranchName("base", rawBase); err != nil {
+			return nil, fmt.Errorf("native: diff: %w", err)
+		}
+	}
+
+	args := []string{"diff", "--no-color", "--no-ext-diff"}
+	if staged {
+		args = append(args, "--cached")
+	}
+	switch {
+	case base != "":
+		args = append(args, base)
+	case !staged:
+		// Working tree vs HEAD so staged and unstaged tracked edits both show; untracked files
+		// stay on git.status (git diff never includes them).
+		args = append(args, "HEAD")
+	}
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, paths...)
+	}
+	out, err := runGit(ctx, root, args...)
+	if err != nil {
+		return nil, err
+	}
+	truncated := false
+	diff := out
+	if r := []rune(out); len(r) > maxGitDiffRunes {
+		diff = string(r[:maxGitDiffRunes]) + "…"
+		truncated = true
+	}
+	result := map[string]any{"diff": diff, "truncated": truncated}
+	if base != "" {
+		result["base"] = base
+	}
+	if staged {
+		result["staged"] = true
+	}
+	return result, nil
+}
+
+// gitStatus lists changed/added/deleted/untracked paths in the workspace repository (issue #534).
+// Porcelain v1 so the result is stable for a Reviewer to enumerate before deciding what to read.
+// paths optionally scopes the pathspec. The file list is capped like glob.
+func gitStatus(ctx context.Context, with map[string]any) (map[string]any, error) {
+	root, err := workspaceRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	paths, err := pathsFromWith(with, "paths")
+	if err != nil {
+		return nil, fmt.Errorf("native: status: %w", err)
+	}
+	args := []string{"status", "--porcelain=v1", "--untracked-files=all"}
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, paths...)
+	}
+	out, err := runGit(ctx, root, args...)
+	if err != nil {
+		return nil, err
+	}
+	files := parseGitStatusPorcelain(out)
+	truncated := false
+	if len(files) > maxGitStatusEntries {
+		files = files[:maxGitStatusEntries]
+		truncated = true
+	}
+	pathList := make([]string, 0, len(files))
+	for _, f := range files {
+		if p, ok := f["path"].(string); ok && p != "" {
+			pathList = append(pathList, p)
+		}
+	}
+	return map[string]any{"files": files, "paths": pathList, "truncated": truncated}, nil
+}
+
+func parseGitStatusPorcelain(out string) []map[string]any {
+	lines := strings.Split(out, "\n")
+	files := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		if line == "" || len(line) < 3 {
+			continue
+		}
+		index, worktree := string(line[0]), string(line[1])
+		rest := strings.TrimSpace(line[2:])
+		path, from := rest, ""
+		if i := strings.Index(rest, " -> "); i >= 0 {
+			from = strings.Trim(rest[:i], `"`)
+			path = rest[i+4:]
+		}
+		path = strings.Trim(path, `"`)
+		entry := map[string]any{
+			"path":     path,
+			"index":    index,
+			"worktree": worktree,
+			"status":   porcelainStatus(index, worktree),
+		}
+		if from != "" {
+			entry["from"] = from
+		}
+		files = append(files, entry)
+	}
+	return files
+}
+
+func porcelainStatus(index, worktree string) string {
+	switch {
+	case index == "?" && worktree == "?":
+		return "untracked"
+	case index == "!" && worktree == "!":
+		return "ignored"
+	case index == "A" || worktree == "A":
+		return "added"
+	case index == "D" || worktree == "D":
+		return "deleted"
+	case index == "R" || worktree == "R":
+		return "renamed"
+	case index == "C" || worktree == "C":
+		return "copied"
+	case index == "M" || worktree == "M":
+		return "modified"
+	default:
+		return "changed"
+	}
+}
+
+func dispatchGitDiff(ctx context.Context, with map[string]any, start time.Time) (map[string]any, ExecMeta, error) {
+	out, err := gitDiff(ctx, with)
+	meta := ExecMeta{DurationMs: time.Since(start).Milliseconds()}
+	if err != nil {
+		return nil, meta, err
+	}
+	return out, meta, nil
+}
+
+func dispatchGitStatus(ctx context.Context, with map[string]any, start time.Time) (map[string]any, ExecMeta, error) {
+	out, err := gitStatus(ctx, with)
+	meta := ExecMeta{DurationMs: time.Since(start).Milliseconds()}
+	if err != nil {
+		return nil, meta, err
+	}
+	return out, meta, nil
 }
 
 func dispatchGitCreateBranch(ctx context.Context, with map[string]any, start time.Time) (map[string]any, ExecMeta, error) {

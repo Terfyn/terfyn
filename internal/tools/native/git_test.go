@@ -558,3 +558,202 @@ func TestGit_missingRoot(t *testing.T) {
 		t.Fatal("expected an error when the workspace root is unset")
 	}
 }
+
+func TestGitStatus_listsDirtyPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	paths, _ := out["paths"].([]string)
+	got := map[string]bool{}
+	for _, p := range paths {
+		got[p] = true
+	}
+	if !got["README.md"] || !got["new.txt"] {
+		t.Fatalf("paths = %v, want README.md and new.txt", paths)
+	}
+	files, _ := out["files"].([]map[string]any)
+	byPath := map[string]string{}
+	for _, f := range files {
+		p, _ := f["path"].(string)
+		st, _ := f["status"].(string)
+		byPath[p] = st
+	}
+	if byPath["README.md"] != "modified" {
+		t.Fatalf("README.md status = %q, want modified", byPath["README.md"])
+	}
+	if byPath["new.txt"] != "untracked" {
+		t.Fatalf("new.txt status = %q, want untracked", byPath["new.txt"])
+	}
+}
+
+func TestGitStatus_cleanEmpty(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	paths, _ := out["paths"].([]string)
+	if len(paths) != 0 {
+		t.Fatalf("clean tree paths = %v, want empty", paths)
+	}
+}
+
+func TestGitDiff_workingTree(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "README.md") || !strings.Contains(diff, "+changed") {
+		t.Fatalf("diff missing working-tree hunk:\n%s", diff)
+	}
+	if out["truncated"] != false {
+		t.Fatalf("truncated = %v, want false", out["truncated"])
+	}
+}
+
+func TestGitDiff_pathsScope(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("readme-changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "other.txt")
+	gitCfg(t, root, "commit", "-m", "other")
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("other-changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"paths": []any{"README.md"}})
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "README.md") {
+		t.Fatalf("scoped diff missing README.md:\n%s", diff)
+	}
+	if strings.Contains(diff, "other.txt") {
+		t.Fatalf("scoped diff leaked other.txt:\n%s", diff)
+	}
+}
+
+func TestGitDiff_base(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	gitCfg(t, root, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(root, "feature.txt"), []byte("feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "feature.txt")
+	gitCfg(t, root, "commit", "-m", "feature")
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main"})
+	if err != nil {
+		t.Fatalf("diff base: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "feature.txt") || !strings.Contains(diff, "+feat") {
+		t.Fatalf("base diff missing feature.txt:\n%s", diff)
+	}
+	if out["base"] != "main" {
+		t.Fatalf("base = %v, want main", out["base"])
+	}
+}
+
+func TestGitDiff_staged(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "README.md")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("staged\nunstaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"staged": true})
+	if err != nil {
+		t.Fatalf("diff staged: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "+staged") {
+		t.Fatalf("staged diff missing staged hunk:\n%s", diff)
+	}
+	if strings.Contains(diff, "+unstaged") {
+		t.Fatalf("staged diff leaked unstaged hunk:\n%s", diff)
+	}
+	if out["staged"] != true {
+		t.Fatalf("staged = %v, want true", out["staged"])
+	}
+}
+
+func TestGitDiff_invalidBase(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "--output=/tmp/x"}); err == nil {
+		t.Fatal("expected invalid base to be rejected")
+	}
+}
+
+func TestGitStatus_pathsScope(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skip.txt"), []byte("nope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", map[string]any{"paths": []any{"README.md"}})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	paths, _ := out["paths"].([]string)
+	for _, p := range paths {
+		if p == "skip.txt" {
+			t.Fatalf("scoped status leaked skip.txt: %v", paths)
+		}
+	}
+	found := false
+	for _, p := range paths {
+		if p == "README.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("scoped status missing README.md: %v", paths)
+	}
+}
+
+func TestGitDiff_missingRoot(t *testing.T) {
+	t.Setenv(envWorkspaceRoot, "")
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil); err == nil {
+		t.Fatal("expected an error when the workspace root is unset")
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "status", nil); err == nil {
+		t.Fatal("expected an error when the workspace root is unset")
+	}
+}
