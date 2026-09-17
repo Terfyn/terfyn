@@ -58,9 +58,13 @@ func (s TypeSet) String() string {
 
 // Document is a loaded JSON Schema held on the project graph after validate (issue #193).
 // Path is the absolute file used to compile; Raw is the object form used for static type lookup.
+// Boolean is non-nil when the root document is a Draft 2020-12 boolean schema (issue #549).
 type Document struct {
 	Path string
 	Raw  map[string]any
+	// Boolean is set for a root true/false schema. true is unconstrained; false
+	// rejects every instance. Raw is nil in that case.
+	Boolean *bool
 }
 
 // LookupResult is the static type of a JSON Schema path.
@@ -71,6 +75,10 @@ type LookupResult struct {
 	// Missing is true when the path is forbidden (undeclared property with
 	// additionalProperties: false, or a descent through a non-object/array).
 	Missing bool
+	// Impossible is true when this path is a boolean false schema (or a descent
+	// through one). Distinct from unconstrained (empty Types) so gradual typing
+	// cannot treat never as any (issue #549).
+	Impossible bool
 }
 
 const maxSchemaDepth = 32
@@ -89,20 +97,37 @@ func LoadDocument(schemaPath string) (*Document, error) {
 	if err != nil {
 		return nil, &FileError{Path: abs, Op: "read schema", Err: err}
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, &CompileError{Path: abs, Err: fmt.Errorf("schema must be a JSON object: %w", err)}
+	var decoded any
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		return nil, &CompileError{Path: abs, Err: fmt.Errorf("schema must be a JSON Schema (object or boolean): %w", err)}
 	}
 	if _, err := defaultReg.getOrCompile(abs); err != nil {
 		return nil, &CompileError{Path: abs, Err: err}
 	}
-	return &Document{Path: abs, Raw: raw}, nil
+	switch v := decoded.(type) {
+	case bool:
+		bv := v
+		return &Document{Path: abs, Boolean: &bv}, nil
+	case map[string]any:
+		return &Document{Path: abs, Raw: v}, nil
+	default:
+		return nil, &CompileError{Path: abs, Err: fmt.Errorf("schema must be a JSON object or boolean, got %T", decoded)}
+	}
 }
 
 // Lookup returns the schema constraint at a dotted property path from the document root.
 // An empty path is the root schema (typically the whole output/input object).
 func (d *Document) Lookup(path []string) LookupResult {
-	if d == nil || d.Raw == nil {
+	if d == nil {
+		return LookupResult{}
+	}
+	if d.Boolean != nil {
+		if *d.Boolean {
+			return LookupResult{}
+		}
+		return LookupResult{Impossible: true}
+	}
+	if d.Raw == nil {
 		return LookupResult{}
 	}
 	return lookupNode(d, d.Raw, path, 0)
@@ -123,6 +148,18 @@ func Compatible(producer, consumer TypeSet) bool {
 		}
 	}
 	return false
+}
+
+// CompatibleLookup reports whether a producing lookup can flow into a consuming lookup.
+// A boolean-false consumer is never gradual: only another impossible producer matches it.
+func CompatibleLookup(producer, consumer LookupResult) bool {
+	if consumer.Impossible {
+		return producer.Impossible
+	}
+	if producer.Impossible {
+		return false
+	}
+	return Compatible(producer.Types, consumer.Types)
 }
 
 func lookupNode(d *Document, node map[string]any, path []string, depth int) LookupResult {

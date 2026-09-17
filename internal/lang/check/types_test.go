@@ -129,6 +129,57 @@ workflow W(input: PullRequest, note: Count) -> Review
 				}
 			},
 		},
+		{
+			name: "boolean true schema is unconstrained",
+			src: `
+workflow W(input: Count) -> Any
+{
+    return input
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if diags.HasErrors() {
+					t.Fatalf("true schema must accept any producer, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "boolean false schema rejects typed producer",
+			src: `
+workflow W(input: Count) -> Never
+{
+    return input
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if !diags.HasErrors() {
+					t.Fatalf("false schema must not accept a typed producer, got %v", diags)
+				}
+				if !hasSeverity(diags, lang.SeverityError, "not compatible") {
+					t.Fatalf("expected a not-compatible message, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "boolean false schema matches false producer",
+			src: `
+agent A {
+    model mock/default
+    instructions "test"
+    output Never
+}
+
+workflow W(input: Count) -> Never
+{
+    return A(input)
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if diags.HasErrors() {
+					t.Fatalf("never→never must be compatible, got %v", diagMessages(diags))
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {

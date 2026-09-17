@@ -145,10 +145,14 @@ type typeRef struct {
 }
 
 func (t typeRef) types() schema.TypeSet {
+	return t.result().Types
+}
+
+func (t typeRef) result() schema.LookupResult {
 	if t.doc == nil {
-		return nil
+		return schema.LookupResult{}
 	}
-	return t.doc.Lookup(t.path).Types
+	return t.doc.Lookup(t.path)
 }
 
 func (t typeRef) child(field string) (typeRef, schema.LookupResult) {
@@ -707,7 +711,17 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 }
 
 func (wc *wfChecker) checkCompatible(pos lang.Pos, got, want typeRef, what string) lang.Diagnostics {
-	gotTypes, wantTypes := got.types(), want.types()
+	gotRes, wantRes := got.result(), want.result()
+	if gotRes.Impossible || wantRes.Impossible {
+		if schema.CompatibleLookup(gotRes, wantRes) {
+			return nil
+		}
+		return lang.Diagnostics{{
+			Pos: pos,
+			Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, describeLookup(gotRes), describeLookup(wantRes)),
+		}}
+	}
+	gotTypes, wantTypes := gotRes.Types, wantRes.Types
 	if len(gotTypes) == 0 || len(wantTypes) == 0 {
 		return nil // gradual typing: an untyped side is always compatible
 	}
@@ -718,4 +732,14 @@ func (wc *wfChecker) checkCompatible(pos lang.Pos, got, want typeRef, what strin
 		Pos: pos,
 		Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, gotTypes, wantTypes),
 	}}
+}
+
+func describeLookup(r schema.LookupResult) string {
+	if r.Impossible {
+		return "never"
+	}
+	if len(r.Types) == 0 {
+		return "any"
+	}
+	return r.Types.String()
 }
