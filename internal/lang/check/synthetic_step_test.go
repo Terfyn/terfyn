@@ -60,6 +60,59 @@ workflow W(input: CodingState) -> CodingState {
 	}
 }
 
+// TestCheck_StraightLinePositionalAgentArgValidates is the #550 repro: a
+// single positional agent call is the whole input document. Straight-line
+// (non-synthetic) steps still run per-field with: wiring; that wiring must
+// treat arg0 as the document, not a missing input property.
+func TestCheck_StraightLinePositionalAgentArgValidates(t *testing.T) {
+	t.Parallel()
+	src := `
+agent producer {
+    model mock/default
+    instructions "return a value"
+    input String
+    output StringOrInteger
+}
+
+agent consumer {
+    model mock/default
+    instructions "accept a string"
+    input String
+    output String
+}
+
+workflow demo(input: String) -> String {
+    value = producer(input)
+    return consumer(value)
+}
+`
+	f := parseOrFatal(t, src)
+	prog, diags := Check(f, Options{SchemaDir: "testdata"})
+	if diags.HasErrors() {
+		t.Fatalf("straight-line whole-document agent args must check clean: %v", diagMessages(diags))
+	}
+	if errs := spec.ValidateProjectGraph(prog.Graph, "testdata"); errs != nil {
+		t.Fatalf("straight-line positional agent arg0 must validate as the whole document, got %v", errs)
+	}
+	wf := prog.Graph.Workflows["demo"]
+	if wf == nil {
+		t.Fatalf("no workflow demo")
+	}
+	var consumer spec.WorkflowStep
+	for _, st := range wf.Spec.Steps {
+		if st.Agent == "consumer" {
+			consumer = st
+			break
+		}
+	}
+	if _, ok := consumer.With["arg0"]; !ok {
+		t.Fatalf("expected lowering placeholder arg0 on the consumer step, got %+v", consumer.With)
+	}
+	if consumer.Synthetic {
+		t.Fatalf("straight-line consumer step must not be marked Synthetic")
+	}
+}
+
 // TestCheck_TopLevelStepsAreNotSynthetic guards against over-relaxation: a
 // straight-line (non-control-flow) call step is NOT marked Synthetic, so it still
 // receives the full executable-graph validation.

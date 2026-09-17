@@ -216,7 +216,16 @@ func checkConsumerType(
 	if consumer == nil || strings.TrimSpace(withKey) == "" {
 		return nil
 	}
-	cons := consumer.Lookup([]string{withKey})
+	// A single positional agent argument is the whole input document, not a
+	// named field. Lowering keys it arg0 because it has no symbol table; the
+	// checker already type-checks that shape as the agent's input type (#550).
+	lookupPath := []string{withKey}
+	inputLabel := withKey
+	if isAgentPositionalWholeDocument(st, withKey) {
+		lookupPath = nil
+		inputLabel = "input"
+	}
+	cons := consumer.Lookup(lookupPath)
 	if cons.Missing {
 		return []error{st.Pos.Errorf(
 			"workflow %s step %q: with %q is not declared in %s input schema",
@@ -242,8 +251,15 @@ func checkConsumerType(
 	}
 	return []error{st.Pos.Errorf(
 		"workflow %s step %q: ${%s} (%s) does not match %s input %q (%s)",
-		wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), withKey, cons.Types,
+		wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), inputLabel, cons.Types,
 	)}
+}
+
+// isAgentPositionalWholeDocument reports whether withKey is the lowering
+// placeholder for a single positional agent argument. An agent's input is one
+// type, not named fields, so arg0 is that document (#550).
+func isAgentPositionalWholeDocument(st WorkflowStep, withKey string) bool {
+	return strings.TrimSpace(st.Agent) != "" && withKey == "arg0"
 }
 
 func producerOutputDoc(g *ProjectGraph, st WorkflowStep) *schema.Document {

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A single positional agent call now passes the whole input document to the model** (issue #550): `.agent` type-checking already treats `Reviewer(request)` as the agent's whole input, but lowering keyed that argument `arg0` and both graph validation and `runAgentStep` treated `arg0` as a named field. Straight-line `producer(input); consumer(value)` failed validate with `with "arg0" is not declared in Agent/… input schema`, while a call inside synthetic control flow skipped that check (#305) and still sent `{"arg0": <document>}` as the model user message. Wiring now looks `arg0` up as the consumer's root schema, and the engine marshals the unwrapped value as the user content. Named or multi-argument maps are unchanged. Tests pin validate on the issue's repro, serialization/hydration of the `arg0` IR, and the actual Generate user content (`"hello"`, not `{"arg0":"hello"}`).
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.

@@ -252,6 +252,33 @@ func TestValidateProjectGraph_loadsSchemaOntoGraph(t *testing.T) {
 	}
 }
 
+func TestValidateProjectGraph_agentPositionalArg0IsWholeDocument(t *testing.T) {
+	root := t.TempDir()
+	writeSchema(t, root, "schemas/out.json", `{"type":"string"}`)
+	writeSchema(t, root, "schemas/in.json", `{"type":"string"}`)
+
+	wfYAML := `apiVersion: agentic.dev/v0
+kind: Workflow
+metadata:
+  name: demo
+spec:
+  steps:
+    - id: value
+      agent: reporter
+    - id: return_consumer
+      agent: consumer
+      with:
+        arg0: ${steps.value.output}
+`
+	dec, err := ParseResourceFromBytes([]byte(wfYAML), "workflow.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateProjectGraph(wiringGraph(dec.Resource.(*WorkflowResource)), root); err != nil {
+		t.Fatalf("single positional agent arg0 is the whole input document, got %v", err)
+	}
+}
+
 func wiringGraph(wr *WorkflowResource) *ProjectGraph {
 	return &ProjectGraph{
 		Agents: map[string]*AgentResource{
