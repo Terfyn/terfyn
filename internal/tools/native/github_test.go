@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -579,5 +580,131 @@ func TestGithubPullRequestList(t *testing.T) {
 	}
 	if arr, ok := out["pull_requests"].([]any); !ok || len(arr) != 1 {
 		t.Fatalf("pull_requests %#v", out["pull_requests"])
+	}
+}
+
+func TestIssuesListFollowsPagination(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"number":2}]`))
+			return
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?page=2>; rel="next"`, srv.URL))
+		_, _ = w.Write([]byte(`[{"number":1}]`))
+	}))
+	defer srv.Close()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GITHUB_API_URL", srv.URL)
+
+	got, err := githubIssuesList(context.Background(), map[string]any{"owner": "o", "repo": "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issues := got["issues"].([]any); len(issues) != 2 {
+		t.Fatalf("issues.list returned %d item(s), want both pages", len(issues))
+	}
+	if _, ok := got["truncated"]; ok {
+		t.Fatalf("truncated set on a complete two-page list: %#v", got)
+	}
+}
+
+func TestPullRequestListFollowsPagination(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/pulls" {
+			t.Fatalf("path %q", r.URL.Path)
+		}
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"number":2}]`))
+			return
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/pulls?page=2>; rel="next"`, srv.URL))
+		_, _ = w.Write([]byte(`[{"number":1}]`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GITHUB_API_URL", srv.URL)
+
+	got, err := githubPullRequestList(context.Background(), map[string]any{"owner": "o", "repo": "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prs := got["pull_requests"].([]any); len(prs) != 2 {
+		t.Fatalf("pull_request.list returned %d item(s), want both pages", len(prs))
+	}
+}
+
+func TestGithubGETArrayEmptyTerminalPage(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?page=2>; rel="next"`, srv.URL))
+		_, _ = w.Write([]byte(`[{"number":1}]`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GITHUB_API_URL", srv.URL)
+
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("truncated on empty terminal page")
+	}
+	if len(arr) != 1 {
+		t.Fatalf("got %d items, want first page only", len(arr))
+	}
+}
+
+func TestGithubGETArrayStopsAtMaxPages(t *testing.T) {
+	var srv *httptest.Server
+	pages := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		next := pages + 1
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?page=%d>; rel="next"`, srv.URL, next))
+		_, _ = w.Write([]byte(fmt.Sprintf(`[{"number":%d}]`, pages)))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GITHUB_API_URL", srv.URL)
+
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("want truncated when rel=next remains after max pages")
+	}
+	if len(arr) != githubListMaxPages {
+		t.Fatalf("got %d items, want %d pages", len(arr), githubListMaxPages)
+	}
+	if pages != githubListMaxPages {
+		t.Fatalf("fetched %d pages, want %d", pages, githubListMaxPages)
+	}
+}
+
+func TestParseGitHubLinkNext(t *testing.T) {
+	got := parseGitHubLinkNext(`<https://api.github.com/repos/o/r/issues?page=2>; rel="next", <https://api.github.com/repos/o/r/issues?page=4>; rel="last"`)
+	if got != "https://api.github.com/repos/o/r/issues?page=2" {
+		t.Fatalf("next = %q", got)
+	}
+	if parseGitHubLinkNext(`<https://api.github.com/repos/o/r/issues?page=4>; rel="last"`) != "" {
+		t.Fatal("expected empty without rel=next")
+	}
+}
+
+func TestGithubAllowFollowRejectsForeignHost(t *testing.T) {
+	t.Setenv("GITHUB_API_URL", "https://api.github.com")
+	if _, ok := githubAllowFollow("https://evil.example/repos/o/r/issues?page=2"); ok {
+		t.Fatal("followed foreign host")
+	}
+	if got, ok := githubAllowFollow("/repos/o/r/issues?page=2"); !ok || got != "/repos/o/r/issues?page=2" {
+		t.Fatalf("path follow = %q ok=%v", got, ok)
 	}
 }
