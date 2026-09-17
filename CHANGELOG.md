@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A failed `terfyn export --output DIR` re-export no longer destroys the previous project** (issue #561): `writeExportedSchemas` used to `RemoveAll` `DIR/schemas` before marshaling replacement files, so a later marshal or write error left `project.agent` in place with its schemas gone or half-replaced. Export now stages the complete tree in a sibling temp directory and swaps `schemas/` plus `project.agent` into place only after every file is generated. Marshal, schema-directory creation, individual schema writes, and the final source commit all leave the prior export byte-for-byte loadable; a successful smaller re-export still drops unused schema files.
+
 - **Agent JSON `null` completions are now rejected instead of accepted as structured objects** (issue #555): `parseAgentJSONObject` unmarshaled into `map[string]any`, which decoded `null` into a nil map with no error. An agent step returning `null` now fails with `engine: agent response is not a JSON object`, preventing nil state from entering workflow interpolation and checkpoint paths.
 
 - **`terfyn state list` and `terfyn state show` open state read-only and no longer create missing databases** (issue #544): both read-only commands now open existing databases with `sqlite.OpenReadOnly` and do not create parent directories, databases, tables, or migrations when inspecting a non-existent state database path. Missing paths now return a clear non-zero error.
