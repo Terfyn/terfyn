@@ -37,7 +37,7 @@ func NewOpenAIClientFromConfig(cfg spec.ModelProviderConfig) (*OpenAIClient, err
 	if err != nil {
 		return nil, err
 	}
-	return &OpenAIClient{APIKey: key, BaseURL: defaultOpenAIBase, HTTPClient: http.DefaultClient}, nil
+	return &OpenAIClient{APIKey: key, BaseURL: ResolveProviderBaseURL(cfg, defaultOpenAIBase), HTTPClient: http.DefaultClient}, nil
 }
 
 func (c *OpenAIClient) base() string {
