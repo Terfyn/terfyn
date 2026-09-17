@@ -55,8 +55,8 @@ func (a *anthropicClient) Generate(ctx context.Context, req GenerateRequest) (Ge
 // annotateAnthropicRequestError attaches redacted structural diagnostics to a provider 4xx (issue
 // #524). A 4xx means the provider rejected the request we sent, and a bare "Invalid request data"
 // carries no clue why; the appended context (message count, trailing block types, tool_use/tool_result
-// pairing) makes it diagnosable. Non-4xx errors (5xx, transport, context cancel) are returned
-// unchanged — they are not about request construction.
+// pairing) makes it diagnosable. Non-client-error statuses (429 rate limit, 5xx, transport, context
+// cancel) are returned unchanged — they are not about request construction (issue #532).
 func annotateAnthropicRequestError(err error, req anthropic.Request) error {
 	var apiErr *anthropic.APIError
 	if !errors.As(err, &apiErr) || !apiErr.IsClientError() {
