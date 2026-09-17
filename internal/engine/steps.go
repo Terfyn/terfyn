@@ -246,16 +246,26 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
+	var (
+		out  map[string]any
+		meta models.GenerateMeta
+	)
 	if len(toolDefs) == 0 {
-		return e.finishAgentTurn(ctx, ctx2, runHandle, pol, cli, modelRef, modelID, runID, step, pctx, agent, models.GenerateRequest{
+		out, meta, err = e.finishAgentTurn(ctx, ctx2, runHandle, pol, cli, modelRef, modelID, runID, step, pctx, agent, models.GenerateRequest{
 			Model:          modelID,
 			Messages:       messages,
 			MaxTokens:      maxTokens,
 			Temperature:    temperature,
 			ResponseFormat: respFormat,
 		})
+	} else {
+		out, meta, err = e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
 	}
-	return e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
+	if err != nil {
+		return nil, meta, err
+	}
+	out = e.restoreReadOnlyAgentOutput(ctx, runID, step, agent, with, out)
+	return out, meta, nil
 }
 
 // maxTokensStopError is the actionable run error when a completion stops at its output-token cap

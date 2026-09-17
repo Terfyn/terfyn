@@ -86,6 +86,59 @@ func TestCompatible(t *testing.T) {
 	}
 }
 
+func TestReadOnlyPropertyNames(t *testing.T) {
+	none := map[string]any{"properties": map[string]any{
+		"task":    map[string]any{"type": "string"},
+		"summary": map[string]any{"type": "string"},
+	}}
+	one := map[string]any{"properties": map[string]any{
+		"task":    map[string]any{"type": "string", "readOnly": true},
+		"summary": map[string]any{"type": "string"},
+	}}
+	sorted := map[string]any{"properties": map[string]any{
+		"z": map[string]any{"readOnly": true},
+		"a": map[string]any{"readOnly": true},
+	}}
+	ref := map[string]any{
+		"$defs": map[string]any{
+			"task": map[string]any{"type": "string", "readOnly": true},
+		},
+		"properties": map[string]any{
+			"task": map[string]any{"$ref": "#/$defs/task"},
+			"ok":   map[string]any{"type": "string"},
+		},
+	}
+	ignored := map[string]any{"properties": map[string]any{
+		"task": map[string]any{"readOnly": false},
+	}}
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want []string
+	}{
+		{name: "nil", raw: nil, want: nil},
+		{name: "no properties", raw: map[string]any{"type": "object"}, want: nil},
+		{name: "none marked", raw: none, want: nil},
+		{name: "one readOnly", raw: one, want: []string{"task"}},
+		{name: "sorted", raw: sorted, want: []string{"a", "z"}},
+		{name: "ref to defs", raw: ref, want: []string{"task"}},
+		{name: "readOnly false is ignored", raw: ignored, want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ReadOnlyPropertyNames(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ReadOnlyPropertyNames = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("ReadOnlyPropertyNames = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestLookup_additionalPropertiesOpen(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "open.json")

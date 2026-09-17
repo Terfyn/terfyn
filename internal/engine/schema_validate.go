@@ -1,14 +1,18 @@
 package engine
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/Terfyn/terfyn/internal/schema"
 	"github.com/Terfyn/terfyn/internal/spec"
 	"github.com/Terfyn/terfyn/internal/tools"
+	"github.com/Terfyn/terfyn/internal/trace"
 )
 
 // validateAgainstSchema validates instance against the schema referenced by sref. On a pinned
@@ -114,4 +118,71 @@ func (e *Executor) validateToolInputSchema(uses string, with map[string]any) err
 		return fmt.Errorf("engine: tool %q input: %w", uses, err)
 	}
 	return nil
+}
+
+// restoreReadOnlyAgentOutput copies JSON Schema readOnly properties from the agent's prior
+// input onto its parsed output (issue #533). Schema validation only checks structure, so a
+// model can emit a schema-valid placeholder for a field the author marked as identity
+// ("preserve verbatim"). The engine, not the prompt, keeps those fields invariant: it
+// overwrites a mutation with the prior value and records a system_error so the rewrite is
+// diagnosable instead of silent. Fields absent from prior input are left as the agent
+// emitted them (nothing to restore). Gradual/untyped agents (no output schema) are a no-op.
+func (e *Executor) restoreReadOnlyAgentOutput(ctx context.Context, runID string, step spec.WorkflowStep, agent *spec.AgentResource, prior, out map[string]any) map[string]any {
+	if e == nil || agent == nil || agent.Spec.Output == nil || out == nil {
+		return out
+	}
+	raw, err := e.resolveSchemaContent(agent.Spec.Output.Schema)
+	if err != nil || len(raw) == 0 {
+		return out
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return out
+	}
+	names := schema.ReadOnlyPropertyNames(doc)
+	if len(names) == 0 {
+		return out
+	}
+	restored := restoreReadOnlyFields(out, prior, names)
+	if len(restored) == 0 || e.Trace == nil {
+		return out
+	}
+	_, _ = e.Trace.Append(ctx, runID, step.ID, trace.EventSystemError, trace.ActorSystem, map[string]any{
+		"reason": "immutable_field_restored",
+		"fields": restored,
+		"agent":  agent.Metadata.Name,
+		"stepId": step.ID,
+	})
+	return out
+}
+
+// restoreReadOnlyFields copies prior[name] onto out[name] for each name whose JSON value
+// differs. It mutates out and returns the names it restored, sorted as given.
+func restoreReadOnlyFields(out, prior map[string]any, names []string) []string {
+	if out == nil || prior == nil {
+		return nil
+	}
+	var restored []string
+	for _, name := range names {
+		want, ok := prior[name]
+		if !ok {
+			continue
+		}
+		got, exists := out[name]
+		if exists && jsonValuesEqual(got, want) {
+			continue
+		}
+		out[name] = want
+		restored = append(restored, name)
+	}
+	return restored
+}
+
+func jsonValuesEqual(a, b any) bool {
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	ab, err1 := json.Marshal(a)
+	bb, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && bytes.Equal(ab, bb)
 }

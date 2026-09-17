@@ -99,6 +99,38 @@ func LoadDocument(schemaPath string) (*Document, error) {
 	return &Document{Path: abs, Raw: raw}, nil
 }
 
+// ReadOnlyPropertyNames returns the top-level object property names marked readOnly
+// (JSON Schema draft 2020-12). Order is sorted. A $ref on a property is resolved locally
+// so `{"$ref":"#/$defs/task"}` with readOnly on the def is honored. Nested readOnly is
+// out of scope: the engine threads identity at the object-root fields of agent I/O
+// (issue #533).
+func ReadOnlyPropertyNames(raw map[string]any) []string {
+	if raw == nil {
+		return nil
+	}
+	props, ok := asObject(raw["properties"])
+	if !ok {
+		return nil
+	}
+	d := &Document{Raw: raw}
+	var names []string
+	for k, v := range props {
+		sm := asSchemaMap(v)
+		if sm == nil {
+			continue
+		}
+		sm = resolveLocalRef(d, sm, 0)
+		if sm == nil {
+			continue
+		}
+		if b, ok := sm["readOnly"].(bool); ok && b {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Lookup returns the schema constraint at a dotted property path from the document root.
 // An empty path is the root schema (typically the whole output/input object).
 func (d *Document) Lookup(path []string) LookupResult {
