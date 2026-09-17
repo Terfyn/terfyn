@@ -147,12 +147,16 @@ func parseWorkflowTarget(s string) (name string, err error) {
 }
 
 func parseInputPair(p string) (key, val string, err error) {
-	p = strings.TrimSpace(p)
 	i := strings.IndexByte(p, '=')
-	if i <= 0 || i == len(p)-1 {
+	if i <= 0 {
 		return "", "", fmt.Errorf("run: --input must be key=value, got %q", p)
 	}
-	return strings.TrimSpace(p[:i]), strings.TrimSpace(p[i+1:]), nil
+	key = strings.TrimSpace(p[:i])
+	val = p[i+1:]
+	if key == "" {
+		return "", "", fmt.Errorf("run: --input must be key=value, got %q", p)
+	}
+	return key, val, nil
 }
 
 func buildRunInputJSON(inputFile string, pairs []string) ([]byte, error) {
@@ -166,7 +170,7 @@ func buildRunInputJSON(inputFile string, pairs []string) ([]byte, error) {
 			return nil, fmt.Errorf("run: input-file must be a JSON object: %w", err)
 		}
 		if m == nil {
-			m = map[string]any{}
+			return nil, fmt.Errorf("run: input-file must be a JSON object: got null")
 		}
 	}
 	for _, p := range pairs {
