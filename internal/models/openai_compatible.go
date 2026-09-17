@@ -44,7 +44,7 @@ func newOpenAICompatibleClient(cfg spec.ModelProviderConfig, baseURL, costProvid
 	}
 	return &OpenAIClient{
 		APIKey:       key,
-		BaseURL:      baseURL,
+		BaseURL:      ResolveProviderBaseURL(cfg, baseURL),
 		HTTPClient:   http.DefaultClient,
 		CostProvider: costProvider,
 	}, nil

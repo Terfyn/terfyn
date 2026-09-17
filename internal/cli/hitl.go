@@ -95,10 +95,20 @@ func parseHitlDecisionOptions(decision, editJSON, switchTarget string) (*runtime
 	return hd, nil
 }
 
-func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
+// maxHitlLineBytes bounds a single interactive HITL input line.
+// bufio.Scanner measures the raw bytes in the buffer before ScanLines strips
+// the line ending, so the cap must accommodate both Unix LF (+1) and Windows
+// CRLF (+2) termination of a maximum-length payload.
+const maxHitlLineBytes = maxDecisionEditJSONBytes + 2
+
+func maybePromptHitlDecision(sc *bufio.Scanner, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		return nil, nil
 	}
+	return promptHitlDecision(sc, out, gate)
+}
+
+func promptHitlDecision(sc *bufio.Scanner, out io.Writer, gate policy.HitlGate) (*policy.HitlDecisionInput, error) {
 	actor := hitlActorFromEnv()
 	display := policy.RedactHitlArgs(gate.With, gate.Review.RedactKeys)
 	fmt.Fprintf(out, "\n%s\n", gate.Review.Description)
@@ -107,9 +117,12 @@ func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) 
 	if len(gate.Review.SwitchTargets) > 0 {
 		fmt.Fprintf(out, "Switch targets: %v\n", gate.Review.SwitchTargets)
 	}
+	if sc == nil {
+		sc = newHitlScanner(os.Stdin)
+	}
 	for {
 		fmt.Fprintf(out, "Decision [approve/reject/edit/switch]: ")
-		line, err := readLine(in)
+		line, err := scanHitlLine(sc)
 		if err != nil {
 			return nil, err
 		}
@@ -126,7 +139,7 @@ func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) 
 		switch kind {
 		case spec.HitlDecisionEdit:
 			fmt.Fprintf(out, "Edited args JSON: ")
-			editLine, err := readLine(in)
+			editLine, err := scanHitlLine(sc)
 			if err != nil {
 				return nil, err
 			}
@@ -146,7 +159,7 @@ func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) 
 			dec.EditedWith = m
 		case spec.HitlDecisionSwitch:
 			fmt.Fprintf(out, "Switch target operation: ")
-			target, err := readLine(in)
+			target, err := scanHitlLine(sc)
 			if err != nil {
 				return nil, err
 			}
@@ -156,8 +169,13 @@ func maybePromptHitlDecision(in io.Reader, out io.Writer, gate policy.HitlGate) 
 	}
 }
 
-func readLine(r io.Reader) (string, error) {
+func newHitlScanner(r io.Reader) *bufio.Scanner {
 	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), maxHitlLineBytes)
+	return sc
+}
+
+func scanHitlLine(sc *bufio.Scanner) (string, error) {
 	if !sc.Scan() {
 		if err := sc.Err(); err != nil {
 			return "", err
@@ -165,6 +183,10 @@ func readLine(r io.Reader) (string, error) {
 		return "", fmt.Errorf("run: unexpected EOF reading hitl decision")
 	}
 	return strings.TrimSpace(sc.Text()), nil
+}
+
+func readLine(r io.Reader) (string, error) {
+	return scanHitlLine(newHitlScanner(r))
 }
 
 func hitlGateFromCheckpoint(contextJSON string) (*policy.HitlGate, error) {
