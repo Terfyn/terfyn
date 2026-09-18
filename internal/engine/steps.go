@@ -229,7 +229,7 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	ctx2, cancelWC := e.wallClockDeadline(ctx2, pol, pctx)
 	defer cancelWC()
 
-	payload, err := json.Marshal(with)
+	payload, err := json.Marshal(unwrapAgentWholeDocument(with))
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
@@ -259,6 +259,22 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 		})
 	}
 	return e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
+}
+
+// unwrapAgentWholeDocument implements single-positional agent-call semantics (#550).
+// Lowering keys that one argument as "arg0"; the agent's input is the whole
+// document, not a field named arg0. The model user message is that value.
+// Multi-key or named maps stay as-is (undefined ABI, not this unwrap).
+func unwrapAgentWholeDocument(with map[string]any) any {
+	if len(with) == 1 {
+		if v, ok := with["arg0"]; ok {
+			return v
+		}
+	}
+	if with == nil {
+		return nil
+	}
+	return with
 }
 
 // maxTokensStopError is the actionable run error when a completion stops at its output-token cap
