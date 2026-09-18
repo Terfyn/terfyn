@@ -127,25 +127,33 @@ func (e *Executor) validateToolInputSchema(uses string, with map[string]any) err
 // overwrites a mutation with the prior value and records a system_error so the rewrite is
 // diagnosable instead of silent. Fields absent from prior input are left as the agent
 // emitted them (nothing to restore). Gradual/untyped agents (no output schema) are a no-op.
-func (e *Executor) restoreReadOnlyAgentOutput(ctx context.Context, runID string, step spec.WorkflowStep, agent *spec.AgentResource, prior, out map[string]any) map[string]any {
+//
+// prior is the agent's whole input document (already normalized by execir when the
+// call was a positional .agent argument). This helper does not guess call shape
+// from a user-visible "arg0" key. A declared output schema that cannot be read
+// or parsed is an error so identity enforcement cannot silently no-op.
+func (e *Executor) restoreReadOnlyAgentOutput(ctx context.Context, runID string, step spec.WorkflowStep, agent *spec.AgentResource, prior, out map[string]any) (map[string]any, error) {
 	if e == nil || agent == nil || agent.Spec.Output == nil || out == nil {
-		return out
+		return out, nil
 	}
 	raw, err := e.resolveSchemaContent(agent.Spec.Output.Schema)
-	if err != nil || len(raw) == 0 {
-		return out
+	if err != nil {
+		return out, fmt.Errorf("engine: agent %q output schema: %w", agent.Metadata.Name, err)
+	}
+	if len(raw) == 0 {
+		return out, nil
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return out
+		return out, fmt.Errorf("engine: agent %q output schema: %w", agent.Metadata.Name, err)
 	}
 	names := schema.ReadOnlyPropertyNames(doc)
 	if len(names) == 0 {
-		return out
+		return out, nil
 	}
-	restored := restoreReadOnlyFields(out, agentInputDocument(prior), names)
+	restored := restoreReadOnlyFields(out, prior, names)
 	if len(restored) == 0 || e.Trace == nil {
-		return out
+		return out, nil
 	}
 	_, _ = e.Trace.Append(ctx, runID, step.ID, trace.EventSystemError, trace.ActorSystem, map[string]any{
 		"reason": "immutable_field_restored",
@@ -153,7 +161,28 @@ func (e *Executor) restoreReadOnlyAgentOutput(ctx context.Context, runID string,
 		"agent":  agent.Metadata.Name,
 		"stepId": step.ID,
 	})
-	return out
+	return out, nil
+}
+
+// enforceReadOnlyOutput restores identity fields then re-validates the result
+// against the output schema so a restored value cannot bypass the output contract
+// (prior input is not assumed to be output-schema-valid).
+func (e *Executor) enforceReadOnlyOutput(ctx context.Context, runID string, step spec.WorkflowStep, agent *spec.AgentResource, prior, out map[string]any) (map[string]any, error) {
+	out, err := e.restoreReadOnlyAgentOutput(ctx, runID, step, agent, prior, out)
+	if err != nil {
+		return out, err
+	}
+	if agent == nil || agent.Spec.Output == nil || out == nil {
+		return out, nil
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return out, fmt.Errorf("engine: marshal restored agent output: %w", err)
+	}
+	if err := e.validateAgentOutputSchema(agent, string(raw)); err != nil {
+		return out, fmt.Errorf("engine: agent output after restoring readOnly fields: %w", err)
+	}
+	return out, nil
 }
 
 // restoreReadOnlyFields copies prior[name] onto out[name] for each name whose JSON value
@@ -178,21 +207,10 @@ func restoreReadOnlyFields(out, prior map[string]any, names []string) []string {
 	return restored
 }
 
-// agentInputDocument returns the object the agent is asked to transform.
-// A single positional argument is lowered under "arg0"; when that value is an
-// object, it is the whole input document (Implementer(state)), not a field named
-// arg0. Named multi-argument calls keep their map as-is. Used for both the
-// prompt payload and readOnly identity restore so the flagship positional path
-// sees prior["task"] rather than prior["arg0"]["task"] (issue #533).
+// agentInputDocument is the object the agent is asked to transform. Call shape
+// is normalized in execir (InvokeAgent.WholeDocument) before InvokeAgent; this
+// is identity so a YAML with: {arg0: ...} is not rewritten.
 func agentInputDocument(with map[string]any) map[string]any {
-	if with == nil {
-		return nil
-	}
-	if len(with) == 1 {
-		if inner, ok := with["arg0"].(map[string]any); ok && inner != nil {
-			return inner
-		}
-	}
 	return with
 }
 

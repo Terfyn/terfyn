@@ -265,7 +265,10 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	if err != nil {
 		return nil, meta, err
 	}
-	out = e.restoreReadOnlyAgentOutput(ctx, runID, step, agent, doc, out)
+	out, err = e.enforceReadOnlyOutput(ctx, runID, step, agent, doc, out)
+	if err != nil {
+		return nil, meta, err
+	}
 	return out, meta, nil
 }
 

@@ -145,6 +145,16 @@ func TestReadOnlyPropertyNames(t *testing.T) {
 				}},
 			},
 		}, want: []string{"task"}},
+		{name: "property allOf readOnly annotation", raw: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task": map[string]any{"allOf": []any{
+					map[string]any{"type": "string"},
+					map[string]any{"readOnly": true},
+				}},
+				"summary": map[string]any{"type": "string"},
+			},
+		}, want: []string{"task"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

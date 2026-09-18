@@ -90,7 +90,8 @@ type nodeWire struct {
 	Body       []nodeWire         `json:"body,omitempty"`
 	Nodes      []graphNodeWire    `json:"nodes,omitempty"`
 	Desc       string             `json:"desc,omitempty"`
-	RedactKeys []string           `json:"redactKeys,omitempty"`
+	RedactKeys     []string           `json:"redactKeys,omitempty"`
+	WholeDocument  bool               `json:"wholeDocument,omitempty"`
 }
 
 type forkBranchWire struct {
@@ -157,7 +158,7 @@ func wireNode(n Node) (nodeWire, error) {
 		if err != nil {
 			return nodeWire{}, err
 		}
-		return nodeWire{Kind: "invokeAgent", Bind: v.Bind, Agent: v.Agent, Args: args}, nil
+		return nodeWire{Kind: "invokeAgent", Bind: v.Bind, Agent: v.Agent, Args: args, WholeDocument: v.WholeDocument}, nil
 	case *InvokeWorkflow:
 		args, err := wireArgs(v.Args)
 		if err != nil {
@@ -394,7 +395,7 @@ func decodeNode(n nodeWire) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &InvokeAgent{Bind: n.Bind, Agent: n.Agent, Args: args}, nil
+		return &InvokeAgent{Bind: n.Bind, Agent: n.Agent, Args: args, WholeDocument: n.WholeDocument}, nil
 	case "invokeWorkflow":
 		args, err := decodeArgs(n.Args)
 		if err != nil {

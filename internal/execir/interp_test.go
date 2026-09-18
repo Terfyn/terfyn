@@ -881,3 +881,55 @@ func TestGraph_BoundedConcurrency(t *testing.T) {
 		t.Fatalf("independent roots should run concurrently, peak was %d", got)
 	}
 }
+
+func TestInterp_WholeDocumentUnwrapsPositionalArg0(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	rec := &recorder{respond: func(_ string, args map[string]any) any {
+		got = args
+		return map[string]any{"ok": true}
+	}}
+	prog := &Program{Workflow: "W", Params: []string{"input"}, Body: []Node{
+		&InvokeAgent{
+			Bind:          "out",
+			Agent:         "Implementer",
+			WholeDocument: true,
+			Args:          map[string]Value{"arg0": Ref{Path: []string{"input"}}},
+		},
+		&Return{Value: Ref{Path: []string{"out"}}},
+	}}
+	in := map[string]any{"task": "fix the parser", "summary": "old"}
+	if _, err := (&Interp{Invoker: rec}).Run(context.Background(), prog, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got["task"] != "fix the parser" {
+		t.Fatalf("invoker args = %v, want the whole document not {arg0: ...}", got)
+	}
+	if _, ok := got["arg0"]; ok {
+		t.Fatalf("arg0 must not be forwarded as a field when WholeDocument: %v", got)
+	}
+}
+
+func TestInterp_NamedArg0IsNotUnwrapped(t *testing.T) {
+	t.Parallel()
+	var got map[string]any
+	rec := &recorder{respond: func(_ string, args map[string]any) any {
+		got = args
+		return map[string]any{"ok": true}
+	}}
+	inner := map[string]any{"task": "x"}
+	prog := &Program{Workflow: "W", Body: []Node{
+		&InvokeAgent{
+			Bind:  "out",
+			Agent: "Implementer",
+			Args:  map[string]Value{"arg0": Lit{V: inner}},
+		},
+		&Return{Value: Ref{Path: []string{"out"}}},
+	}}
+	if _, err := (&Interp{Invoker: rec}).Run(context.Background(), prog, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, ok := got["arg0"]; !ok {
+		t.Fatalf("named arg0 must stay a field, got %v", got)
+	}
+}
