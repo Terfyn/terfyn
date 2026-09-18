@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestClient_Generate_messagesAPI(t *testing.T) {
@@ -190,5 +192,189 @@ func TestClient_Generate_workspaceIDHeader(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestAPIError_IsClientError_excludes429(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		status    int
+		client    bool
+		retryable bool
+	}{
+		{http.StatusBadRequest, true, false},
+		{http.StatusUnauthorized, true, false},
+		{http.StatusForbidden, true, false},
+		{http.StatusNotFound, true, false},
+		{http.StatusUnprocessableEntity, true, false},
+		{http.StatusTooManyRequests, false, true},
+		{529, false, true},
+		{http.StatusInternalServerError, false, false},
+	}
+	for _, tc := range cases {
+		e := &APIError{StatusCode: tc.status}
+		if e.IsClientError() != tc.client {
+			t.Errorf("status %d IsClientError=%v want %v", tc.status, e.IsClientError(), tc.client)
+		}
+		if e.IsRetryable() != tc.retryable {
+			t.Errorf("status %d IsRetryable=%v want %v", tc.status, e.IsRetryable(), tc.retryable)
+		}
+	}
+}
+
+func TestClient_Generate_retries429ThenSucceeds(t *testing.T) {
+	t.Parallel()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"rate"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()}
+	resp, err := c.Generate(context.Background(), Request{
+		Model:    "m",
+		Messages: []ChatMessage{{Role: "user", Content: "x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("text %q", resp.Text)
+	}
+	if n.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", n.Load())
+	}
+}
+
+func TestClient_Generate_retries529ThenSucceeds(t *testing.T) {
+	t.Parallel()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(529)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"overloaded_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()}
+	resp, err := c.Generate(context.Background(), Request{
+		Model:    "m",
+		Messages: []ChatMessage{{Role: "user", Content: "x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Text != "ok" || n.Load() != 2 {
+		t.Fatalf("text %q requests %d", resp.Text, n.Load())
+	}
+}
+
+func TestClient_Generate_401NotRetried(t *testing.T) {
+	t.Parallel()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error"}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := c.Generate(context.Background(), Request{
+		Model:    "m",
+		Messages: []ChatMessage{{Role: "user", Content: "x"}},
+	})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("got %v", err)
+	}
+	if !apiErr.IsClientError() || apiErr.IsRetryable() {
+		t.Fatalf("401 must stay a fatal client error: %+v", apiErr)
+	}
+	if n.Load() != 1 {
+		t.Fatalf("requests = %d, want 1 (no retry)", n.Load())
+	}
+}
+
+func TestClient_Generate_429Exhausted(t *testing.T) {
+	t.Parallel()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error"}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := c.Generate(context.Background(), Request{
+		Model:    "m",
+		Messages: []ChatMessage{{Role: "user", Content: "x"}},
+	})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("got %v", err)
+	}
+	if apiErr.IsClientError() || !apiErr.IsRetryable() {
+		t.Fatalf("exhausted 429 must stay retryable, not a client error: %+v", apiErr)
+	}
+	if n.Load() != int32(maxGenerateAttempts) {
+		t.Fatalf("requests = %d, want %d", n.Load(), maxGenerateAttempts)
+	}
+}
+
+func TestClient_Generate_ctxCancelDuringRetryWait(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error"}}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &Client{APIKey: "k", BaseURL: srv.URL, HTTPClient: srv.Client()}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Generate(ctx, Request{
+			Model:    "m",
+			Messages: []ChatMessage{{Role: "user", Content: "x"}},
+		})
+		errCh <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Generate did not return after cancel")
+	}
+}
+
+func TestRetryWait_honorsRetryAfterZero(t *testing.T) {
+	t.Parallel()
+	d := retryWait(1, &APIError{StatusCode: 429, HasRetryAfter: true, RetryAfter: 0})
+	if d != 0 {
+		t.Fatalf("Retry-After: 0 must wait 0, got %s", d)
+	}
+	capped := retryWait(1, &APIError{StatusCode: 429, HasRetryAfter: true, RetryAfter: time.Hour})
+	if capped != maxRetryWait {
+		t.Fatalf("Retry-After cap = %s, want %s", capped, maxRetryWait)
 	}
 }
