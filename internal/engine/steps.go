@@ -26,6 +26,9 @@ func parseAgentJSONObject(content string) (map[string]any, error) {
 	if err := json.Unmarshal([]byte(content), &m); err != nil {
 		return nil, fmt.Errorf("engine: agent response is not a JSON object: %w", err)
 	}
+	if m == nil {
+		return nil, fmt.Errorf("engine: agent response is not a JSON object")
+	}
 	return m, nil
 }
 

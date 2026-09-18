@@ -509,6 +509,67 @@ func TestRun_badInputPair_exit2(t *testing.T) {
 	}
 }
 
+func TestParseInputPair(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantKey   string
+		wantValue string
+		wantError bool
+	}{
+		{name: "value whitespace", input: "key=  value  ", wantKey: "key", wantValue: "  value  "},
+		{name: "whitespace-only value", input: "key=   ", wantKey: "key", wantValue: "   "},
+		{name: "value contains equals", input: "key=a=b", wantKey: "key", wantValue: "a=b"},
+		{name: "key whitespace", input: "  key  =value", wantKey: "key", wantValue: "value"},
+		{name: "empty value", input: "key=", wantKey: "key"},
+		{name: "empty key", input: "=value", wantError: true},
+		{name: "whitespace-only key", input: "   =value", wantError: true},
+		{name: "missing delimiter", input: "key", wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, value, err := parseInputPair(tt.input)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("parseInputPair(%q) succeeded with key=%q value=%q", tt.input, key, value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseInputPair(%q): %v", tt.input, err)
+			}
+			if key != tt.wantKey || value != tt.wantValue {
+				t.Fatalf("parseInputPair(%q) = key=%q value=%q, want key=%q value=%q", tt.input, key, value, tt.wantKey, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestRun_emptyInputValue_succeeds(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "run-empty-input.db")
+	root := runProjRoot(t)
+
+	ResetGlobalsForTest()
+	var out bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{
+		"run", "workflow/demo",
+		"--project", root,
+		"-e", "staging",
+		"--state", db,
+		"--input", "topic=",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Status: succeeded") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
 func TestRun_inputFile_succeeds(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "run-file.db")
 	root := runProjRoot(t)
@@ -534,6 +595,45 @@ func TestRun_inputFile_succeeds(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "succeeded") {
 		t.Fatal(out.String())
+	}
+}
+
+func TestBuildRunInputJSON_requiresObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		want      string
+		wantError bool
+	}{
+		{name: "object", content: `{"topic":"from-file"}`, want: `{"topic":"from-file"}`},
+		{name: "empty object", content: `{}`},
+		{name: "null", content: `null`, wantError: true},
+		{name: "array", content: `[]`, wantError: true},
+		{name: "scalar", content: `42`, wantError: true},
+		{name: "malformed", content: `{`, wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := filepath.Join(t.TempDir(), "input.json")
+			if err := os.WriteFile(f, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := buildRunInputJSON(f, nil)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("buildRunInputJSON(%q) succeeded with %q", tt.content, got)
+				}
+				if !strings.Contains(err.Error(), "run: input-file must be a JSON object") {
+					t.Fatalf("error = %v, want object validation error", err)
+				}
+				return
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

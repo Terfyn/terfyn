@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Terfyn/terfyn/internal/deploy"
 	"github.com/Terfyn/terfyn/internal/render"
@@ -97,7 +98,7 @@ func runLogs(cmd *cobra.Command, runID, workflow, tenantID, threadID, actorID st
 		return fmt.Errorf("logs: resolve state path: %w", err)
 	}
 
-	st, err := sqlite.Open(ctx, dsn)
+	st, err := sqlite.OpenReadOnly(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("logs: open sqlite %q: %w", dsn, err)
 	}
@@ -381,8 +382,28 @@ func clipJSONForTable(s string, max int) string {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\t", " ")
+	if max <= 0 {
+		return ""
+	}
 	if len(s) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	if max <= 3 {
+		return clipToUTF8Bytes(s, max)
+	}
+	return clipToUTF8Bytes(s, max-3) + "..."
+}
+
+// clipToUTF8Bytes returns a prefix of s of at most n bytes that is valid UTF-8.
+func clipToUTF8Bytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

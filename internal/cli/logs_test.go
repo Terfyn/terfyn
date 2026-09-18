@@ -121,13 +121,18 @@ func TestLogs_isReadOnly_doesNotPrune(t *testing.T) {
 func TestLogs_unknownRun_exit2(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "logs-none.db")
 	root := runProjRoot(t)
+	st, err := sqlite.Open(t.Context(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
 
 	ResetGlobalsForTest()
 	cmd := NewRootCmd()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"logs", "--project", root, "--state", db, "--run", "does-not-exist"})
-	err := cmd.Execute()
+	err = cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error")
 	}
