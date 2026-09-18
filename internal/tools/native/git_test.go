@@ -229,6 +229,42 @@ func TestGitCreateBranch_dirtyTreeStillBlocksWithoutReset(t *testing.T) {
 	}
 }
 
+// An invalid base must fail before any destructive cleanup so leftover work is still on disk.
+func TestGitCreateBranch_resetInvalidBasePreservesWork(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	reg := NewRegistry()
+
+	if _, _, err := reg.Dispatch(context.Background(), "create_branch", map[string]any{"name": "fix/264"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("uncommitted-wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "leftover.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := reg.Dispatch(context.Background(), "create_branch", map[string]any{"name": "fix/264", "reset": true, "base": "maim"})
+	if err == nil {
+		t.Fatal("reset with a bogus base must fail")
+	}
+	if !strings.Contains(err.Error(), `base "maim" is not a commit`) {
+		t.Fatalf("error should name the invalid base, got: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "uncommitted-wip\n" {
+		t.Fatalf("README.md = %q, want uncommitted work preserved", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "leftover.txt")); err != nil {
+		t.Fatalf("leftover.txt should still exist after a failed reset, err=%v", err)
+	}
+}
+
 // reset:true without base is refused (a reset to the current HEAD would be a no-op that silently
 // keeps the prior attempt's commits) — fail closed rather than claim a reset that did nothing (#517).
 func TestGitCreateBranch_resetRequiresBase(t *testing.T) {
