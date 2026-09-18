@@ -15,6 +15,7 @@ func gitCfg(t *testing.T, dir string, args ...string) string {
 	full := append([]string{
 		"-c", "user.email=t@example.com", "-c", "user.name=Test",
 		"-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+		"-c", "core.autocrlf=false", "-c", "core.eol=lf",
 	}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
@@ -37,6 +38,10 @@ func initRepoWithCommit(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	gitCfg(t, dir, "init")
+	// Pin LF so git reset --hard restores the seed blob as written. Windows CI has
+	// core.autocrlf=true by default, which would checkout "seed\n" as "seed\r\n".
+	gitCfg(t, dir, "config", "core.autocrlf", "false")
+	gitCfg(t, dir, "config", "core.eol", "lf")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
