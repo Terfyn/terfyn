@@ -338,9 +338,6 @@ func (r *runner) exec(scope map[string]any, n Node, path, loop []int) error {
 	case *InvokeAgent:
 		site := CallSite{Bind: v.Bind, Path: path, Loop: loop}
 		return r.invoke(scope, v.Bind, site, v.Args, func(a map[string]any) (any, error) {
-			if v.WholeDocument {
-				a = wholeDocumentArgs(a)
-			}
 			return r.in.Invoker.InvokeAgent(r.ctx, site, v.Agent, a)
 		})
 	case *InvokeWorkflow:
@@ -392,21 +389,6 @@ func (r *runner) exec(scope map[string]any, n Node, path, loop []int) error {
 // #258). A memoized result is replayed WITHOUT re-invoking (no duplicate side
 // effect on resume). An [ErrSuspend] halts the walk cleanly on the sequential
 // path and is a loud error inside a concurrent construct (Tier B).
-// wholeDocumentArgs unwraps a positional .agent call's evaluated args. Lowering
-// stores the single unnamed argument under "arg0"; when WholeDocument is set
-// that value is the input document, not a field named arg0.
-func wholeDocumentArgs(a map[string]any) map[string]any {
-	if a == nil {
-		return nil
-	}
-	if len(a) == 1 {
-		if inner, ok := a["arg0"].(map[string]any); ok && inner != nil {
-			return inner
-		}
-	}
-	return a
-}
-
 func (r *runner) invoke(scope map[string]any, bind string, site CallSite, args map[string]Value, call func(map[string]any) (any, error)) error {
 	key := CallKey(site)
 	if v, ok := r.sess.getMemo(key); ok {

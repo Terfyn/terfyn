@@ -2109,8 +2109,6 @@ hard fail
 
 Schema files named by `input.schema` / `output.schema` are compiled at validate (not only checked for existence) and held on the graph. Static wiring (issue #193) uses those documents so a consumer `${steps.x.output.foo}` is rejected before run when it cannot inhabit the producer output schema or the consumer input schema.
 
-JSON Schema `readOnly` on a top-level output property is an **identity** constraint, not only documentation (issue #533). After schema-valid output is parsed, the engine copies each `readOnly` field from the agent's prior input onto the output (overwriting a mutation) and records a `system_error` (`reason: immutable_field_restored`) so a "preserve verbatim" field cannot be silently replaced by a schema-valid placeholder. Nested `readOnly` is out of scope.
-
 ---
 
 ## 13.4 Retries

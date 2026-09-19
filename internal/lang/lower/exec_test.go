@@ -267,12 +267,8 @@ workflow W(input: State) -> State {
 	if len(w.Body) != 1 {
 		t.Fatalf("body: got %d nodes, want 1", len(w.Body))
 	}
-	ia, ok := w.Body[0].(*execir.InvokeAgent)
-	if !ok || ia.Agent != "Reviewer" || ia.Bind != "state" {
+	if ia, ok := w.Body[0].(*execir.InvokeAgent); !ok || ia.Agent != "Reviewer" || ia.Bind != "state" {
 		t.Fatalf("body should rebind state = Reviewer(state), got %#v", w.Body[0])
-	}
-	if !ia.WholeDocument {
-		t.Fatal("Reviewer(state) must mark WholeDocument so arg0 is not guessed at runtime")
 	}
 }
 

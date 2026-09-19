@@ -3,7 +3,7 @@
   "title": "CodingState",
   "type": "object",
   "properties": {
-    "task": {"type": "string", "readOnly": true, "description": "The software engineering task to perform. Preserved across iterations — the engine restores this field from prior state if an agent rewrites it."},
+    "task": {"type": "string", "description": "The software engineering task to perform. Preserved across iterations."},
     "approved": {"type": "boolean", "description": "Set true by the Reviewer only when the implementation is acceptable."},
     "feedback": {"type": "array", "items": {"type": "string"}, "description": "Concrete review findings for the next Implementer attempt."},
     "summary": {"type": "string", "description": "A concise summary of what the Implementer changed."}

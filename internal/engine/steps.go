@@ -229,8 +229,7 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	ctx2, cancelWC := e.wallClockDeadline(ctx2, pol, pctx)
 	defer cancelWC()
 
-	doc := agentInputDocument(with)
-	payload, err := json.Marshal(doc)
+	payload, err := json.Marshal(with)
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
@@ -250,29 +249,16 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
-	var (
-		out  map[string]any
-		meta models.GenerateMeta
-	)
 	if len(toolDefs) == 0 {
-		out, meta, err = e.finishAgentTurn(ctx, ctx2, runHandle, pol, cli, modelRef, modelID, runID, step, pctx, agent, models.GenerateRequest{
+		return e.finishAgentTurn(ctx, ctx2, runHandle, pol, cli, modelRef, modelID, runID, step, pctx, agent, models.GenerateRequest{
 			Model:          modelID,
 			Messages:       messages,
 			MaxTokens:      maxTokens,
 			Temperature:    temperature,
 			ResponseFormat: respFormat,
 		})
-	} else {
-		out, meta, err = e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
 	}
-	if err != nil {
-		return nil, meta, err
-	}
-	out, err = e.enforceReadOnlyOutput(ctx, runID, step, agent, doc, out)
-	if err != nil {
-		return nil, meta, err
-	}
-	return out, meta, nil
+	return e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
 }
 
 // maxTokensStopError is the actionable run error when a completion stops at its output-token cap
