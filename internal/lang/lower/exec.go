@@ -229,17 +229,7 @@ func (el *execLowerer) lowerCallNode(bind string, c *lang.CallExpr, pre *[]execi
 	if el.workflows[name] {
 		return &execir.InvokeWorkflow{Pos: c.Pos, Bind: bind, Workflow: name, Args: args}
 	}
-	return &execir.InvokeAgent{Pos: c.Pos, Bind: bind, Agent: name, Args: args, WholeDocument: positionalWholeDocument(c.Args)}
-}
-
-// positionalWholeDocument reports a single unnamed call argument: Implementer(state)
-// rather than Implementer(arg0: state) or a multi-arg named call. The flag is the
-// execir call-shape marker; the engine must not infer this from a user-visible key.
-func positionalWholeDocument(args []*lang.Arg) bool {
-	if len(args) != 1 || args[0] == nil {
-		return false
-	}
-	return args[0].Name == nil || args[0].Name.Name == ""
+	return &execir.InvokeAgent{Pos: c.Pos, Bind: bind, Agent: name, Args: args}
 }
 
 func (el *execLowerer) lowerArgs(args []*lang.Arg, pre *[]execir.Node) map[string]execir.Value {

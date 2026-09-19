@@ -55,9 +55,6 @@ func encodeNode(b *strings.Builder, n Node) {
 		b.WriteString(v.Bind)
 		b.WriteByte('=')
 		b.WriteString(v.Agent)
-		if v.WholeDocument {
-			b.WriteString(" whole")
-		}
 		encodeArgs(b, v.Args)
 	case *InvokeWorkflow:
 		b.WriteString("workflow ")

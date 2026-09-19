@@ -113,8 +113,7 @@ func (wl *wfResLowerer) lowerStep(st spec.WorkflowStep) execir.Node {
 	case strings.TrimSpace(st.Uses) != "":
 		return &execir.InvokeTool{Pos: st.Pos, Bind: bind, Uses: st.Uses, Args: wl.lowerWith(st.With, st.Pos)}
 	case strings.TrimSpace(st.Agent) != "":
-		args := wl.lowerWith(st.With, st.Pos)
-		return &execir.InvokeAgent{Pos: st.Pos, Bind: bind, Agent: st.Agent, Args: args, WholeDocument: yamlPositionalWholeDocument(st.With)}
+		return &execir.InvokeAgent{Pos: st.Pos, Bind: bind, Agent: st.Agent, Args: wl.lowerWith(st.With, st.Pos)}
 	case strings.TrimSpace(st.Workflow) != "":
 		return &execir.InvokeWorkflow{Pos: st.Pos, Bind: bind, Workflow: st.Workflow, Args: wl.lowerWith(st.With, st.Pos)}
 	default:
@@ -132,19 +131,6 @@ func approvalRedactKeys(st spec.WorkflowStep) []string {
 		return out
 	}
 	return nil
-}
-
-// yamlPositionalWholeDocument reports the resource-projection encoding of a
-// positional .agent call: a single with key "arg0". That key is a structural
-// placeholder (ADR 002), not a user-visible input field. Authoring is .agent;
-// this keeps YAML↔.agent execir twins (digest parity) and sets the same
-// WholeDocument marker the .agent positional lowerer sets.
-func yamlPositionalWholeDocument(with map[string]any) bool {
-	if len(with) != 1 {
-		return false
-	}
-	_, ok := with["arg0"]
-	return ok
 }
 
 // lowerWith lowers a step's `with:` map into execir argument values. Keys are the
