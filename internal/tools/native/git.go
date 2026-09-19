@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -71,6 +73,81 @@ func runGit(ctx context.Context, root string, args ...string) (string, error) {
 		return out, fmt.Errorf("native: git %s: %w: %s", strings.Join(args, " "), err, truncateRunes(strings.TrimSpace(out), 512))
 	}
 	return out, nil
+}
+
+// maxGitStderrBytes caps git diagnostic text on a failed capped run so stderr cannot grow
+// unbounded either. The bound applies during I/O, matching stdout.
+const maxGitStderrBytes = 512
+
+// capBuffer keeps at most max bytes and discards the rest, recording truncated. Write always
+// reports the full input length so the producer is never blocked by a full pipe after the cap.
+type capBuffer struct {
+	buf       []byte
+	max       int
+	truncated bool
+}
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	if c.max < 0 {
+		c.max = 0
+	}
+	if !c.truncated {
+		room := c.max - len(c.buf)
+		if room > 0 {
+			if len(p) > room {
+				c.buf = append(c.buf, p[:room]...)
+				c.truncated = true
+			} else {
+				c.buf = append(c.buf, p...)
+			}
+		} else if len(p) > 0 {
+			c.truncated = true
+		}
+	}
+	return len(p), nil
+}
+
+// runGitCapped runs git in the workspace root, draining stdout through a byte-capped writer and
+// stderr through a separate bounded buffer. The cap applies during I/O so a huge working-tree
+// delta cannot be allocated before truncation (unlike CombinedOutput). truncated is true when
+// stdout exceeded stdoutMax. A non-zero exit is an error carrying a truncated tail of stderr
+// (falling back to the capped stdout).
+func runGitCapped(ctx context.Context, root string, stdoutMax int, args ...string) (stdout string, truncated bool, err error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = root
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", false, fmt.Errorf("native: git %s: stdout pipe: %w", strings.Join(args, " "), err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", false, fmt.Errorf("native: git %s: stderr pipe: %w", strings.Join(args, " "), err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", false, fmt.Errorf("native: git %s: %w", strings.Join(args, " "), err)
+	}
+	outCap := capBuffer{max: stdoutMax}
+	errCap := capBuffer{max: maxGitStderrBytes}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(&outCap, stdoutPipe)
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(&errCap, stderrPipe)
+	}()
+	waitErr := cmd.Wait()
+	wg.Wait()
+	if waitErr != nil {
+		msg := strings.TrimSpace(string(errCap.buf))
+		if msg == "" {
+			msg = strings.TrimSpace(string(outCap.buf))
+		}
+		return string(outCap.buf), outCap.truncated, fmt.Errorf("native: git %s: %w: %s", strings.Join(args, " "), waitErr, truncateRunes(msg, 512))
+	}
+	return string(outCap.buf), outCap.truncated, nil
 }
 
 func gitCreateBranch(ctx context.Context, with map[string]any) (map[string]any, error) {
@@ -371,11 +448,11 @@ func validateAuthor(author string) (string, error) {
 	return author, nil
 }
 
-// maxGitDiffRunes caps a git.diff result the same way grep/read_file cap theirs (1 MiB of runes
-// for ASCII diffs) so a huge working tree degrades to truncated=true rather than an unbounded
-// tool observation. maxGitStatusEntries caps git.status the same way glob caps match counts.
+// maxGitDiffBytes caps git.diff stdout during I/O the same way read_file caps its read (1 MiB
+// of bytes) so a huge working tree degrades to truncated=true without first allocating the full
+// CombinedOutput. maxGitStatusEntries caps git.status the same way glob caps match counts.
 const (
-	maxGitDiffRunes     = maxWorkspaceReadBytes
+	maxGitDiffBytes     = maxWorkspaceReadBytes
 	maxGitStatusEntries = 1000
 )
 
@@ -424,15 +501,9 @@ func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
 		args = append(args, "--")
 		args = append(args, paths...)
 	}
-	out, err := runGit(ctx, root, args...)
+	diff, truncated, err := runGitCapped(ctx, root, maxGitDiffBytes, args...)
 	if err != nil {
 		return nil, err
-	}
-	truncated := false
-	diff := out
-	if r := []rune(out); len(r) > maxGitDiffRunes {
-		diff = string(r[:maxGitDiffRunes]) + "…"
-		truncated = true
 	}
 	result := map[string]any{"diff": diff, "truncated": truncated}
 	if base != "" {
@@ -445,8 +516,9 @@ func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
 }
 
 // gitStatus lists changed/added/deleted/untracked paths in the workspace repository (issue #534).
-// Porcelain v1 so the result is stable for a Reviewer to enumerate before deciding what to read.
-// paths optionally scopes the pathspec. The file list is capped like glob.
+// Porcelain v1 with -z so pathnames are unquoted NUL records (rename/copy is the two-path form)
+// and a file named `a -> b` cannot be mistaken for a rename. paths optionally scopes the pathspec.
+// The file list is capped like glob.
 func gitStatus(ctx context.Context, with map[string]any) (map[string]any, error) {
 	root, err := workspaceRoot(ctx)
 	if err != nil {
@@ -456,17 +528,17 @@ func gitStatus(ctx context.Context, with map[string]any) (map[string]any, error)
 	if err != nil {
 		return nil, fmt.Errorf("native: status: %w", err)
 	}
-	args := []string{"status", "--porcelain=v1", "--untracked-files=all"}
+	args := []string{"status", "--porcelain=v1", "-z", "--untracked-files=all"}
 	if len(paths) > 0 {
 		args = append(args, "--")
 		args = append(args, paths...)
 	}
-	out, err := runGit(ctx, root, args...)
+	out, truncatedIO, err := runGitCapped(ctx, root, maxGitDiffBytes, args...)
 	if err != nil {
 		return nil, err
 	}
-	files := parseGitStatusPorcelain(out)
-	truncated := false
+	files := parseGitStatusPorcelainZ(out)
+	truncated := truncatedIO
 	if len(files) > maxGitStatusEntries {
 		files = files[:maxGitStatusEntries]
 		truncated = true
@@ -480,21 +552,46 @@ func gitStatus(ctx context.Context, with map[string]any) (map[string]any, error)
 	return map[string]any{"files": files, "paths": pathList, "truncated": truncated}, nil
 }
 
-func parseGitStatusPorcelain(out string) []map[string]any {
-	lines := strings.Split(out, "\n")
-	files := make([]map[string]any, 0, len(lines))
-	for _, line := range lines {
-		if line == "" || len(line) < 3 {
+// parseGitStatusPorcelainZ parses `git status --porcelain=v1 -z`. Records are NUL-delimited and
+// pathnames are unquoted, so a file literally named `a -> b` cannot be mistaken for a rename.
+// Rename/copy uses git's two-path -z form: XY SP PATH NUL ORIG_PATH NUL (current path first,
+// unlike the non-z "ORIG -> PATH" display).
+func parseGitStatusPorcelainZ(out string) []map[string]any {
+	b := []byte(out)
+	files := make([]map[string]any, 0)
+	i := 0
+	for i < len(b) {
+		if b[i] == 0 {
+			i++
 			continue
 		}
-		index, worktree := string(line[0]), string(line[1])
-		rest := strings.TrimSpace(line[2:])
-		path, from := rest, ""
-		if i := strings.Index(rest, " -> "); i >= 0 {
-			from = strings.Trim(rest[:i], `"`)
-			path = rest[i+4:]
+		if i+3 > len(b) {
+			break
 		}
-		path = strings.Trim(path, `"`)
+		index, worktree := string(b[i]), string(b[i+1])
+		if b[i+2] != ' ' {
+			// Malformed record: skip to the next NUL.
+			for i < len(b) && b[i] != 0 {
+				i++
+			}
+			if i < len(b) {
+				i++
+			}
+			continue
+		}
+		i += 3
+		first, ok := readNulField(b, &i)
+		if !ok {
+			break
+		}
+		path, from := first, ""
+		if index == "R" || index == "C" || worktree == "R" || worktree == "C" {
+			orig, ok2 := readNulField(b, &i)
+			if !ok2 {
+				break
+			}
+			from = orig
+		}
 		entry := map[string]any{
 			"path":     path,
 			"index":    index,
@@ -507,6 +604,23 @@ func parseGitStatusPorcelain(out string) []map[string]any {
 		files = append(files, entry)
 	}
 	return files
+}
+
+func readNulField(b []byte, i *int) (string, bool) {
+	if *i >= len(b) {
+		return "", false
+	}
+	start := *i
+	for *i < len(b) && b[*i] != 0 {
+		*i++
+	}
+	if *i >= len(b) {
+		// Truncated mid-field: drop the incomplete record.
+		return "", false
+	}
+	s := string(b[start:*i])
+	*i++ // consume NUL
+	return s, true
 }
 
 func porcelainStatus(index, worktree string) string {

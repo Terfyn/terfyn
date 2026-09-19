@@ -757,3 +757,146 @@ func TestGitDiff_missingRoot(t *testing.T) {
 		t.Fatal("expected an error when the workspace root is unset")
 	}
 }
+
+func TestCapBuffer_truncatesDuringWrite(t *testing.T) {
+	c := capBuffer{max: 8}
+	n, err := c.Write([]byte("abcdefghijklmnop"))
+	if err != nil || n != 16 {
+		t.Fatalf("Write n=%d err=%v, want n=16 (full input accepted so the pipe never blocks)", n, err)
+	}
+	if !c.truncated || string(c.buf) != "abcdefgh" {
+		t.Fatalf("buf=%q truncated=%v, want first 8 bytes kept", c.buf, c.truncated)
+	}
+	n, err = c.Write([]byte("MORE"))
+	if err != nil || n != 4 {
+		t.Fatalf("second Write n=%d err=%v, want n=4 discarded", n, err)
+	}
+	if string(c.buf) != "abcdefgh" {
+		t.Fatalf("buf grew after cap: %q", c.buf)
+	}
+}
+
+func TestParseGitStatusPorcelainZ_unusualNames(t *testing.T) {
+	// A modified file literally named "a -> b" must not be parsed as a rename from "a" to "b".
+	out := " M a -> b\x00?? has space.txt\x00?? has\\slash.txt\x00?? café.txt\x00?? tab\tname.txt\x00?? line\nbreak.txt\x00"
+	files := parseGitStatusPorcelainZ(out)
+	byPath := map[string]map[string]any{}
+	for _, f := range files {
+		p, _ := f["path"].(string)
+		byPath[p] = f
+	}
+	want := []string{"a -> b", "has space.txt", `has\slash.txt`, "café.txt", "tab\tname.txt", "line\nbreak.txt"}
+	for _, p := range want {
+		if byPath[p] == nil {
+			t.Fatalf("missing path %q in %#v", p, files)
+		}
+	}
+	arrow := byPath["a -> b"]
+	if _, ok := arrow["from"]; ok {
+		t.Fatalf("file named %q must not report a fake rename from=%v", "a -> b", arrow["from"])
+	}
+	if arrow["status"] != "modified" {
+		t.Fatalf("a -> b status = %v, want modified", arrow["status"])
+	}
+}
+
+func TestParseGitStatusPorcelainZ_renameTwoPathForm(t *testing.T) {
+	// git status --porcelain=v1 -z emits PATH NUL ORIG_PATH (current path first).
+	out := "R  a -> b\x00README.md\x00"
+	files := parseGitStatusPorcelainZ(out)
+	if len(files) != 1 {
+		t.Fatalf("files = %#v, want one rename", files)
+	}
+	f := files[0]
+	if f["path"] != "a -> b" || f["from"] != "README.md" || f["status"] != "renamed" {
+		t.Fatalf("rename entry %#v, want path=a -> b from=README.md status=renamed", f)
+	}
+}
+
+func TestGitDiff_capsBytesDuringIO(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	// A tracked file larger than the byte cap; CombinedOutput would allocate the whole diff first.
+	big := strings.Repeat("x", maxGitDiffBytes+4096)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(big+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if out["truncated"] != true {
+		t.Fatalf("truncated = %v, want true", out["truncated"])
+	}
+	diff, _ := out["diff"].(string)
+	if len(diff) != maxGitDiffBytes {
+		t.Fatalf("diff bytes = %d, want exactly the I/O cap %d", len(diff), maxGitDiffBytes)
+	}
+}
+
+func TestGitStatus_unusualFilenames(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	names := []string{
+		"has space.txt",
+		"a -> b",
+		`has\slash.txt`,
+		"café.txt",
+		"tab\tname.txt",
+		"line\nbreak.txt",
+	}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	got := map[string]map[string]any{}
+	files, _ := out["files"].([]map[string]any)
+	for _, f := range files {
+		p, _ := f["path"].(string)
+		got[p] = f
+	}
+	for _, name := range names {
+		f := got[name]
+		if f == nil {
+			t.Fatalf("missing path %q in %#v", name, files)
+		}
+		if _, ok := f["from"]; ok {
+			t.Fatalf("untracked %q reported a fake rename from=%v", name, f["from"])
+		}
+		if f["status"] != "untracked" {
+			t.Fatalf("%q status = %v, want untracked", name, f["status"])
+		}
+	}
+}
+
+func TestGitStatus_realRenameKeepsBothPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	gitCfg(t, root, "mv", "--", "README.md", "a -> b")
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	files, _ := out["files"].([]map[string]any)
+	var rename map[string]any
+	for _, f := range files {
+		if f["status"] == "renamed" {
+			rename = f
+			break
+		}
+	}
+	if rename == nil {
+		t.Fatalf("expected a renamed entry, got %#v", files)
+	}
+	if rename["from"] != "README.md" || rename["path"] != "a -> b" {
+		t.Fatalf("rename %#v, want from=README.md path=a -> b", rename)
+	}
+}
