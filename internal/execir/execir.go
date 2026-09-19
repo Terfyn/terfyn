@@ -78,6 +78,11 @@ type InvokeAgent struct {
 	Bind  string
 	Agent string
 	Args  map[string]Value
+	// WholeDocument is set when lowering a .agent positional call such as
+	// Implementer(state): the single unnamed argument is the agent's whole
+	// input document, not a field named "arg0". YAML `with: {arg0: ...}` leaves
+	// this false so a legitimate arg0 property is not rewritten (issue #533).
+	WholeDocument bool
 }
 
 func (*InvokeAgent) node() {}
