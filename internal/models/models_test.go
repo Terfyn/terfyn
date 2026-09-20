@@ -141,6 +141,84 @@ func TestRegistry_explicitProviderOverridesBuiltin(t *testing.T) {
 	}
 }
 
+// TestRegistry_aliasBaseURL is issue #546: a provider alias's baseUrl is passed to the selected
+// adapter instead of the hardcoded vendor URL.
+func TestRegistry_aliasBaseURL(t *testing.T) {
+	const custom = "http://127.0.0.1:11434/v1"
+	t.Setenv("LOCAL_OPENAI_KEY", "sk-local")
+	t.Setenv("LOCAL_GROK_KEY", "sk-grok")
+	t.Setenv("LOCAL_ANTHROPIC_KEY", "sk-ant")
+
+	t.Run("openai", func(t *testing.T) {
+		g := &spec.ProjectGraph{
+			Spec: spec.ProjectSpec{
+				Providers: &spec.ProjectProviders{
+					Models: map[string]spec.ModelProviderConfig{
+						"local-openai": {Type: "openai", BaseURL: custom, APIKeyFrom: "env:LOCAL_OPENAI_KEY"},
+					},
+				},
+			},
+		}
+		cli, _, err := NewRegistry(g).ClientFor("local-openai/test-model")
+		if err != nil {
+			t.Fatal(err)
+		}
+		oc, ok := cli.(*OpenAIClient)
+		if !ok {
+			t.Fatalf("got %T", cli)
+		}
+		if oc.BaseURL != custom {
+			t.Fatalf("BaseURL %q, want %q", oc.BaseURL, custom)
+		}
+	})
+
+	t.Run("grok", func(t *testing.T) {
+		g := &spec.ProjectGraph{
+			Spec: spec.ProjectSpec{
+				Providers: &spec.ProjectProviders{
+					Models: map[string]spec.ModelProviderConfig{
+						"local-grok": {Type: "grok", BaseURL: custom + "/", APIKeyFrom: "env:LOCAL_GROK_KEY"},
+					},
+				},
+			},
+		}
+		cli, _, err := NewRegistry(g).ClientFor("local-grok/grok-4")
+		if err != nil {
+			t.Fatal(err)
+		}
+		oc, ok := cli.(*OpenAIClient)
+		if !ok {
+			t.Fatalf("got %T", cli)
+		}
+		if oc.BaseURL != custom {
+			t.Fatalf("BaseURL %q, want stripped %q", oc.BaseURL, custom)
+		}
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		g := &spec.ProjectGraph{
+			Spec: spec.ProjectSpec{
+				Providers: &spec.ProjectProviders{
+					Models: map[string]spec.ModelProviderConfig{
+						"local-claude": {Type: "anthropic", BaseURL: "http://127.0.0.1:8080", APIKeyFrom: "env:LOCAL_ANTHROPIC_KEY"},
+					},
+				},
+			},
+		}
+		cli, _, err := NewRegistry(g).ClientFor("local-claude/claude-sonnet-5")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ac, ok := cli.(*anthropicClient)
+		if !ok {
+			t.Fatalf("got %T", cli)
+		}
+		if ac.inner == nil || ac.inner.BaseURL != "http://127.0.0.1:8080" {
+			t.Fatalf("anthropic BaseURL %+v", ac.inner)
+		}
+	})
+}
+
 func TestRegistry_modelRefFormat(t *testing.T) {
 	g := &spec.ProjectGraph{
 		Spec: spec.ProjectSpec{

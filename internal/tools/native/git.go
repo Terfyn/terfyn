@@ -192,8 +192,21 @@ func gitCreateBranch(ctx context.Context, with map[string]any) (map[string]any, 
 		if base == "" {
 			return nil, fmt.Errorf("native: create_branch: reset requires base (the ref to reset the branch to, e.g. base \"main\"); resetting to the current HEAD is a no-op when already on the branch")
 		}
-		// `switch -C <name> <base>` creates the branch or resets an existing one to the start point.
-		if _, err := runGit(ctx, root, "switch", "-C", name, base); err != nil {
+		// Destructive cleanup must not run until the start point is a real commit. A typo like
+		// base "maim" used to pass the syntactic name check, then `reset --hard` + `clean -fd`
+		// deleted the workspace, and only then did `switch -C` fail. Resolve base first.
+		if _, err := runGit(ctx, root, "rev-parse", "--verify", "--quiet", base+"^{commit}"); err != nil {
+			return nil, fmt.Errorf("native: create_branch: base %q is not a commit", base)
+		}
+		if _, err := runGit(ctx, root, "check-ref-format", "--branch", name); err != nil {
+			return nil, fmt.Errorf("native: create_branch: invalid branch name %q", name)
+		}
+		// Switch (discarding tracked dirt) before the broad untracked clean so a failed
+		// transition cannot have already wiped leftover files.
+		if _, err := runGit(ctx, root, "switch", "--discard-changes", "-C", name, base); err != nil {
+			return nil, err
+		}
+		if _, err := runGit(ctx, root, "clean", "-fd"); err != nil {
 			return nil, err
 		}
 		return map[string]any{"branch": name, "created": !existed, "reset": true}, nil
