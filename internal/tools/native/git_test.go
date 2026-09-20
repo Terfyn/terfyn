@@ -54,6 +54,9 @@ func initRepoWithCommit(t *testing.T) string {
 	// core.autocrlf=true by default, which would checkout "seed\n" as "seed\r\n".
 	gitCfg(t, dir, "config", "core.autocrlf", "false")
 	gitCfg(t, dir, "config", "core.eol", "lf")
+	// Some CI images lower core.bigFileThreshold (or treat a 1 MiB single line as
+	// binary). Keep throwaway repos in the text-diff path so cap tests see real stdout.
+	gitCfg(t, dir, "config", "core.bigFileThreshold", "2g")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -950,9 +953,15 @@ func TestGitDiff_capsBytesDuringIO(t *testing.T) {
 	requireGit(t)
 	root := initRepoWithCommit(t)
 	t.Setenv(envWorkspaceRoot, root)
-	// A tracked file larger than the byte cap; CombinedOutput would allocate the whole diff first.
-	big := strings.Repeat("x", maxGitDiffBytes+4096)
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(big+"\n"), 0o644); err != nil {
+	// Many short lines, not one giant line: some git builds report a 1 MiB line as
+	// binary ("Binary files differ"), which is far under the cap and never exercises
+	// the I/O truncate path. CombinedOutput would still allocate the whole text diff.
+	var b strings.Builder
+	line := strings.Repeat("x", 79) + "\n"
+	for b.Len() < maxGitDiffBytes+4096 {
+		b.WriteString(line)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
@@ -960,12 +969,20 @@ func TestGitDiff_capsBytesDuringIO(t *testing.T) {
 		t.Fatalf("diff: %v", err)
 	}
 	if out["truncated"] != true {
-		t.Fatalf("truncated = %v, want true", out["truncated"])
+		t.Fatalf("truncated = %v, want true (diff prefix %q)", out["truncated"], truncPrefix(out["diff"], 120))
 	}
 	diff, _ := out["diff"].(string)
 	if len(diff) != maxGitDiffBytes {
 		t.Fatalf("diff bytes = %d, want exactly the I/O cap %d", len(diff), maxGitDiffBytes)
 	}
+}
+
+func truncPrefix(v any, n int) string {
+	s, _ := v.(string)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 func TestGitStatus_unusualFilenames(t *testing.T) {
