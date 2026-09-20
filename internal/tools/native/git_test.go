@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,17 @@ func requireGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+}
+
+func gitFilenameLegalOnOS(name string) bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+	// Windows rejects <>:"/\|?* and control characters (tab/newline).
+	if strings.ContainsAny(name, `<>:"/\|?*`) {
+		return false
+	}
+	return !strings.ContainsAny(name, "\t\n\r")
 }
 
 // initRepoWithCommit makes a git repo in a fresh temp dir with one commit and returns its path.
@@ -968,11 +980,20 @@ func TestGitStatus_unusualFilenames(t *testing.T) {
 		"tab\tname.txt",
 		"line\nbreak.txt",
 	}
+	created := make([]string, 0, len(names))
 	for _, name := range names {
+		if !gitFilenameLegalOnOS(name) {
+			continue
+		}
 		if err := os.WriteFile(filepath.Join(root, name), []byte("x\n"), 0o644); err != nil {
 			t.Fatalf("write %q: %v", name, err)
 		}
+		created = append(created, name)
 	}
+	if len(created) == 0 {
+		t.Fatal("no unusual filenames were creatable on this OS")
+	}
+	names = created
 	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -1001,7 +1022,11 @@ func TestGitStatus_realRenameKeepsBothPaths(t *testing.T) {
 	requireGit(t)
 	root := initRepoWithCommit(t)
 	t.Setenv(envWorkspaceRoot, root)
-	gitCfg(t, root, "mv", "--", "README.md", "a -> b")
+	dst := "a -> b"
+	if !gitFilenameLegalOnOS(dst) {
+		dst = "a to b"
+	}
+	gitCfg(t, root, "mv", "--", "README.md", dst)
 	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -1017,7 +1042,7 @@ func TestGitStatus_realRenameKeepsBothPaths(t *testing.T) {
 	if rename == nil {
 		t.Fatalf("expected a renamed entry, got %#v", files)
 	}
-	if rename["from"] != "README.md" || rename["path"] != "a -> b" {
-		t.Fatalf("rename %#v, want from=README.md path=a -> b", rename)
+	if rename["from"] != "README.md" || rename["path"] != dst {
+		t.Fatalf("rename %#v, want from=README.md path=%s", rename, dst)
 	}
 }
