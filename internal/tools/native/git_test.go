@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,6 +35,17 @@ func requireGit(t *testing.T) {
 	}
 }
 
+func gitFilenameLegalOnOS(name string) bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+	// Windows rejects <>:"/\|?* and control characters (tab/newline).
+	if strings.ContainsAny(name, `<>:"/\|?*`) {
+		return false
+	}
+	return !strings.ContainsAny(name, "\t\n\r")
+}
+
 // initRepoWithCommit makes a git repo in a fresh temp dir with one commit and returns its path.
 func initRepoWithCommit(t *testing.T) string {
 	t.Helper()
@@ -42,6 +55,9 @@ func initRepoWithCommit(t *testing.T) string {
 	// core.autocrlf=true by default, which would checkout "seed\n" as "seed\r\n".
 	gitCfg(t, dir, "config", "core.autocrlf", "false")
 	gitCfg(t, dir, "config", "core.eol", "lf")
+	// Some CI images lower core.bigFileThreshold (or treat a 1 MiB single line as
+	// binary). Keep throwaway repos in the text-diff path so cap tests see real stdout.
+	gitCfg(t, dir, "config", "core.bigFileThreshold", "2g")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -677,5 +693,381 @@ func TestGit_missingRoot(t *testing.T) {
 	t.Setenv(envWorkspaceRoot, "")
 	if _, _, err := NewRegistry().Dispatch(context.Background(), "create_branch", map[string]any{"name": "x"}); err == nil {
 		t.Fatal("expected an error when the workspace root is unset")
+	}
+}
+
+func TestGitStatus_listsDirtyPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	paths, _ := out["paths"].([]string)
+	got := map[string]bool{}
+	for _, p := range paths {
+		got[p] = true
+	}
+	if !got["README.md"] || !got["new.txt"] {
+		t.Fatalf("paths = %v, want README.md and new.txt", paths)
+	}
+	files, _ := out["files"].([]map[string]any)
+	byPath := map[string]string{}
+	for _, f := range files {
+		p, _ := f["path"].(string)
+		st, _ := f["status"].(string)
+		byPath[p] = st
+	}
+	if byPath["README.md"] != "modified" {
+		t.Fatalf("README.md status = %q, want modified", byPath["README.md"])
+	}
+	if byPath["new.txt"] != "untracked" {
+		t.Fatalf("new.txt status = %q, want untracked", byPath["new.txt"])
+	}
+}
+
+func TestGitStatus_cleanEmpty(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	paths, _ := out["paths"].([]string)
+	if len(paths) != 0 {
+		t.Fatalf("clean tree paths = %v, want empty", paths)
+	}
+}
+
+func TestGitDiff_workingTree(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "README.md") || !strings.Contains(diff, "+changed") {
+		t.Fatalf("diff missing working-tree hunk:\n%s", diff)
+	}
+	if out["truncated"] != false {
+		t.Fatalf("truncated = %v, want false", out["truncated"])
+	}
+}
+
+func TestGitDiff_pathsScope(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("readme-changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "other.txt")
+	gitCfg(t, root, "commit", "-m", "other")
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("other-changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"paths": []any{"README.md"}})
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "README.md") {
+		t.Fatalf("scoped diff missing README.md:\n%s", diff)
+	}
+	if strings.Contains(diff, "other.txt") {
+		t.Fatalf("scoped diff leaked other.txt:\n%s", diff)
+	}
+}
+
+func TestGitDiff_base(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	gitCfg(t, root, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(root, "feature.txt"), []byte("feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "feature.txt")
+	gitCfg(t, root, "commit", "-m", "feature")
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main"})
+	if err != nil {
+		t.Fatalf("diff base: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "feature.txt") || !strings.Contains(diff, "+feat") {
+		t.Fatalf("base diff missing feature.txt:\n%s", diff)
+	}
+	if out["base"] != "main" {
+		t.Fatalf("base = %v, want main", out["base"])
+	}
+}
+
+func TestGitDiff_staged(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "README.md")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("staged\nunstaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"staged": true})
+	if err != nil {
+		t.Fatalf("diff staged: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if !strings.Contains(diff, "+staged") {
+		t.Fatalf("staged diff missing staged hunk:\n%s", diff)
+	}
+	if strings.Contains(diff, "+unstaged") {
+		t.Fatalf("staged diff leaked unstaged hunk:\n%s", diff)
+	}
+	if out["staged"] != true {
+		t.Fatalf("staged = %v, want true", out["staged"])
+	}
+}
+
+func TestGitDiff_invalidBase(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "--output=/tmp/x"}); err == nil {
+		t.Fatal("expected invalid base to be rejected")
+	}
+}
+
+func TestGitStatus_pathsScope(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skip.txt"), []byte("nope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", map[string]any{"paths": []any{"README.md"}})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	paths, _ := out["paths"].([]string)
+	for _, p := range paths {
+		if p == "skip.txt" {
+			t.Fatalf("scoped status leaked skip.txt: %v", paths)
+		}
+	}
+	found := false
+	for _, p := range paths {
+		if p == "README.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("scoped status missing README.md: %v", paths)
+	}
+}
+
+func TestGitDiff_missingRoot(t *testing.T) {
+	t.Setenv(envWorkspaceRoot, "")
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil); err == nil {
+		t.Fatal("expected an error when the workspace root is unset")
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "status", nil); err == nil {
+		t.Fatal("expected an error when the workspace root is unset")
+	}
+}
+
+func TestCapBuffer_truncatesDuringWrite(t *testing.T) {
+	c := capBuffer{max: 8}
+	n, err := c.Write([]byte("abcdefghijklmnop"))
+	if err != nil || n != 16 {
+		t.Fatalf("Write n=%d err=%v, want n=16 (full input accepted so the pipe never blocks)", n, err)
+	}
+	if !c.truncated || string(c.buf) != "abcdefgh" {
+		t.Fatalf("buf=%q truncated=%v, want first 8 bytes kept", c.buf, c.truncated)
+	}
+	n, err = c.Write([]byte("MORE"))
+	if err != nil || n != 4 {
+		t.Fatalf("second Write n=%d err=%v, want n=4 discarded", n, err)
+	}
+	if string(c.buf) != "abcdefgh" {
+		t.Fatalf("buf grew after cap: %q", c.buf)
+	}
+}
+
+func TestParseGitStatusPorcelainZ_unusualNames(t *testing.T) {
+	// A modified file literally named "a -> b" must not be parsed as a rename from "a" to "b".
+	out := " M a -> b\x00?? has space.txt\x00?? has\\slash.txt\x00?? café.txt\x00?? tab\tname.txt\x00?? line\nbreak.txt\x00"
+	files := parseGitStatusPorcelainZ(out)
+	byPath := map[string]map[string]any{}
+	for _, f := range files {
+		p, _ := f["path"].(string)
+		byPath[p] = f
+	}
+	want := []string{"a -> b", "has space.txt", `has\slash.txt`, "café.txt", "tab\tname.txt", "line\nbreak.txt"}
+	for _, p := range want {
+		if byPath[p] == nil {
+			t.Fatalf("missing path %q in %#v", p, files)
+		}
+	}
+	arrow := byPath["a -> b"]
+	if _, ok := arrow["from"]; ok {
+		t.Fatalf("file named %q must not report a fake rename from=%v", "a -> b", arrow["from"])
+	}
+	if arrow["status"] != "modified" {
+		t.Fatalf("a -> b status = %v, want modified", arrow["status"])
+	}
+}
+
+func TestParseGitStatusPorcelainZ_renameTwoPathForm(t *testing.T) {
+	// git status --porcelain=v1 -z emits PATH NUL ORIG_PATH (current path first).
+	out := "R  a -> b\x00README.md\x00"
+	files := parseGitStatusPorcelainZ(out)
+	if len(files) != 1 {
+		t.Fatalf("files = %#v, want one rename", files)
+	}
+	f := files[0]
+	if f["path"] != "a -> b" || f["from"] != "README.md" || f["status"] != "renamed" {
+		t.Fatalf("rename entry %#v, want path=a -> b from=README.md status=renamed", f)
+	}
+}
+
+func TestGitDiff_capsBytesDuringIO(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	// Many short unique lines, not one giant line: some git builds report a 1 MiB
+	// line as binary ("Binary files differ"), which is far under the cap and never
+	// exercises the I/O truncate path. CombinedOutput would still allocate the
+	// whole text diff. A working tree only ~1 MiB+4KiB produced a unified diff
+	// just under the cap on Ubuntu CI (truncated=false). Write well past 1 MiB
+	// with unique lines so the text diff cannot land under the bound.
+	var b strings.Builder
+	i := 0
+	for b.Len() < maxGitDiffBytes*3 {
+		b.WriteString(strings.Repeat("x", 48))
+		b.WriteByte('-')
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte('\n')
+		i++
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if out["truncated"] != true {
+		t.Fatalf("truncated = %v, want true (diff prefix %q)", out["truncated"], truncPrefix(out["diff"], 120))
+	}
+	diff, _ := out["diff"].(string)
+	if len(diff) != maxGitDiffBytes {
+		t.Fatalf("diff bytes = %d, want exactly the I/O cap %d", len(diff), maxGitDiffBytes)
+	}
+}
+
+func truncPrefix(v any, n int) string {
+	s, _ := v.(string)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func TestGitStatus_unusualFilenames(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	names := []string{
+		"has space.txt",
+		"a -> b",
+		`has\slash.txt`,
+		"café.txt",
+		"tab\tname.txt",
+		"line\nbreak.txt",
+	}
+	created := make([]string, 0, len(names))
+	for _, name := range names {
+		if !gitFilenameLegalOnOS(name) {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+		created = append(created, name)
+	}
+	if len(created) == 0 {
+		t.Fatal("no unusual filenames were creatable on this OS")
+	}
+	names = created
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	got := map[string]map[string]any{}
+	files, _ := out["files"].([]map[string]any)
+	for _, f := range files {
+		p, _ := f["path"].(string)
+		got[p] = f
+	}
+	for _, name := range names {
+		f := got[name]
+		if f == nil {
+			t.Fatalf("missing path %q in %#v", name, files)
+		}
+		if _, ok := f["from"]; ok {
+			t.Fatalf("untracked %q reported a fake rename from=%v", name, f["from"])
+		}
+		if f["status"] != "untracked" {
+			t.Fatalf("%q status = %v, want untracked", name, f["status"])
+		}
+	}
+}
+
+func TestGitStatus_realRenameKeepsBothPaths(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	dst := "a -> b"
+	if !gitFilenameLegalOnOS(dst) {
+		dst = "a to b"
+	}
+	gitCfg(t, root, "mv", "--", "README.md", dst)
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	files, _ := out["files"].([]map[string]any)
+	var rename map[string]any
+	for _, f := range files {
+		if f["status"] == "renamed" {
+			rename = f
+			break
+		}
+	}
+	if rename == nil {
+		t.Fatalf("expected a renamed entry, got %#v", files)
+	}
+	if rename["from"] != "README.md" || rename["path"] != dst {
+		t.Fatalf("rename %#v, want from=README.md path=%s", rename, dst)
 	}
 }

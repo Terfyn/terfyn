@@ -34,12 +34,17 @@
 //
 // Git (runs in TERFYN_WORKSPACE_ROOT; remote from TERFYN_GIT_REMOTE, default origin; push uses the
 // ambient git credentials): create_branch (git switch -c), commit (stage + git commit; local
-// repository.write, like create_branch), and push_branch (push the branch to the remote).
-// Deliberately narrow — no push to the default branch, no --force, no delete, no arbitrary git;
-// branch names are validated so they cannot be read as a flag or a delete refspec. commit stages
-// all working-tree changes (git add -A) or an explicit paths list, and reports "nothing to commit"
-// as a graceful {committed:false} result rather than failing. push_branch is meant to sit in
-// approvals.requiredFor so the run suspends for approval before anything leaves the machine.
+// repository.write, like create_branch), push_branch (push the branch to the remote), and the
+// read-only inspection ops diff and status (issue #534) so a Reviewer can grade the actual
+// working-tree delta. diff is a unified diff (working tree vs HEAD by default; optional base ref,
+// staged, paths); status lists changed/added/deleted/untracked paths. Both are workspace.read
+// effects declared on the Tool resource's operations manifest, grantable to a read-only Reviewer
+// exactly like read_file. Deliberately narrow — no push to the default branch, no --force, no
+// delete, no arbitrary git; branch names are validated so they cannot be read as a flag or a
+// delete refspec. commit stages all working-tree changes (git add -A) or an explicit paths list,
+// and reports "nothing to commit" as a graceful {committed:false} result rather than failing.
+// push_branch is meant to sit in approvals.requiredFor so the run suspends for approval before
+// anything leaves the machine.
 //
 // Every operation here is a concrete capability; the effect classes it may produce are declared on
 // the Tool resource's operations manifest (issue #188 / #204), not in this package.
