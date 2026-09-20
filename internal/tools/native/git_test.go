@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -953,13 +954,20 @@ func TestGitDiff_capsBytesDuringIO(t *testing.T) {
 	requireGit(t)
 	root := initRepoWithCommit(t)
 	t.Setenv(envWorkspaceRoot, root)
-	// Many short lines, not one giant line: some git builds report a 1 MiB line as
-	// binary ("Binary files differ"), which is far under the cap and never exercises
-	// the I/O truncate path. CombinedOutput would still allocate the whole text diff.
+	// Many short unique lines, not one giant line: some git builds report a 1 MiB
+	// line as binary ("Binary files differ"), which is far under the cap and never
+	// exercises the I/O truncate path. CombinedOutput would still allocate the
+	// whole text diff. A working tree only ~1 MiB+4KiB produced a unified diff
+	// just under the cap on Ubuntu CI (truncated=false). Write well past 1 MiB
+	// with unique lines so the text diff cannot land under the bound.
 	var b strings.Builder
-	line := strings.Repeat("x", 79) + "\n"
-	for b.Len() < maxGitDiffBytes+4096 {
-		b.WriteString(line)
+	i := 0
+	for b.Len() < maxGitDiffBytes*3 {
+		b.WriteString(strings.Repeat("x", 48))
+		b.WriteByte('-')
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte('\n')
+		i++
 	}
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
