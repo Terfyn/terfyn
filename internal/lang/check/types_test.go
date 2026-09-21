@@ -106,6 +106,59 @@ workflow W(input: PullRequest, note: Count) -> Review
 			},
 		},
 		{
+			name: "producer union is not assignable to a narrower consumer",
+			src: `
+agent P {
+    output StringOrInteger
+}
+
+agent C {
+    input  StringOnly
+    output StringOnly
+}
+
+workflow W() -> StringOnly
+{
+    x = P()
+    y = C(x)
+    return y
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if !diags.HasErrors() {
+					t.Fatalf("expected a type error for string|integer -> string, got %v", diags)
+				}
+				if !hasSeverity(diags, lang.SeverityError, "not compatible") {
+					t.Fatalf("expected a not-compatible message, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "narrow producer is assignable to a union consumer",
+			src: `
+agent P {
+    output StringOnly
+}
+
+agent C {
+    input  StringOrInteger
+    output StringOrInteger
+}
+
+workflow W() -> StringOrInteger
+{
+    x = P()
+    y = C(x)
+    return y
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if diags.HasErrors() {
+					t.Fatalf("expected string -> string|integer to pass, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
 			name: "member access past the declared shape errors",
 			src: `
 agent A {

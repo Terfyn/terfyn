@@ -86,6 +86,51 @@ func TestCompatible(t *testing.T) {
 	}
 }
 
+func TestProducerUnionMustFitConsumer(t *testing.T) {
+	producer := TypeSet{TypeString: {}, TypeInteger: {}}
+	consumer := TypeSet{TypeString: {}}
+	if Compatible(producer, consumer) {
+		t.Fatal("producer string|integer is not safely assignable to consumer string")
+	}
+}
+
+func TestCompatibleUnionMatrix(t *testing.T) {
+	str := TypeSet{TypeString: {}}
+	num := TypeSet{TypeNumber: {}}
+	integ := TypeSet{TypeInteger: {}}
+	strInt := TypeSet{TypeString: {}, TypeInteger: {}}
+	numStr := TypeSet{TypeNumber: {}, TypeString: {}}
+	intNum := TypeSet{TypeInteger: {}, TypeNumber: {}}
+	empty := TypeSet{}
+
+	cases := []struct {
+		name     string
+		producer TypeSet
+		consumer TypeSet
+		want     bool
+	}{
+		{"string|integer -> string", strInt, str, false},
+		{"string -> string|integer", str, strInt, true},
+		{"integer -> number", integ, num, true},
+		{"integer|string -> number|string", strInt, numStr, true},
+		{"number -> integer|number", num, intNum, true},
+		{"number -> integer", num, integ, false},
+		{"string|integer -> string|integer", strInt, strInt, true},
+		{"integer|number -> number", intNum, num, true},
+		{"empty producer gradual", empty, str, true},
+		{"empty consumer gradual", str, empty, true},
+		{"disjoint unions", strInt, TypeSet{TypeBoolean: {}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Compatible(tc.producer, tc.consumer)
+			if got != tc.want {
+				t.Fatalf("Compatible(%s, %s) = %v, want %v", tc.producer, tc.consumer, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLookup_additionalPropertiesOpen(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "open.json")
