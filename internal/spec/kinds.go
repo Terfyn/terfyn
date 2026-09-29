@@ -38,6 +38,10 @@ type ModelProviderConfig struct {
 	// APIKeyFrom). The anthropic provider sends it as the anthropic-workspace-id
 	// header, which Anthropic requires for identity-linked API keys.
 	WorkspaceIDFrom string `yaml:"workspaceIdFrom,omitempty" json:"workspaceIdFrom,omitempty"`
+	// BaseURL is an optional HTTP(S) model endpoint for this alias (issue #546).
+	// Empty means the adapter's built-in vendor URL. Trailing slashes are stripped
+	// by the adapter. The field participates in plan/deployment identity.
+	BaseURL string `yaml:"baseUrl,omitempty" json:"baseUrl,omitempty"`
 }
 
 type ProjectStateConfig struct {

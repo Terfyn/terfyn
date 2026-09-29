@@ -851,8 +851,9 @@ func (p *parser) parseDecisionListBlock() []*Ident {
 	return out
 }
 
-// parseProvider parses `provider <alias> { type <ident> apiKeyFrom "…" workspaceIdFrom "…" }`
-// (issue #440). `type` is required; the two credential references are optional string literals.
+// parseProvider parses `provider <alias> { type <ident> baseUrl "…" apiKeyFrom "…" workspaceIdFrom "…" }`
+// (issue #440, #546). `type` is required; baseUrl and the two credential references are optional
+// string literals. baseUrl is an HTTP(S) model endpoint; empty means the adapter's vendor default.
 func (p *parser) parseProvider() *ProviderDecl {
 	d := &ProviderDecl{Pos: p.cur.Pos}
 	p.advance() // consume 'provider'
@@ -863,7 +864,7 @@ func (p *parser) parseProvider() *ProviderDecl {
 	seen := map[string]bool{}
 	for p.cur.Kind != KindRBrace && p.cur.Kind != KindEOF {
 		if p.cur.Kind != KindIdent {
-			p.errorf(p.cur.Pos, "expected a provider field (type, apiKeyFrom, workspaceIdFrom), got %s", p.cur)
+			p.errorf(p.cur.Pos, "expected a provider field (type, baseUrl, apiKeyFrom, workspaceIdFrom), got %s", p.cur)
 			p.syncLine()
 			continue
 		}
@@ -876,12 +877,14 @@ func (p *parser) parseProvider() *ProviderDecl {
 		switch field {
 		case "type":
 			d.Type = p.ident("after 'type'")
+		case "baseUrl":
+			d.BaseURL = p.parseStringLit("for baseUrl")
 		case "apiKeyFrom":
 			d.APIKeyFrom = p.parseStringLit("for apiKeyFrom")
 		case "workspaceIdFrom":
 			d.WorkspaceIDFrom = p.parseStringLit("for workspaceIdFrom")
 		default:
-			p.errorf(fpos, "unknown provider field %q (want type, apiKeyFrom, or workspaceIdFrom)", field)
+			p.errorf(fpos, "unknown provider field %q (want type, baseUrl, apiKeyFrom, or workspaceIdFrom)", field)
 			p.syncLine()
 		}
 	}

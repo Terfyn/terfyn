@@ -215,4 +215,22 @@ func TestAnnotateAnthropicRequestError_4xxOnly(t *testing.T) {
 	if strings.Contains(err.Error(), "request: messages=") {
 		t.Fatalf("500 error should not be annotated: %v", err)
 	}
+
+	// 429 is retryable, not a malformed request — no request-construction diagnostic.
+	rateLimited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"rate"}}`))
+	}))
+	t.Cleanup(rateLimited.Close)
+	_, err = (&anthropicClient{inner: &anthropic.Client{APIKey: "sk-ant-mock", BaseURL: rateLimited.URL, HTTPClient: rateLimited.Client()}}).Generate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error on 429")
+	}
+	if !strings.Contains(err.Error(), "HTTP 429") {
+		t.Fatalf("429 error missing status: %v", err)
+	}
+	if strings.Contains(err.Error(), "request: messages=") {
+		t.Fatalf("429 error should not be annotated as request construction: %v", err)
+	}
 }

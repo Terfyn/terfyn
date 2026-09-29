@@ -192,14 +192,15 @@ type PolicyEffectsBlock struct {
 	PermitWithApproval []*EffectRef
 }
 
-// ProviderDecl is a top-level `provider <alias> { type … apiKeyFrom … workspaceIdFrom … }`
-// declaration (issue #440): a custom/aliased model provider that lowers into
+// ProviderDecl is a top-level `provider <alias> { type … baseUrl … apiKeyFrom … workspaceIdFrom … }`
+// declaration (issue #440, #546): a custom/aliased model provider that lowers into
 // spec.ProjectSpec.Providers.Models[alias]. Built-in namespaces (anthropic, openai, …) resolve
 // implicitly and need no declaration; `provider` is for aliases, custom endpoints, and credentials.
 type ProviderDecl struct {
 	Pos             Pos
 	Name            *Ident     // the alias, e.g. corporate-claude
 	Type            *Ident     // underlying provider type (anthropic, openai, mock, …); required
+	BaseURL         *StringLit // HTTP(S) model endpoint for this alias (optional; issue #546)
 	APIKeyFrom      *StringLit // env:VAR reference for the API key (optional)
 	WorkspaceIDFrom *StringLit // env:VAR reference for a workspace id (optional)
 }

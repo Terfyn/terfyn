@@ -405,6 +405,7 @@ spec:
 func TestInlineProvider_YAMLEquivalence(t *testing.T) {
 	agentSrc := `provider corporate-claude {
     type anthropic
+    baseUrl "https://api.anthropic.com"
     apiKeyFrom "env:CORP_ANTHROPIC_KEY"
     workspaceIdFrom "env:CORP_WORKSPACE"
 }`
@@ -424,6 +425,7 @@ spec:
         type: anthropic
         apiKeyFrom: "env:CORP_ANTHROPIC_KEY"
         workspaceIdFrom: "env:CORP_WORKSPACE"
+        baseUrl: "https://api.anthropic.com"
 `
 	dec, err := spec.ParseResourceFromBytes([]byte(yamlSrc), "project.yaml")
 	if err != nil {
@@ -454,6 +456,28 @@ func TestInlineProvider_MissingTypeDiag(t *testing.T) {
 	_, ld := LowerFile(f, Options{})
 	if !ld.HasErrors() {
 		t.Fatal("a provider with no type must be a lowering error")
+	}
+}
+
+// TestInlineProvider_InvalidBaseURL: a custom endpoint must be an absolute http(s) URL (issue #546).
+func TestInlineProvider_InvalidBaseURL(t *testing.T) {
+	cases := []string{
+		`provider p { type openai baseUrl "not-a-url" }`,
+		`provider p { type openai baseUrl "ftp://example.com" }`,
+		`provider p { type openai baseUrl "https://" }`,
+	}
+	for _, src := range cases {
+		f, diags := lang.Parse("t.agent", src)
+		if diags.HasErrors() {
+			t.Fatalf("parse %q: %v", src, diags)
+		}
+		_, ld := LowerFile(f, Options{})
+		if !ld.HasErrors() {
+			t.Fatalf("invalid baseUrl must be a lowering error: %s", src)
+		}
+		if !containsStr(ld.Error(), "baseUrl") {
+			t.Fatalf("diag should name baseUrl: %v", ld)
+		}
 	}
 }
 

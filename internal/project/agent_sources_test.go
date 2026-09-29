@@ -114,6 +114,7 @@ func TestLoadProject_ingestsAgentProvider(t *testing.T) {
 	writeFile(t, root, "main.agent", `
 provider corporate-claude {
     type anthropic
+    baseUrl "https://api.anthropic.com"
     apiKeyFrom "env:CORP_ANTHROPIC_KEY"
     workspaceIdFrom "env:CORP_WORKSPACE"
 }
@@ -142,7 +143,7 @@ workflow hello(input: string) -> string policy default {
 	if !ok {
 		t.Fatalf("provider 'corporate-claude' missing; have %v", providerKeys(g))
 	}
-	if cfg.Type != "anthropic" || cfg.APIKeyFrom != "env:CORP_ANTHROPIC_KEY" || cfg.WorkspaceIDFrom != "env:CORP_WORKSPACE" {
+	if cfg.Type != "anthropic" || cfg.APIKeyFrom != "env:CORP_ANTHROPIC_KEY" || cfg.WorkspaceIDFrom != "env:CORP_WORKSPACE" || cfg.BaseURL != "https://api.anthropic.com" {
 		t.Fatalf("provider config not preserved through load: %+v", cfg)
 	}
 }

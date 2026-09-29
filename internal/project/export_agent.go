@@ -13,6 +13,15 @@ import (
 	"github.com/Terfyn/terfyn/internal/spec"
 )
 
+// Export IO seams tests can replace to inject failures. Production uses the stdlib defaults.
+var (
+	exportMarshalIndent = json.MarshalIndent
+	exportMkdirAll      = os.MkdirAll
+	exportWriteFile     = os.WriteFile
+	exportRename        = os.Rename
+	exportCommitAgent   = writeFileAtomic
+)
+
 // exportAgentFile is the single consolidated .agent source WriteAgentProjectDir writes.
 const exportAgentFile = "project.agent"
 
@@ -47,10 +56,14 @@ const exportSchemasDir = "schemas"
 //   - a dir that already holds a FOREIGN .agent file (anything other than our own project.agent) is
 //     refused — LoadProject scans the whole tree for .agent and would merge it alongside the export,
 //     duplicating resources;
-//   - the schemas/ directory is fully replaced, so re-exporting a graph with fewer types leaves no
-//     orphaned schema file that would reload;
+//   - the schemas/ directory is fully replaced on a successful re-export, so a graph with fewer
+//     types leaves no orphaned schema file that would reload;
 //   - re-exporting into a directory this function already wrote is allowed (project.agent and
-//     schemas/ are overwritten in place).
+//     schemas/ are overwritten in place);
+//   - a failed re-export never mutates the previous successful export (issue #561): the complete
+//     tree is staged in a sibling temp directory and swapped into place only after every schema
+//     file and project.agent are generated. Marshal, mkdir, schema-write, or final source-commit
+//     failures leave the prior project.agent and schemas/ byte-for-byte intact.
 func WriteAgentProjectDir(dir string, g *spec.ProjectGraph) error {
 	if g == nil {
 		return fmt.Errorf("project: nil graph")
@@ -70,16 +83,76 @@ func WriteAgentProjectDir(dir string, g *spec.ProjectGraph) error {
 	if err := refuseForeignAgentSources(dir, target); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
 		return err
 	}
-	if err := writeExportedSchemas(dir, g); err != nil {
+	staging, err := os.MkdirTemp(filepath.Dir(absDir), ".terfyn-export-*")
+	if err != nil {
 		return err
 	}
-	// Write project.agent last, and atomically (temp + rename): if a schema write above failed we
-	// never got here, and the project source — the file LoadProject keys on — lands whole or not at
-	// all, so a mid-write failure cannot leave a half-written project.agent over the fresh schemas/.
-	return writeFileAtomic(target, []byte(source))
+	defer os.RemoveAll(staging)
+
+	if err := writeExportedSchemas(staging, g); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(staging, exportAgentFile), []byte(source)); err != nil {
+		return err
+	}
+	return commitStagedExport(dir, staging)
+}
+
+// commitStagedExport swaps a fully written staging tree into dir. schemas/ is moved aside (not
+// deleted) until project.agent lands; any failure restores the previous schemas/ so a re-export
+// cannot destroy a loadable project. On success the backup is removed, so a smaller graph leaves
+// no orphaned schema files.
+func commitStagedExport(dir, staging string) error {
+	if err := exportMkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	destSchemas := filepath.Join(dir, exportSchemasDir)
+	stagSchemas := filepath.Join(staging, exportSchemasDir)
+	destAgent := filepath.Join(dir, exportAgentFile)
+	stagAgent := filepath.Join(staging, exportAgentFile)
+	backup := destSchemas + ".terfyn-bak"
+	_ = os.RemoveAll(backup)
+
+	destHas := dirExists(destSchemas)
+	stagHas := dirExists(stagSchemas)
+	restore := func() {
+		_ = os.RemoveAll(destSchemas)
+		if destHas {
+			_ = exportRename(backup, destSchemas)
+		}
+	}
+	if destHas {
+		if err := exportRename(destSchemas, backup); err != nil {
+			return err
+		}
+	}
+	if stagHas {
+		if err := exportRename(stagSchemas, destSchemas); err != nil {
+			restore()
+			return err
+		}
+	}
+	data, err := os.ReadFile(stagAgent)
+	if err != nil {
+		restore()
+		return err
+	}
+	if err := exportCommitAgent(destAgent, data); err != nil {
+		restore()
+		return err
+	}
+	_ = os.RemoveAll(backup)
+	return nil
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // writeFileAtomic writes data to target via a temp file in the same directory and a rename, so a
@@ -138,23 +211,24 @@ func refuseForeignAgentSources(dir, target string) error {
 // reloaded project is untyped there too, matching the source.
 func writeExportedSchemas(dir string, g *spec.ProjectGraph) error {
 	schemas := collectResolvedSchemas(g)
-	schemasDir := filepath.Join(dir, exportSchemasDir)
-	if err := os.RemoveAll(schemasDir); err != nil {
-		return err
-	}
 	if len(schemas) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(schemasDir, 0o755); err != nil {
-		return err
-	}
+	encoded := make(map[string][]byte, len(schemas))
 	for _, ref := range sortedKeys(schemas) {
-		body, err := json.MarshalIndent(schemas[ref], "", "  ")
+		body, err := exportMarshalIndent(schemas[ref], "", "  ")
 		if err != nil {
 			return fmt.Errorf("project: marshal schema %q: %w", ref, err)
 		}
-		body = append(body, '\n')
-		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(ref)), body, 0o644); err != nil {
+		encoded[ref] = append(body, '\n')
+	}
+	schemasDir := filepath.Join(dir, exportSchemasDir)
+	if err := exportMkdirAll(schemasDir, 0o755); err != nil {
+		return err
+	}
+	for _, ref := range sortedKeys(encoded) {
+		path := filepath.Join(dir, filepath.FromSlash(ref))
+		if err := exportWriteFile(path, encoded[ref], 0o644); err != nil {
 			return err
 		}
 	}

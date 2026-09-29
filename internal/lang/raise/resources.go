@@ -279,6 +279,7 @@ func (r *raiser) provider(alias string, cfg spec.ModelProviderConfig) *lang.Prov
 	return &lang.ProviderDecl{
 		Name:            ident(alias),
 		Type:            ident(cfg.Type),
+		BaseURL:         strLitOrNil(cfg.BaseURL),
 		APIKeyFrom:      strLitOrNil(cfg.APIKeyFrom),
 		WorkspaceIDFrom: strLitOrNil(cfg.WorkspaceIDFrom),
 	}

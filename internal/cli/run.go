@@ -292,6 +292,8 @@ func runRun(cmd *cobra.Command, wfName, resumeRunID, inputFile string, inputPair
 		StatePath:   g.StatePath,
 	}
 
+	hitlScanner := newHitlScanner(cmd.InOrStdin())
+
 	for {
 		activeRC := rc
 		var runID string
@@ -397,7 +399,7 @@ func runRun(cmd *cobra.Command, wfName, resumeRunID, inputFile string, inputPair
 					return gerr
 				}
 				if isatty.IsTerminal(os.Stdin.Fd()) {
-					dec, perr := maybePromptHitlDecision(cmd.InOrStdin(), cmd.OutOrStdout(), *gate)
+					dec, perr := maybePromptHitlDecision(hitlScanner, cmd.OutOrStdout(), *gate)
 					if perr != nil {
 						return perr
 					}
