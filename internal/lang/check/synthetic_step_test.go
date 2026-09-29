@@ -71,7 +71,7 @@ agent producer {
     model mock/default
     instructions "return a value"
     input String
-    output StringOrInteger
+    output String
 }
 
 agent consumer {
