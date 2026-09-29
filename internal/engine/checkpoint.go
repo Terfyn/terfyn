@@ -28,7 +28,7 @@ const (
 // checkpointPayload is the engine-owned snapshot stored in run_checkpoints.context_json.
 type checkpointPayload struct {
 	Version       int                   `json:"version"`
-	Input         map[string]any        `json:"input"`
+	Input         any                   `json:"input"`
 	Steps         map[string]StepResult `json:"steps"`
 	Completed     []string              `json:"completed,omitempty"`
 	TotalCostUSD  float64               `json:"totalCostUsd"`
@@ -47,9 +47,12 @@ type checkpointPayload struct {
 
 // NestedRunState is stacked in-flight subworkflow progress (issue #194).
 type NestedRunState struct {
-	StepID      string                `json:"stepId"`
-	Workflow    string                `json:"workflow"`
-	Input       map[string]any        `json:"input"`
+	StepID   string `json:"stepId"`
+	Workflow string `json:"workflow"`
+	// Input is the callee's whole input document: any JSON value, not only an
+	// object (a single-parameter callee may receive a scalar or array). A null
+	// document round-trips as nil, and resume falls back to the call's args.
+	Input       any                   `json:"input"`
 	Steps       map[string]StepResult `json:"steps"`
 	Completed   []string              `json:"completed,omitempty"`
 	PendingHitl *PendingHitlState     `json:"pendingHitl,omitempty"`
@@ -62,6 +65,20 @@ type NestedRunState struct {
 	ExecKey     string         `json:"execKey,omitempty"`
 	ExecMemo    map[string]any `json:"execMemo,omitempty"`
 	ExecControl map[string]int `json:"execControl,omitempty"`
+}
+
+// rootCheckpointInput normalizes the ROOT run's input document for a checkpoint:
+// the root input is always a JSON object, so an absent (nil interface or nil map)
+// document is written as {}. This must not be applied to a nested frame's Input,
+// which may legitimately be any JSON value including null.
+func rootCheckpointInput(in any) any {
+	if m, ok := in.(map[string]any); ok && m == nil {
+		return map[string]any{}
+	}
+	if in == nil {
+		return map[string]any{}
+	}
+	return in
 }
 
 func completedStepIDs(steps map[string]StepResult) []string {
@@ -84,9 +101,7 @@ func marshalCheckpointPayload(ictx Context, totalCost float64) (string, error) {
 		OtelInterrupt: ictx.OtelInterrupt,
 		Nested:        ictx.Nested,
 	}
-	if payload.Input == nil {
-		payload.Input = map[string]any{}
-	}
+	payload.Input = rootCheckpointInput(payload.Input)
 	if payload.Steps == nil {
 		payload.Steps = map[string]StepResult{}
 	}
@@ -111,9 +126,7 @@ func unmarshalCheckpointPayload(contextJSON string, g *spec.ProjectGraph, wf *sp
 	if payload.Version != checkpointPayloadVersion {
 		return Context{}, 0, fmt.Errorf("engine: unsupported checkpoint version %d", payload.Version)
 	}
-	if payload.Input == nil {
-		payload.Input = map[string]any{}
-	}
+	payload.Input = rootCheckpointInput(payload.Input)
 	if payload.Steps == nil {
 		payload.Steps = map[string]StepResult{}
 	}

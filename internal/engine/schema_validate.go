@@ -62,7 +62,9 @@ func (e *Executor) resolveSchemaContent(sref string) ([]byte, error) {
 
 // validateWorkflowInputSchema validates a workflow's input against its declared input schema,
 // choosing the pinned bundle or the on-disk file per [Executor.validateAgainstSchema].
-func (e *Executor) validateWorkflowInputSchema(wf *spec.WorkflowResource, input map[string]any) error {
+// input is the actual input document, which need not be an object (a single-parameter
+// callee may receive a scalar, array, or null), so the schema sees exactly that value.
+func (e *Executor) validateWorkflowInputSchema(wf *spec.WorkflowResource, input any) error {
 	if wf == nil || wf.Spec.Input == nil {
 		return nil
 	}

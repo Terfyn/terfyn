@@ -125,11 +125,11 @@ type RunState struct {
 	SuspendKey string         `json:"-"`
 }
 
-// Run executes prog with the given workflow input and returns the value set by a
+// Run executes prog with the given workflow input document and returns the value set by a
 // Return node (nil if the program returns nothing). It discards durable state; a
 // suspend (an [Invoker] returning [ErrSuspend]) halts cleanly with a nil-ish
 // output. Use [Interp.RunResumable] for the durable path.
-func (in *Interp) Run(ctx context.Context, prog *Program, input map[string]any) (any, error) {
+func (in *Interp) Run(ctx context.Context, prog *Program, input any) (any, error) {
 	out, _, err := in.RunResumable(ctx, prog, input, nil)
 	return out, err
 }
@@ -137,7 +137,7 @@ func (in *Interp) Run(ctx context.Context, prog *Program, input map[string]any) 
 // RunResumable executes prog, seeding completed-leaf memo and control records
 // from seed (nil for a fresh run), and returns the durable [RunState] — whether
 // the run completed or suspended (issue #258).
-func (in *Interp) RunResumable(ctx context.Context, prog *Program, input map[string]any, seed *RunState) (any, *RunState, error) {
+func (in *Interp) RunResumable(ctx context.Context, prog *Program, input any, seed *RunState) (any, *RunState, error) {
 	if in == nil || in.Invoker == nil {
 		return nil, nil, fmt.Errorf("execir: nil interpreter or invoker")
 	}
@@ -258,15 +258,22 @@ func extend(base []int, x int) []int {
 // parameter names the whole workflow input, so `input.repo` (or `pr.repo` for a
 // parameter named `pr`) resolves against the entire input document; multiple
 // parameters each name one top-level field of the input.
-func paramScope(params []string, input map[string]any) map[string]any {
+//
+// The input is a JSON document, not necessarily an object: a single-parameter
+// workflow may receive a string, number, bool, array, or null, and the parameter
+// is bound to exactly that value. Only the multi-parameter form requires an
+// object, since it selects fields by name; a non-object document leaves those
+// parameters unbound (nil).
+func paramScope(params []string, input any) map[string]any {
 	scope := make(map[string]any, len(params)+1)
 	switch {
 	case len(params) == 1:
 		scope[params[0]] = input
 	default:
+		fields, _ := input.(map[string]any)
 		for _, p := range params {
-			if input != nil {
-				scope[p] = input[p]
+			if fields != nil {
+				scope[p] = fields[p]
 			}
 		}
 	}

@@ -513,7 +513,6 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 			return nil, fmt.Errorf("engine: lower subworkflow %q to execir: %w", workflow, derr)
 		}
 		childProg = lowered
-		childInput = unwrapSingleParamWorkflowInput(childProg, args)
 	}
 
 	childInv := newEngineInvoker(&child, childIn, callee, wfPol, a.runHandle, a.cost, a.runStartedAt)
@@ -609,21 +608,30 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 }
 
 // unwrapSingleParamWorkflowInput implements whole-document call semantics for a
-// single-parameter callee (#552). Positional lowering emits {param: document} (or
+// single-parameter callee (#552). Positional lowering emits {param: document}
+// (the checker rebinds arg0 to the parameter name; an unresolved call keeps
 // {arg0: document}); paramScope then binds the parameter to that wrapper. When
-// the callee has one parameter and the call supplied one map argument, pass the
-// argument as the child input document.
-func unwrapSingleParamWorkflowInput(prog *execir.Program, args map[string]any) map[string]any {
+// the callee declares one parameter and the call supplied exactly one argument
+// under that parameter's (or the positional) name, the argument IS the child's
+// input document, whatever JSON value it is: an object, array, string, number,
+// bool, or null. Anything else keeps the args map as the input document.
+//
+// prog must be the callee's authored program (Executables). A YAML callee lowers
+// to the conventional single parameter `input` (LowerWorkflowResource) and takes
+// its `with:` map AS the document, so a one-key `with:` must never be unwrapped;
+// callers pass nil for it.
+func unwrapSingleParamWorkflowInput(prog *execir.Program, args map[string]any) any {
 	if args == nil {
-		return args
+		return nil
 	}
 	if prog == nil || len(prog.Params) != 1 || len(args) != 1 {
 		return args
 	}
-	for _, v := range args {
-		if m, ok := v.(map[string]any); ok {
-			return m
-		}
+	if v, ok := args[prog.Params[0]]; ok {
+		return v
+	}
+	if v, ok := args["arg0"]; ok {
+		return v
 	}
 	return args
 }
@@ -833,9 +841,7 @@ func (e *Executor) saveExecCheckpoint(ctx context.Context, wf *spec.WorkflowReso
 		ExecMemo:      runState.Memo,
 		ExecControl:   runState.Control,
 	}
-	if payload.Input == nil {
-		payload.Input = map[string]any{}
-	}
+	payload.Input = rootCheckpointInput(payload.Input)
 	if payload.Steps == nil {
 		payload.Steps = map[string]StepResult{}
 	}
