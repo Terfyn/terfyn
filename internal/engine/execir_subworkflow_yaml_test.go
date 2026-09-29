@@ -274,3 +274,43 @@ func TestYAMLSubworkflow_resumeKeepsOutputValue(t *testing.T) {
 		})
 	}
 }
+
+// TestYAMLOutput_missingFieldIsNullFailOpen pins the output language rule (#551):
+// a workflow output is evaluated by the interpreter, so a reference to a field
+// that is absent — a missing input field, a missing field of a step's output, or
+// `${steps.<id>.meta.*}` (the interpreter binds a step to its output only) —
+// yields null and the run SUCCEEDS, exactly as the same reference in a `with:`
+// argument does (docs/LANGUAGE.md "Subworkflow calls", DESIGN_DOC §13.1). The
+// same document is the nested run_steps output.
+func TestYAMLOutput_missingFieldIsNullFailOpen(t *testing.T) {
+	t.Parallel()
+	child := yamlWF("child",
+		[]spec.WorkflowStep{{ID: "echo", Uses: "tool.echo.echo", With: map[string]any{"msg": "${input.topic}"}}},
+		map[string]any{
+			"topic":   "${input.topic}",
+			"missing": "${steps.echo.output.nope}",
+			"dur":     "${steps.echo.meta.durationMs}",
+		})
+	single := yamlWF("single", nil, map[string]any{"value": "${input.absent}"})
+	parent := yamlWF("parent",
+		[]spec.WorkflowStep{{ID: "call", Workflow: "child", With: map[string]any{}}},
+		map[string]any{"got": "${steps.call.output}"})
+	g := yamlSubworkflowGraph(child, single, parent)
+
+	const want = `{"dur":null,"missing":null,"topic":null}`
+	_, run := runYAMLProd(t, g, "child", map[string]any{})
+	if run.Status != state.RunStatusSucceeded || run.OutputJSON != want {
+		t.Fatalf("child status %q output %s, want succeeded with %s", run.Status, run.OutputJSON, want)
+	}
+	_, run = runYAMLProd(t, g, "single", map[string]any{})
+	if got, want := run.OutputJSON, `{"value":null}`; got != want {
+		t.Fatalf("single-value output %s, want %s", got, want)
+	}
+	ex, run := runYAMLProd(t, g, "parent", map[string]any{})
+	if got, wantOut := run.OutputJSON, `{"got":`+want+`}`; got != wantOut {
+		t.Fatalf("parent output %s, want %s", got, wantOut)
+	}
+	if got := runStepRow(t, ex, run.RunID, "call").OutputJSON; got != want {
+		t.Fatalf("run_steps call output %s, want %s", got, want)
+	}
+}

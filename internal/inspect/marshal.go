@@ -67,9 +67,31 @@ func redactCheckpointContext(ctxJSON string, redaction trace.RedactionOptions) s
 	if err := json.Unmarshal([]byte(ctxJSON), &v); err != nil {
 		return ctxJSON
 	}
+	redactWholeDocumentFrames(v, redaction)
 	b, err := json.Marshal(trace.RedactValue(v, redaction))
 	if err != nil {
 		return ctxJSON
 	}
 	return string(b)
+}
+
+// redactWholeDocumentFrames masks the input of every nested subworkflow frame that
+// records a whole-document call (issue #552). Such a frame's `input` is the single
+// argument's VALUE — possibly a scalar or array with no key for RedactValue to
+// match — so it is redacted as {inputParam: input}, the argument map the callee
+// was called with: a sensitive parameter name masks the whole value, exactly as the
+// run_steps input row of the same call is masked (issue #408). Frames without
+// `inputParam` (argument-map inputs) are left to the key-based pass.
+func redactWholeDocumentFrames(ctx any, redaction trace.RedactionOptions) {
+	m, _ := ctx.(map[string]any)
+	for frame, _ := m["nested"].(map[string]any); frame != nil; frame, _ = frame["nested"].(map[string]any) {
+		param, _ := frame["inputParam"].(string)
+		if param == "" {
+			continue
+		}
+		if in, ok := frame["input"]; ok {
+			masked, _ := trace.RedactValue(map[string]any{param: in}, redaction).(map[string]any)
+			frame["input"] = masked[param]
+		}
+	}
 }

@@ -432,12 +432,30 @@ as data (#551, #552); the runtime never guesses it from key names or output shap
   as a YAML `with:` map is passed.
 - **Results.** A workflow's output document is `{value: <return>}` for a scalar/non-literal
   `return` and the returned object itself when every `return` is an object literal
-  (`lower.WorkflowReturnShape`). That document is the step's one runtime value: the run's
-  output, the persisted `run_steps` output, and what a YAML caller reads as
-  `${steps.<id>.output}`. A `.agent` binding `r = Identity(x)` is the callee's **return value**:
-  when the callee uses the `{value: …}` envelope the checker sets the node's `ProjectValue` bit
-  and the interpreter binds the `value` field. A call to a YAML-only workflow binds its output
-  document.
+  (`lower.WorkflowReturnShape`). A workflow with several `return`s is classified from its
+  `return`s alone, so swapping the arms of an `if` never changes the shape; only a
+  single-`return` workflow whose output is exactly `{value: …}` keeps the envelope around an
+  object literal (a YAML `output.value: {value: <map>}`, or a `.agent` `return {value: x}`).
+  That document is the step's one runtime value: the run's output, the persisted `run_steps`
+  output, and what a YAML caller reads as `${steps.<id>.output}`. A `.agent` binding
+  `r = Identity(x)` is the callee's **return value**: when the callee uses the `{value: …}`
+  envelope the checker sets the node's `ProjectValue` bit and the interpreter binds the `value`
+  field. A call to a YAML-only workflow binds its output document.
+- **Missing fields are `null` (fail-open).** Outputs — a `.agent` `return {…}` and a YAML
+  `output.value` alike — are evaluated by the interpreter with the same gradual field rule as
+  call arguments: a reference to an absent field (`input.topic` when the input has no `topic`,
+  `ping.echo.nope`, or YAML `${steps.<id>.meta.*}`, since a step is bound to its output only)
+  evaluates to `null` and the run **succeeds**. Only an unbound head name is an error, and the
+  checker rejects it before run. A workflow that must fail on a missing value has to say so —
+  declare the workflow's input schema with `required:` (validated before the run, and before a
+  subworkflow call), or guard the value with control flow. A workflow output schema is not
+  validated at run time.
+- **Audit rows.** The `run_steps` input of a call records the document the callee received,
+  masked for display (#408). For a whole-document call the argument is redacted **under its
+  parameter name** before it is unwrapped, so `Deploy(input.token)` against
+  `workflow Deploy(token: …)` records `"[REDACTED]"` whatever the value's JSON kind. A suspended
+  call's checkpoint frame keeps the raw document for replay plus the parameter name
+  (`inputParam`), which `inspect` uses to mask it the same way.
 
 ### String templates in arguments
 

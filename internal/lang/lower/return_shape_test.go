@@ -38,6 +38,12 @@ func TestWorkflowReturnShape(t *testing.T) {
 		{"multi-return object literals", []execir.Node{branch(ret(obj("r")), ret(obj("s")))}, wfOut(map[string]any{"s": "${input.s}"}), ReturnDocument},
 		{"mixed returns", []execir.Node{branch(ret(ref), ret(obj("s")))}, wfOut(map[string]any{"s": "${input.s}"}), ReturnValueEnvelope},
 		{"object literal with only a value key", []execir.Node{ret(obj("value"))}, wfOut(map[string]any{"value": "${input.value}"}), ReturnValueEnvelope},
+		// A multi-Return program is classified from its Return nodes alone: the
+		// flattened resource records only the last-lowered arm, so a `{value: …}`
+		// arm must not flip the shape depending on source order (review #578).
+		{"value-only arm lowered last", []execir.Node{branch(ret(obj("r")), ret(obj("value")))}, wfOut(map[string]any{"value": "${input.value}"}), ReturnDocument},
+		{"value-only arm lowered first", []execir.Node{branch(ret(obj("value")), ret(obj("r")))}, wfOut(map[string]any{"r": "${input.r}"}), ReturnDocument},
+		{"mixed returns with a value envelope resource", []execir.Node{branch(ret(obj("r")), ret(ref))}, wfOut(valueOut), ReturnValueEnvelope},
 		{"return in loop body", []execir.Node{&execir.Loop{Var: "x", Collection: ref, Body: []execir.Node{ret(obj("r"))}}}, wfOut(map[string]any{"r": "x"}), ReturnDocument},
 	} {
 		if got := WorkflowReturnShape(&execir.Program{Body: tc.body}, tc.wf); got != tc.want {

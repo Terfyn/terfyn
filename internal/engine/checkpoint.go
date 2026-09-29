@@ -52,7 +52,13 @@ type NestedRunState struct {
 	// Input is the callee's whole input document: any JSON value, not only an
 	// object (a single-parameter callee may receive a scalar or array). A null
 	// document round-trips as nil, and resume falls back to the call's args.
-	Input       any                   `json:"input"`
+	Input any `json:"input"`
+	// InputParam names the callee's single parameter when Input is a
+	// whole-document call's value (#552). Display metadata only — resume ignores
+	// it: read surfaces redact Input as {InputParam: Input}, so a sensitive
+	// parameter name masks a scalar or array document that has no key of its own
+	// (#408). Omitted for every other call, whose Input is the argument map.
+	InputParam  string                `json:"inputParam,omitempty"`
 	Steps       map[string]StepResult `json:"steps"`
 	Completed   []string              `json:"completed,omitempty"`
 	PendingHitl *PendingHitlState     `json:"pendingHitl,omitempty"`

@@ -9,10 +9,10 @@ import (
 // document — the one value that is the run's output, the persisted run_steps
 // output of a workflow: step, and what a YAML caller reads as
 // `${steps.<id>.output}` (DESIGN_DOC §13.2). It is a pure function of the
-// executable program and its resource projection ([WorkflowReturnShape]), so the
-// engine (building the output) and the checker (deciding whether a `.agent`
-// caller binds the output's `value` field, [execir.InvokeWorkflow.ProjectValue])
-// can never disagree about it.
+// executable program (and, for a single-Return program only, its resource
+// projection — see [WorkflowReturnShape]), so the engine (building the output)
+// and the checker (deciding whether a `.agent` caller binds the output's `value`
+// field, [execir.InvokeWorkflow.ProjectValue]) can never disagree about it.
 type ReturnShape int
 
 const (
@@ -20,25 +20,36 @@ const (
 	// document {} (a YAML workflow without output.value, a `.agent` workflow with
 	// no return statement).
 	ReturnNone ReturnShape = iota
-	// ReturnDocument: every Return returns an object literal ([execir.Object]) and
-	// the resource output is not the single-`value` envelope, so the returned
-	// object IS the output document (`return {a: x}` → `{a: x}`, a multi-key YAML
-	// output.value).
+	// ReturnDocument: every Return returns an object literal ([execir.Object]), so
+	// the returned object IS the output document (`return {a: x}` → `{a: x}`, a
+	// multi-key YAML output.value) — except a single-Return program whose resource
+	// output is the `{value: …}` envelope (see [WorkflowReturnShape]).
 	ReturnDocument
 	// ReturnValueEnvelope: the output is `{value: <return value>}` — the `.agent`
-	// scalar-return convention (`return x`, see lower.go outputValueFor) and a YAML
-	// output.value of exactly `{value: X}` (which LowerWorkflowResource unwraps to
-	// `Return X`).
+	// scalar-return convention (`return x`, see lower.go outputValueFor), a
+	// program mixing object-literal and other returns, and a YAML output.value of
+	// exactly `{value: X}` (which LowerWorkflowResource unwraps to `Return X`).
 	ReturnValueEnvelope
 )
 
-// WorkflowReturnShape classifies prog's Return nodes against wf's resource output
-// (see [ReturnShape]). A program whose Returns mix object literals with other
-// values uses the value envelope for every Return, so the output never depends on
-// which arm's shape the flattened resource projection happened to record; a
-// resource output of exactly `{value: …}` also forces the envelope, because that
-// is the documented shape of the step output (and it is what a YAML twin's
-// unwrapped `Return X` needs to be re-wrapped into).
+// WorkflowReturnShape classifies prog's Return nodes (see [ReturnShape]):
+//
+//   - no Return: [ReturnNone];
+//   - more than one Return: classified from the Return nodes ALONE — every one an
+//     object literal is [ReturnDocument], anything else [ReturnValueEnvelope].
+//     The resource is not consulted: a multi-Return program only comes from
+//     `.agent` source (a YAML workflow lowers output.value to at most one trailing
+//     Return), and its flattened resource output.value is whichever `return` was
+//     lowered LAST (lower.go outputValueFor overwrites it per arm), so consulting
+//     it would make every arm's output depend on source order;
+//   - exactly one Return: as above, except that a resource output of exactly
+//     `{value: …}` forces [ReturnValueEnvelope]. This is the YAML envelope:
+//     LowerWorkflowResource unwraps `output.value: {value: <map>}` to
+//     `Return <map>`, which is an object literal the program alone cannot tell
+//     from a document. With one Return the resource describes that Return and no
+//     other, so the answer is independent of source order. (A `.agent`
+//     `return {value: x}` also takes this branch and keeps the envelope, as the
+//     root output always did.)
 func WorkflowReturnShape(prog *execir.Program, wf *spec.WorkflowResource) ReturnShape {
 	if prog == nil {
 		return ReturnNone
@@ -47,10 +58,12 @@ func WorkflowReturnShape(prog *execir.Program, wf *spec.WorkflowResource) Return
 	switch {
 	case returns == 0:
 		return ReturnNone
-	case returns == objects && !IsSingleValueOutput(wf):
-		return ReturnDocument
-	default:
+	case returns != objects:
 		return ReturnValueEnvelope
+	case returns == 1 && IsSingleValueOutput(wf):
+		return ReturnValueEnvelope
+	default:
+		return ReturnDocument
 	}
 }
 

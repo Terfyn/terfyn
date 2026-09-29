@@ -62,8 +62,11 @@ type nestedSuspension struct {
 	key    string
 	stepID string // the parent's workflow: step id (NestedRunState.StepID anchor)
 	callee string
-	ictx   Context
-	state  *execir.RunState
+	// inputParam is the callee's single parameter name for a whole-document call
+	// (NestedRunState.InputParam, display redaction only); "" otherwise.
+	inputParam string
+	ictx       Context
+	state      *execir.RunState
 	// child is THIS callee's own suspended subworkflow, when the gate lives another
 	// level deeper (outer→mid→inner, gate in inner): mid's frame carries inner's
 	// frame so resume can seed it instead of re-running inner fresh (issue #380).
@@ -458,8 +461,10 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	// call is addressable in run_steps like any other step.
 	wfQID := a.e.qualID(site.Bind)
 	// The audit row records the document the callee actually receives (validated
-	// above and bound by the child run), not the call's argument map (#552).
-	wfInJSON := a.redactStepJSON(childInput)
+	// above and bound by the child run), not the call's argument map (#552) — but
+	// redacted while the parameter name still marks it sensitive (#408). Every row
+	// variant below (running, succeeded, failed, interrupted) reuses wfInJSON.
+	wfInJSON := a.workflowInputAuditJSON(site, args, childInput)
 	wfStarted := a.e.now()
 	_ = a.e.Store.UpsertRunStep(ctx, state.RunStep{RunID: a.in.RunID, StepID: wfQID, Status: "running", StartedAt: &wfStarted, InputJSON: string(wfInJSON)})
 
@@ -568,11 +573,12 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 		// the single nested slot — dropping its frame would re-run its committed
 		// inner steps on resume (S7). Fail closed rather than duplicate side effects.
 		if !a.setNestedIfFirst(&nestedSuspension{
-			key:    key,
-			stepID: site.Bind,
-			callee: workflow,
-			ictx:   Context{Input: snap.Input, Steps: snap.Steps, PendingHitl: childInv.getPending()},
-			state:  childState,
+			key:        key,
+			stepID:     site.Bind,
+			callee:     workflow,
+			inputParam: wholeDocumentParam(site, args),
+			ictx:       Context{Input: snap.Input, Steps: snap.Steps, PendingHitl: childInv.getPending()},
+			state:      childState,
 			// When the gate is deeper still, childInv suspended because ITS own
 			// subworkflow suspended: carry that frame so resume seeds it recursively
 			// rather than re-running the inner pre-gate steps (S7, issue #380).
@@ -628,6 +634,53 @@ func workflowInputDocument(site execir.CallSite, workflow string, args map[strin
 		return v, nil
 	}
 	return nil, nil // unreachable: len(args) == 1
+}
+
+// workflowInputAuditJSON marshals the run_steps input row of a subworkflow call:
+// the callee's input document, redacted for display (issue #408). Redaction is by
+// key, so the order matters for a whole-document call: the callee receives the
+// single argument's VALUE, and a scalar or array value has no key left to mask
+// (`Deploy(input.token)` would persist the token in clear). The one-entry argument
+// map — still keyed by the parameter name — is redacted FIRST, and that entry's
+// redacted value is persisted: a sensitive parameter name masks the whole value
+// exactly as the same argument map was masked before the call shape was explicit.
+// Every other call records its argument map, which is the document.
+func (a *engineInvoker) workflowInputAuditJSON(site execir.CallSite, args map[string]any, childInput any) []byte {
+	if !site.WholeDocument {
+		return a.redactStepJSON(childInput)
+	}
+	return redactWholeDocumentJSON(args, a.e.Trace)
+}
+
+// redactWholeDocumentJSON redacts a whole-document call's one-entry argument map
+// with the trace recorder's options and marshals the entry's redacted value. When
+// the prepared payload is no longer that one entry (it exceeded the payload budget
+// and was replaced by the truncation envelope), the prepared payload itself is
+// persisted — it is already redacted, so the raw value never reaches the row.
+func redactWholeDocumentJSON(args map[string]any, r *trace.Recorder) []byte {
+	prepared := trace.PrepareEventData(args, nil, displayRedactionOptions(r))
+	if len(args) == 1 && len(prepared) == 1 {
+		for k := range args {
+			if v, ok := prepared[k]; ok {
+				b, _ := json.Marshal(v)
+				return b
+			}
+		}
+	}
+	b, _ := json.Marshal(prepared)
+	return b
+}
+
+// wholeDocumentParam is the parameter name of a whole-document call's single
+// argument, or "" for any other call.
+func wholeDocumentParam(site execir.CallSite, args map[string]any) string {
+	if !site.WholeDocument || len(args) != 1 {
+		return ""
+	}
+	for k := range args {
+		return k
+	}
+	return ""
 }
 
 // run wraps one leaf invocation with the admit/persist/cost/commit envelope the
@@ -721,16 +774,22 @@ func (a *engineInvoker) redactStepJSON(v any) []byte {
 // mask) is marshaled as is. Falls back to default redaction when no recorder is set, so it never
 // persists raw.
 func redactPayloadJSON(v any, r *trace.Recorder) []byte {
-	opts := trace.NormalizeRedactionOptions(trace.DefaultRedactionOptions())
-	if r != nil {
-		opts = r.Redaction
-	}
+	opts := displayRedactionOptions(r)
 	if m, ok := v.(map[string]any); ok {
 		b, _ := json.Marshal(trace.PrepareEventData(m, nil, opts))
 		return b
 	}
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// displayRedactionOptions is the recorder's redaction, or the defaults when no
+// recorder is set, so a display payload is never persisted raw.
+func displayRedactionOptions(r *trace.Recorder) trace.RedactionOptions {
+	if r != nil {
+		return r.Redaction
+	}
+	return trace.NormalizeRedactionOptions(trace.DefaultRedactionOptions())
 }
 
 func (a *engineInvoker) failStepRow(ctx context.Context, qid string, inJSON []byte, err error, stepCost float64) {
@@ -796,6 +855,7 @@ func nestedRunStateOf(n *nestedSuspension) *NestedRunState {
 		StepID:      n.stepID,
 		Workflow:    n.callee,
 		Input:       n.ictx.Input,
+		InputParam:  n.inputParam,
 		Steps:       n.ictx.Steps,
 		Completed:   completedStepIDs(n.ictx.Steps),
 		PendingHitl: n.ictx.PendingHitl,
