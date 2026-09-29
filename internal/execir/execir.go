@@ -73,11 +73,22 @@ type InvokeTool struct {
 func (*InvokeTool) node() {}
 
 // InvokeAgent invokes a declared agent. Bind is the result binding, or "".
+//
+// WholeDocument is the explicit call-shape bit (#550): true exactly when the
+// call was lowered from a single UNNAMED argument (`Reviewer(value)`), in which
+// case Args holds that one value under the placeholder key "arg0" and the value
+// itself — not an object wrapping it — is the agent's whole input document.
+// Every other shape (named arguments, including one literally named arg0; two or
+// more positional arguments; no arguments) has WholeDocument false and Args is
+// the input object. The bit is part of the program's identity (digest and wire
+// form): the same Args map means different inputs under the two shapes, so the
+// runtime must never infer the shape from a key name.
 type InvokeAgent struct {
-	Pos   Pos
-	Bind  string
-	Agent string
-	Args  map[string]Value
+	Pos           Pos
+	Bind          string
+	Agent         string
+	Args          map[string]Value
+	WholeDocument bool
 }
 
 func (*InvokeAgent) node() {}

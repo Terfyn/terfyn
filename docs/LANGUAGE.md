@@ -584,7 +584,10 @@ What is checked:
 
 - An agent invocation's **single positional argument** against the callee's declared
   `input` type — the one unambiguous shape, since an agent's `input` is one type, not a
-  named parameter list. Every OTHER call shape against a known input type is a diagnostic,
+  named parameter list. An **object-literal** argument (`Reviewer({repo: r, number: n})`)
+  is checked field by field (recursively for nested literals): each field value against
+  that field's declared type, and a field the type forbids (`additionalProperties: false`)
+  is an error — the same per-field rule graph validation applies to the lowered step (#550). Every OTHER call shape against a known input type is a diagnostic,
   not a smaller version of the same problem to skip past quietly: **zero arguments** is an
   **error** (a declared input was never supplied); a **single named argument**
   (`A(input: x)`) and **more than one argument** — the ADR 002 normative surface's own
@@ -607,6 +610,14 @@ What is checked:
   `schema.Document.Lookup`, and a field the schema declares forbidden
   (`additionalProperties: false`) is a positioned error.
 - A `return <expr>` against the enclosing workflow's declared result type.
+- A **string template** in a value position (an argument or a field of one, an approval
+  payload entry, a return value) is typed by the rule graph validation applies to the
+  lowered interpolation (#550): a string that is exactly one `${binding…}` token has the
+  referenced binding's type, and any other string containing a token is a `string`. Each
+  token is resolved like a reference, so an undeclared member path or a binding that is not
+  definitely assigned is an error. A string without a token stays an untyped literal. This
+  holds inside control-flow bodies too, whose synthetic steps graph validation skips, so
+  `Reviewer({repo: "${count}"})` is refused in a `while` body exactly as it is straight-line.
 - A dotted (tool) callee's arguments are checked for their own internal well-formedness
   (nested calls, member access) but not against a declared parameter type — there is no
   `.agent`-visible tool schema.

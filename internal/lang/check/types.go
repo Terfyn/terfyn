@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/Terfyn/terfyn/internal/lang"
 	"github.com/Terfyn/terfyn/internal/lang/lower"
@@ -140,10 +142,18 @@ func schemaDirFor(f *lang.File) string {
 // mirroring how internal/spec/wiring.go walks interpolation paths against the
 // same schema.Document API, but over AST RefExpr.Parts instead of a regex over
 // an interpolation string.
+//
+// lit is a schema-less primitive type for a value whose type is known without a
+// schema document — only a string template mixing text and ${…} tokens (always a
+// string, see checkTemplate). A zero typeRef (no doc, no lit) is untyped.
 type typeRef struct {
 	doc  *schema.Document
 	path []string
+	lit  schema.TypeSet
 }
+
+// stringType is the type of a string template that is not a single whole-string token.
+var stringType = typeRef{lit: schema.TypeSet{schema.TypeString: {}}}
 
 func (t typeRef) types() schema.TypeSet {
 	return t.result().Types
@@ -151,7 +161,7 @@ func (t typeRef) types() schema.TypeSet {
 
 func (t typeRef) result() schema.LookupResult {
 	if t.doc == nil {
-		return schema.LookupResult{}
+		return schema.LookupResult{Types: t.lit, Known: len(t.lit) > 0}
 	}
 	return t.doc.Lookup(t.path)
 }
@@ -262,7 +272,7 @@ func (wc *wfChecker) checkStmt(st lang.Stmt) lang.Diagnostics {
 			if arg == nil {
 				continue
 			}
-			_, d := wc.checkExpr(arg.Value)
+			_, d := wc.checkValue(arg.Value)
 			diags = append(diags, d...)
 		}
 		wc.env[identName(s.Bind)] = typeRef{}
@@ -280,7 +290,7 @@ func (wc *wfChecker) checkStmt(st lang.Stmt) lang.Diagnostics {
 		}
 		return diags
 	case *lang.ReturnStmt:
-		got, diags := wc.checkExpr(s.Value)
+		got, diags := wc.checkValue(s.Value)
 		want := typeRef{doc: wc.tu.workflows[identName(wc.wf.Name)].Result}
 		diags = append(diags, wc.checkCompatible(s.Value.Position(), got, want, "return value")...)
 		return diags
@@ -432,10 +442,22 @@ func loopJoin(pre, after map[string]typeRef) map[string]typeRef {
 // mergeType joins a name's type across the two arms: identical types are kept,
 // differing types collapse to untyped (gradual), never to one arm's value.
 func mergeType(a, b typeRef) typeRef {
-	if a.doc == b.doc && samePath(a.path, b.path) {
+	if a.doc == b.doc && samePath(a.path, b.path) && sameTypeSet(a.lit, b.lit) {
 		return a
 	}
 	return typeRef{}
+}
+
+func sameTypeSet(a, b schema.TypeSet) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for t := range a {
+		if !b.Has(t) {
+			return false
+		}
+	}
+	return true
 }
 
 func samePath(a, b []string) bool {
@@ -470,12 +492,13 @@ func (wc *wfChecker) checkExpr(e lang.Expr) (typeRef, lang.Diagnostics) {
 	case *lang.ObjectExpr:
 		// An object literal (issue #440): each field value is checked for reference well-formedness;
 		// the object itself is untyped (its shape is gradual, like any other structured value).
+		// An object literal only occurs in a value position, so its fields are values too.
 		var diags lang.Diagnostics
 		for _, f := range v.Fields {
 			if f == nil {
 				continue
 			}
-			_, d := wc.checkExpr(f.Value)
+			_, d := wc.checkValue(f.Value)
 			diags = append(diags, d...)
 		}
 		return typeRef{}, diags
@@ -498,6 +521,12 @@ func (wc *wfChecker) checkExpr(e lang.Expr) (typeRef, lang.Diagnostics) {
 // positively forbids the path (additionalProperties: false); an untyped head is
 // otherwise gradual.
 func (wc *wfChecker) checkRef(r *lang.RefExpr) (typeRef, lang.Diagnostics) {
+	return wc.resolveRef(r, "unresolved reference %q")
+}
+
+// resolveRef is checkRef with the unresolved-head message format as a parameter, so
+// a ${…} token in a string template reports the same message lowering does for it.
+func (wc *wfChecker) resolveRef(r *lang.RefExpr, unresolvedFmt string) (typeRef, lang.Diagnostics) {
 	if r == nil || len(r.Parts) == 0 {
 		return typeRef{}, nil
 	}
@@ -506,7 +535,7 @@ func (wc *wfChecker) checkRef(r *lang.RefExpr) (typeRef, lang.Diagnostics) {
 	if !ok {
 		return typeRef{}, lang.Diagnostics{{
 			Pos: r.Pos,
-			Msg: fmt.Sprintf("unresolved reference %q", head),
+			Msg: fmt.Sprintf(unresolvedFmt, head),
 		}}
 	}
 	for _, p := range r.Parts[1:] {
@@ -525,6 +554,75 @@ func (wc *wfChecker) checkRef(r *lang.RefExpr) (typeRef, lang.Diagnostics) {
 	return cur, nil
 }
 
+// checkValue types e in a VALUE position — a call argument or a field of one, an
+// approval payload entry, a return value — which is where lowering interpolates a
+// string literal's ${…} tokens (#316: lowerArg/interpolateArg for the resource
+// projection, lowerValue/stringTemplateValue for the execution IR). A string
+// literal there is typed by checkTemplate; every other expression by checkExpr. A
+// literal in any other position (a condition operand, a literal binding) is never
+// interpolated, so checkExpr keeps it an untyped literal.
+func (wc *wfChecker) checkValue(e lang.Expr) (typeRef, lang.Diagnostics) {
+	if lit, ok := e.(*lang.LitExpr); ok {
+		if s, ok := lit.Value.(string); ok {
+			return wc.checkTemplate(s, lit.Pos)
+		}
+	}
+	return wc.checkExpr(e)
+}
+
+// templateTokenRE matches a ${…} interpolation token: the same shape lowering
+// (internal/lang/lower) and graph validation (internal/spec) use.
+var templateTokenRE = regexp.MustCompile(`\$\{([^}]*)\}`)
+
+// checkTemplate types a string value by the rule graph validation applies to an
+// interpolated string (internal/spec checkConsumerType), so the checker and the
+// validator cannot disagree about it (#550) — including inside control-flow
+// bodies, whose Synthetic steps graph validation skips:
+//
+//   - a string that is exactly one ${binding…} token is the referenced value itself
+//     (the execution IR lowers it to a Ref), so it has the binding's type;
+//   - any other string containing a token is a Template, so it is a string;
+//   - a string with no token is a plain literal and stays untyped (the validator
+//     ignores it too).
+//
+// Each token's inner is a source binding path (lowering maps it to the resource
+// ${steps.<id>.output…} form), resolved against the checker's definite-assignment
+// env like any reference, so an unresolved head or an undeclared member path is
+// reported here too.
+func (wc *wfChecker) checkTemplate(s string, pos lang.Pos) (typeRef, lang.Diagnostics) {
+	locs := templateTokenRE.FindAllStringSubmatchIndex(s, -1)
+	if len(locs) == 0 {
+		return typeRef{}, nil
+	}
+	var diags lang.Diagnostics
+	var last typeRef
+	for _, loc := range locs {
+		t, d := wc.checkTemplateToken(s[loc[2]:loc[3]], pos)
+		diags = append(diags, d...)
+		last = t
+	}
+	if len(locs) == 1 && locs[0][0] == 0 && locs[0][1] == len(s) {
+		return last, diags
+	}
+	return stringType, diags
+}
+
+// checkTemplateToken resolves one ${…} token's inner binding path. The path is
+// split the way the execution IR splits it (interpPath: dot-separated, trimmed,
+// empty segments dropped); an empty path is left to lowering's diagnostic.
+func (wc *wfChecker) checkTemplateToken(inner string, pos lang.Pos) (typeRef, lang.Diagnostics) {
+	var parts []*lang.Ident
+	for _, p := range strings.Split(inner, ".") {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, &lang.Ident{Pos: pos, Name: p})
+		}
+	}
+	if len(parts) == 0 {
+		return typeRef{}, nil
+	}
+	return wc.resolveRef(&lang.RefExpr{Pos: pos, Parts: parts}, "unresolved reference %q in interpolation")
+}
+
 // checkCall type-checks a call's arguments against its callee's declared
 // parameter/input types (when the callee is declared in this compilation
 // unit) and returns the call's own result type.
@@ -539,7 +637,7 @@ func (wc *wfChecker) checkCall(c *lang.CallExpr) (typeRef, lang.Diagnostics) {
 		// checked (nested calls, member access), but not compatibility against
 		// a callee parameter — gradual typing.
 		for _, arg := range c.Args {
-			_, d := wc.checkExpr(arg.Value)
+			_, d := wc.checkValue(arg.Value)
 			diags = append(diags, d...)
 		}
 		return typeRef{}, diags
@@ -557,7 +655,7 @@ func (wc *wfChecker) checkCall(c *lang.CallExpr) (typeRef, lang.Diagnostics) {
 	// undeclared (spec.ValidateProjectGraph reports the latter after lowering).
 	// Gradual typing: only check argument well-formedness.
 	for _, arg := range c.Args {
-		_, d := wc.checkExpr(arg.Value)
+		_, d := wc.checkValue(arg.Value)
 		diags = append(diags, d...)
 	}
 	return typeRef{}, diags
@@ -610,7 +708,7 @@ func (wc *wfChecker) checkWorkflowArgs(name string, wi workflowTypeInfo, c *lang
 	}
 
 	for i, arg := range c.Args {
-		argType, d := wc.checkExpr(arg.Value)
+		argType, d := wc.checkValue(arg.Value)
 		diags = append(diags, d...)
 
 		if arg.Name != nil {
@@ -682,12 +780,11 @@ func (wc *wfChecker) checkWorkflowArgs(name string, wi workflowTypeInfo, c *lang
 func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallExpr) lang.Diagnostics {
 	var diags lang.Diagnostics
 	for _, arg := range c.Args {
-		_, d := wc.checkExpr(arg.Value)
+		_, d := wc.checkValue(arg.Value)
 		diags = append(diags, d...)
 	}
 	if len(c.Args) == 1 && c.Args[0].Name == nil {
-		argType, _ := wc.checkExpr(c.Args[0].Value)
-		diags = append(diags, wc.checkCompatible(c.Args[0].Position(), argType, typeRef{doc: ai.Input},
+		diags = append(diags, wc.checkValueAgainst(c.Args[0].Value, c.Args[0].Position(), typeRef{doc: ai.Input},
 			fmt.Sprintf("input of %s", name))...)
 		return diags
 	}
@@ -708,6 +805,40 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 			len(c.Args), name, name),
 		Severity: lang.SeverityWarning,
 	})
+	return diags
+}
+
+// checkValueAgainst checks the value expression e against want. An object literal
+// is checked field by field against want's property types (recursively): its own
+// type is untyped, so checking it as one value would pass anything, while graph
+// validation types each interpolated field against the input location it fills
+// (#550) — the two must not disagree. A field the declared type forbids
+// (additionalProperties: false, or a field of a non-object) is an error, the same
+// "not declared" graph validation reports. Anything else is checked as one value.
+// Reference well-formedness diagnostics are the caller's (checkValue), not repeated.
+// A string-template field is typed by checkTemplate, the rule graph validation applies.
+func (wc *wfChecker) checkValueAgainst(e lang.Expr, pos lang.Pos, want typeRef, what string) lang.Diagnostics {
+	obj, ok := e.(*lang.ObjectExpr)
+	if !ok || want.doc == nil {
+		got, _ := wc.checkValue(e)
+		return wc.checkCompatible(pos, got, want, what)
+	}
+	var diags lang.Diagnostics
+	for _, f := range obj.Fields {
+		if f == nil || f.Key == nil || f.Value == nil {
+			continue
+		}
+		path := append(append([]string(nil), want.path...), f.Key.Name)
+		field := fmt.Sprintf("%s field %q", what, strings.Join(path, "."))
+		if want.doc.Lookup(path).Missing {
+			diags = append(diags, lang.Diagnostic{
+				Pos: f.Position(),
+				Msg: fmt.Sprintf("%s is not declared by the declared type", field),
+			})
+			continue
+		}
+		diags = append(diags, wc.checkValueAgainst(f.Value, f.Value.Position(), typeRef{doc: want.doc, path: path}, field)...)
+	}
 	return diags
 }
 

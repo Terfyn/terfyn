@@ -27,18 +27,21 @@ spec:
         arg0: ${steps.pr.output}
       needs:
         - pr
+      wholeDocument: true
     - id: quality
       agent: Reviewer
       with:
         arg0: ${steps.pr.output}
       needs:
         - pr
+      wholeDocument: true
     - id: tests
       agent: TestReviewer
       with:
         arg0: ${steps.pr.output}
       needs:
         - pr
+      wholeDocument: true
     - id: result
       agent: Synthesizer
       with:
