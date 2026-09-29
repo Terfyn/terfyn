@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/lang"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
@@ -475,5 +476,47 @@ workflow W(input: any) {
 	}
 	if len(m) != 3 {
 		t.Fatalf("expected 3 fields, got %d: %v", len(m), m)
+	}
+}
+
+// TestExec_FloatSpelledWholeInputPast2p53 is the end-to-end form of the #573 review repro:
+// serialized JSON input spelling a whole number past 2^53 as a float compares equal to the
+// same integer spelled as an int, to an int literal, and to a float literal (which the
+// parser keeps as float64(2^60)), and a neighbouring integer stays distinct.
+func TestExec_FloatSpelledWholeInputPast2p53(t *testing.T) {
+	t.Parallel()
+	prog, diags := lowerExecOrFatal(t, `
+workflow W(input: any) {
+    if input.a == input.c {
+        return "a == c"
+    }
+    if input.c == 1152921504606846976.0 {
+        return "c == float literal"
+    }
+    if input.a == input.b {
+        if input.a == 1152921504606846976 {
+            if input.a == 1152921504606846976.0 {
+                if input.b == 1152921504606846976.0 {
+                    return "exact"
+                }
+            }
+        }
+    }
+    return "mismatch"
+}
+`, nil)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+	var input map[string]any
+	if err := jsonnum.Unmarshal([]byte(`{"a":1152921504606846976.0,"b":1152921504606846976,"c":1152921504606846977}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	out, err := (&execir.Interp{Invoker: &endToEndInvoker{}}).Run(context.Background(), prog, input)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if out != "exact" {
+		t.Fatalf("got %v, want exact", out)
 	}
 }

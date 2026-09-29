@@ -3,13 +3,13 @@ package cli
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/Terfyn/terfyn/internal/engine"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/runtime"
 	"github.com/Terfyn/terfyn/internal/spec"
@@ -79,7 +79,7 @@ func parseHitlDecisionOptions(decision, editJSON, switchTarget string) (*runtime
 			return nil, fmt.Errorf("run: --decision-edit-json exceeds %d bytes", maxDecisionEditJSONBytes)
 		}
 		var m map[string]any
-		if err := json.Unmarshal([]byte(editJSON), &m); err != nil {
+		if err := jsonnum.Unmarshal([]byte(editJSON), &m); err != nil {
 			return nil, fmt.Errorf("run: --decision-edit-json: %w", err)
 		}
 		if m == nil {
@@ -148,7 +148,7 @@ func promptHitlDecision(sc *bufio.Scanner, out io.Writer, gate policy.HitlGate) 
 				continue
 			}
 			var m map[string]any
-			if err := json.Unmarshal([]byte(editLine), &m); err != nil {
+			if err := jsonnum.Unmarshal([]byte(editLine), &m); err != nil {
 				fmt.Fprintf(out, "Invalid JSON: %v\n", err)
 				continue
 			}
@@ -194,7 +194,7 @@ func hitlGateFromCheckpoint(contextJSON string) (*policy.HitlGate, error) {
 		PendingHitl *engine.PendingHitlState `json:"pendingHitl,omitempty"`
 		Nested      *engine.NestedRunState   `json:"nested,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(contextJSON), &payload); err != nil {
+	if err := jsonnum.Unmarshal([]byte(contextJSON), &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal checkpoint: %w", err)
 	}
 	// The gate may be at the top level or, when the suspension is inside a

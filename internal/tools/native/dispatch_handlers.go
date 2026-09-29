@@ -2,10 +2,11 @@ package native
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // dispatchHandler runs a single native operation (excluding shell-command ops).
@@ -94,7 +95,7 @@ func prObjectFromWith(with map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("native: pull_request.fetch requires JSON object or JSON string field pr")
 		}
 		var obj map[string]any
-		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		if err := jsonnum.Unmarshal([]byte(raw), &obj); err != nil {
 			return nil, fmt.Errorf("native: pull_request.fetch pr: %w", err)
 		}
 		return obj, nil

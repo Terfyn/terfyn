@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/models"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/spec"
@@ -115,6 +116,16 @@ func (e *Executor) Run(ctx context.Context, in RunInput) (err error) {
 	if err != nil {
 		return err
 	}
+	// The run input is checkpointed (checkpointPayload.Input, the ${input.*}
+	// interpolation context) and handed to the interpreter, so it is canonicalized
+	// once here: a caller passing raw Go values then gets the same value live, in
+	// the checkpoint, and after resume (S7). The local runtime already supplies the
+	// canonical decode of the run row's input_json, for which this is a copy.
+	cinput, err := jsonnum.CanonicalMap(in.Input)
+	if err != nil {
+		return e.failRun(ctx, in, fmt.Errorf("engine: workflow input: %w", err), 0)
+	}
+	in.Input = cinput
 	// Validates against the pinned schema bundle on resume, or the on-disk schema on a fresh run.
 	if err := e.validateWorkflowInputSchema(wf, in.Input); err != nil {
 		return e.failRun(ctx, in, err, 0)

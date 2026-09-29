@@ -91,7 +91,7 @@ func TestGithubCheckRunsList_happyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(out["total_count"].(float64)) != 1 {
+	if out["total_count"] != int64(1) {
 		t.Fatalf("total_count %#v", out["total_count"])
 	}
 }
@@ -170,7 +170,7 @@ func TestGithubPostComment_liveCreatesIssueComment(t *testing.T) {
 	if out["simulated"] != false {
 		t.Fatalf("simulated %#v", out["simulated"])
 	}
-	if out["id"].(float64) != 42 {
+	if out["id"] != int64(42) {
 		t.Fatalf("id %#v", out["id"])
 	}
 	if out["created"] != true {
@@ -462,7 +462,7 @@ func TestGithubPullRequestCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["number"] != float64(42) || out["html_url"] == "" {
+	if out["number"] != int64(42) || out["html_url"] == "" {
 		t.Fatalf("out %#v", out)
 	}
 }

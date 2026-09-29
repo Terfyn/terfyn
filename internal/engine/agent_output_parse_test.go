@@ -153,7 +153,7 @@ func TestParseAgentJSONObject(t *testing.T) {
 		{
 			name:    "nested object",
 			content: `{"nested":{"a":1}}`,
-			want:    map[string]any{"nested": map[string]any{"a": float64(1)}},
+			want:    map[string]any{"nested": map[string]any{"a": int64(1)}},
 		},
 		{
 			name:    "whitespace-wrapped valid object",
@@ -261,5 +261,27 @@ func TestCompleteAgentOutput_nullRejectedWithoutSchema(t *testing.T) {
 				t.Fatalf("completeAgentOutput(%q) returned non-nil output %#v on error", content, out)
 			}
 		})
+	}
+}
+
+// Agent output and model tool-call arguments feed workflow state, so an integer past 2^53 must
+// keep its identity (S7) rather than rounding through float64.
+func TestAgentJSONIngress_IntegersAbove2p53AreExact(t *testing.T) {
+	m, err := parseAgentJSONObject(`{"id":9007199254740993,"nested":{"n":[9007199254740992]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["id"] != int64(9007199254740993) {
+		t.Fatalf("agent output id = %#v", m["id"])
+	}
+	if got := m["nested"].(map[string]any)["n"].([]any)[0]; got != int64(9007199254740992) {
+		t.Fatalf("nested = %#v", got)
+	}
+	args, err := parseToolCallArgs([]byte(`{"id":9007199254740993}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["id"] != int64(9007199254740993) {
+		t.Fatalf("tool args id = %#v", args["id"])
 	}
 }
