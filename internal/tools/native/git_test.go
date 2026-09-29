@@ -1619,19 +1619,35 @@ func TestParseHookConfigListing(t *testing.T) {
 		"hook.x.event\npre-commit\x00" +
 		"hook.x.event\n\x00" + // empty value resets the list
 		"hook.x.event\nweird=event\x00" +
-		"hook.x.event\npost-index-change\x00"
+		"hook.x.event\npost-index-change\x00" +
+		"hook.event\npre-push\x00" + // nameless [hook] section: the hook named "" on git 2.54
+		"hook.command\ntrue\x00" +
+		"hook..event\npre-merge-commit\x00" + // [hook ""]: also the name ""
+		"hook..command\ntrue\x00"
 	names, events, err := parseHookConfigListing(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Join(names, "|"), "Solo|a.b c|audit|x"; got != want {
+	if got, want := strings.Join(names, "|"), "|Solo|a.b c|audit|x"; got != want {
 		t.Fatalf("names = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(events, "|"), "post-index-change|pre-commit"; got != want {
+	if got, want := strings.Join(events, "|"), "post-index-change|pre-commit|pre-merge-commit|pre-push"; got != want {
 		t.Fatalf("events = %q, want %q", got, want)
 	}
 	if _, _, err := parseHookConfigListing("hook.a=b.command\ntrue\x00"); err == nil || !strings.Contains(err.Error(), "'='") {
 		t.Fatalf("name with '=': err = %v, want a fail-closed error", err)
+	}
+	for _, key := range []string{"hook.event", "hook.command"} {
+		names, events, err := parseHookConfigListing(key + "\npost-index-change\x00")
+		if err != nil || len(names) != 1 || names[0] != "" {
+			t.Fatalf("%s: names = %q, err = %v; want the empty name", key, names, err)
+		}
+		if key == "hook.event" && strings.Join(events, "|") != "post-index-change" {
+			t.Fatalf("%s: events = %q, want post-index-change", key, events)
+		}
+	}
+	if _, _, err := parseHookConfigListing("hookx.command\ntrue\x00"); err == nil {
+		t.Fatal("key outside the hook section: want an error")
 	}
 	if names, events, err := parseHookConfigListing(""); err != nil || len(names) != 0 || len(events) != 0 {
 		t.Fatalf("empty listing: %v %v %v", names, events, err)
@@ -1654,6 +1670,8 @@ func TestReadOnlyGit_listsConfiguredHooksFromEveryScope(t *testing.T) {
 	gitCfg(t, root, "config", "hook.audit.command", "true")
 	gitCfg(t, root, "config", "hook.a.b c.event", "pre-commit")
 	gitCfg(t, root, "config", "hook.a.b c.command", "true")
+	gitCfg(t, root, "config", "hook.event", "pre-push") // nameless [hook]: the name "" on git 2.54
+	gitCfg(t, root, "config", "hook.command", "true")
 
 	g, err := newReadOnlyGit(context.Background(), root)
 	if err != nil {
@@ -1667,12 +1685,14 @@ func TestReadOnlyGit_listsConfiguredHooksFromEveryScope(t *testing.T) {
 		"-c hook.from-global.enabled=false",
 		"-c hook.post-index-change.enabled=false",
 		"-c hook.pre-commit.enabled=false",
+		"-c hook..enabled=false",
+		"-c hook.pre-push.enabled=false",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("hookOff = %q, missing %q", joined, want)
 		}
 	}
-	for _, name := range []string{"audit", "a.b c", "from-global", "post-index-change"} {
+	for _, name := range []string{"audit", "a.b c", "from-global", "post-index-change", "", "pre-push"} {
 		out, _, err := g.run(context.Background(), maxGitOIDOutput, "config", "--get", "hook."+name+".enabled")
 		if err != nil || strings.TrimSpace(out) != "false" {
 			t.Fatalf("hook.%s.enabled in the session = %q, %v; want false", name, out, err)
@@ -1690,8 +1710,10 @@ func TestReadOnlyGit_listsConfiguredHooksFromEveryScope(t *testing.T) {
 // TestGitStatusAndDiff_doNotRunConfigDefinedHooks: since git 2.54 hooks can be defined in config
 // (hook.<name>.event / hook.<name>.command, from any scope), and core.hooksPath does not affect
 // them. git diff's index write runs a configured post-index-change hook, so it must be disabled by
-// name (git 2.54) and by event (git >= 2.55). Skips where plain git does not run the planted hooks
-// (git < 2.54, e.g. the 2.34 of Ubuntu 22.04).
+// name (git 2.54) and by event (git >= 2.55). The nameless shapes are covered too: a [hook] section
+// with no subsection (two-part hook.event / hook.command), which git 2.54 registers under the
+// empty name and git >= 2.55 ignores, and [hook ""]. Skips where plain git does not run the planted
+// named hooks (git < 2.54, e.g. the 2.34 of Ubuntu 22.04).
 func TestGitStatusAndDiff_doNotRunConfigDefinedHooks(t *testing.T) {
 	requireGit(t)
 	if runtime.GOOS == "windows" {
@@ -1757,6 +1779,68 @@ func TestGitStatusAndDiff_doNotRunConfigDefinedHooks(t *testing.T) {
 				t.Fatalf("stat-only change should diff empty, got:\n%s", diff)
 			}
 		}
+	}
+
+	// Nameless hooks, each in its own repository (both shapes are the one hook named "").
+	for _, tc := range []struct {
+		name, section string
+		mustRun       bool // plain git runs this shape on every git that runs config hooks
+	}{
+		{name: "nameless [hook]", section: "[hook]"},
+		{name: `[hook ""]`, section: `[hook ""]`, mustRun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := initRepoWithCommit(t)
+			t.Setenv(envWorkspaceRoot, root)
+			empty := filepath.Join(t.TempDir(), "gitconfig")
+			if err := os.WriteFile(empty, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GIT_CONFIG_GLOBAL", empty)
+			m := filepath.Join(t.TempDir(), "ran")
+			cfg, err := os.OpenFile(filepath.Join(root, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = cfg.WriteString(tc.section + "\n\tevent = post-index-change\n\tcommand = echo ran >> '" + m + "'\n")
+			if cerr := cfg.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			readme := filepath.Join(root, "README.md")
+			bump := func(d time.Duration) {
+				t.Helper()
+				ts := time.Now().Add(d)
+				if err := os.Chtimes(readme, ts, ts); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			bump(time.Hour)
+			plainGit(root, "diff", "HEAD")
+			switch {
+			case markerRan(m):
+				if err := os.Remove(m); err != nil {
+					t.Fatal(err)
+				}
+			case tc.mustRun:
+				t.Fatalf("control: plain git runs named config hooks but not %s", tc.section)
+			default:
+				// git >= 2.55 ignores the two-part keys; the ops must still not run anything.
+				t.Logf("control: this git ignores %s (git >= 2.55)", tc.section)
+			}
+			for i, op := range []string{"status", "diff"} {
+				bump(time.Duration(i+2) * time.Hour)
+				if _, _, err := NewRegistry().Dispatch(context.Background(), op, nil); err != nil {
+					t.Fatalf("%s: %v", op, err)
+				}
+				if markerRan(m) {
+					t.Fatalf("git.%s executed the post-index-change hook defined by %s", op, tc.section)
+				}
+			}
+		})
 	}
 }
 

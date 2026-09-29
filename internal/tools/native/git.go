@@ -124,7 +124,10 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 //     (hook.<name>.event + hook.<name>.command, from any scope: system, global, repository,
 //     worktree, includes, or the environment), which core.hooksPath does not affect:
 //     -c hook.post-index-change.enabled=false switches the whole event off on git >= 2.55 (older
-//     git reads it as an unknown hook name and ignores it), and hookOff carries
+//     git reads it as an unknown hook name and ignores it); -c hook..enabled=false disables the
+//     hook with the empty name, which git 2.54 registers for a nameless [hook] section
+//     (hook.event / hook.command) as well as for [hook ""] (git >= 2.55 ignores the nameless
+//     form, and the flag is then an unused name); and hookOff carries
 //     -c hook.<name>.enabled=false for every configured hook name plus
 //     -c hook.<event>.enabled=false for every configured event (see configuredHookOverrides) —
 //     git 2.54 has only the per-name switch. Together no hook runs, from either source.
@@ -147,24 +150,32 @@ func readOnlyGitArgs(hooksDir string, hookOff, args []string) []string {
 		"-c", "core.useBuiltinFSMonitor=false",
 		"-c", "core.hooksPath=" + hooksDir,
 		"-c", "hook.post-index-change.enabled=false",
+		"-c", "hook..enabled=false",
 	}
 	pre = append(pre, hookOff...)
 	pre = append(pre, "--no-optional-locks")
 	return append(pre, args...)
 }
 
+// hookConfigKeyPattern matches the keys that define a config hook: hook.<name>.command /
+// hook.<name>.event (the name may be empty, [hook ""], or contain dots) and the two-part
+// hook.command / hook.event of a nameless [hook] section, which git 2.54 registers under the
+// empty name (git >= 2.55 ignores them).
+const hookConfigKeyPattern = `^hook\.(.*\.)?(command|event)$`
+
 // maxGitHookConfigOutput bounds the hook.* listing; a listing larger than this fails the session
 // closed rather than running with hook names it could not read.
 const maxGitHookConfigOutput = 64 << 10
 
 // configuredHookOverrides lists every config-defined hook (git >= 2.54: hook.<name>.command /
-// hook.<name>.event, from every config scope git reads) and returns the -c flags that disable
+// hook.<name>.event, and on git 2.54 also the nameless hook.command / hook.event, which define the
+// hook named "", from every config scope git reads) and returns the -c flags that disable
 // each one by name, plus each event those hooks name. The listing itself runs through the
 // hardened session (git config runs no hooks). It is computed on every git version: on git < 2.54
 // hook.* keys mean nothing, and the flags are ignored. Fails closed on a name that cannot be
 // expressed as a -c key (one containing '=', which -c would split on).
 func (g *readOnlyGit) configuredHookOverrides(ctx context.Context) ([]string, error) {
-	out, truncated, err := g.run(ctx, maxGitHookConfigOutput, "config", "--null", "--get-regexp", `^hook\..*\.(command|event)$`)
+	out, truncated, err := g.run(ctx, maxGitHookConfigOutput, "config", "--null", "--get-regexp", hookConfigKeyPattern)
 	if err != nil {
 		// No matching key is a silent exit status 1: no configured hooks.
 		var runErr *gitRunError
@@ -190,11 +201,13 @@ func (g *readOnlyGit) configuredHookOverrides(ctx context.Context) ([]string, er
 	return flags, nil
 }
 
-// parseHookConfigListing parses `git config --null --get-regexp '^hook\..*\.(command|event)$'`:
+// parseHookConfigListing parses `git config --null --get-regexp` output for hookConfigKeyPattern:
 // NUL-terminated records of "key\nvalue" (or a bare "key" for a value-less entry). The key is
 // hook.<name>.<variable> with section and variable lowercased and <name> (the subsection) kept
 // verbatim, so <name> is everything between the first and the last dot and may itself contain
-// dots; git's -c parser splits a key the same way. It returns the sorted, de-duplicated hook
+// dots or be empty (hook..event, from [hook ""]); git's -c parser splits a key the same way. The
+// two-part hook.<variable> (a nameless [hook] section) is the empty name too: git 2.54 registers
+// it as the hook named "", which -c hook..enabled=false disables. It returns the sorted, de-duplicated hook
 // names and the sorted, de-duplicated event values (hook.<name>.event) that are expressible as a
 // -c key. An event value containing '=' or a newline is not a real event and is skipped (the
 // hook's name is disabled regardless); a name containing '=' is an error.
@@ -215,6 +228,9 @@ func parseHookConfigListing(out string) (names, events []string, err error) {
 			return nil, nil, fmt.Errorf("unexpected hook config key %q", key)
 		}
 		rest, ok := strings.CutPrefix(name, "hook.")
+		if name == "hook" { // hook.command / hook.event: the nameless [hook] section
+			rest, ok = "", true
+		}
 		if !ok {
 			return nil, nil, fmt.Errorf("unexpected hook config key %q", key)
 		}

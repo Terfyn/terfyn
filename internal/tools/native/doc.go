@@ -49,10 +49,12 @@
 // throwaway copy of the index, so they do not execute those repository-configured commands and do
 // not rewrite .git/index. Hooks come from two sources and both are disabled: the hook directory
 // (.git/hooks or core.hooksPath — core.hooksPath is pointed at an empty directory), and, since git
-// 2.54, hooks defined in config from any scope (hook.<name>.event / hook.<name>.command), which
-// core.hooksPath does not affect — every configured hook name and event is listed and switched off
-// with -c hook.<name>.enabled=false, plus hook.post-index-change.enabled=false for the event the
-// index write fires (git >= 2.55). A hook name git's -c cannot express (one containing '=') fails
+// 2.54, hooks defined in config from any scope (hook.<name>.event / hook.<name>.command, and on
+// git 2.54 the nameless hook.event / hook.command of a [hook] section, which define the hook named
+// ""), which core.hooksPath does not affect — every configured hook name (the empty one included)
+// and event is listed and switched off with -c hook.<name>.enabled=false, plus
+// hook.post-index-change.enabled=false for the event the index write fires (git >= 2.55) and
+// hook..enabled=false for the empty name whether or not the listing saw it. A hook name git's -c cannot express (one containing '=') fails
 // the op rather than running it. Residuals, which git offers no way to disable without misreporting the
 // delta: (1) a clean filter (filter.<name>.clean/process, e.g. git-lfs) that .gitattributes
 // selects still runs when git hashes a stat-dirty worktree file; (2) in a partial clone, a blob
