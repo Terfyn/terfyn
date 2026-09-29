@@ -148,17 +148,26 @@ func (in *Interp) RunResumable(ctx context.Context, prog *Program, input map[str
 	sess := &session{memo: map[string]any{}, control: map[string]int{}}
 	if seed != nil {
 		for k, v := range seed.Memo {
-			sess.memo[k] = jsonnum.Canonical(v)
+			c, err := jsonnum.Canonical(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("execir: seed memo %q: %w", k, err)
+			}
+			sess.memo[k] = c
 		}
 		for k, v := range seed.Control {
 			sess.control[k] = v
 		}
 	}
-	// Numbers enter the interpreter in ONE canonical form (int64 for a whole
-	// number in range, else float64; see internal/jsonnum), so a value compares,
-	// renders and re-encodes identically on a fresh run and after a checkpoint
-	// resume (S7 replay determinism) — however the caller obtained it.
-	scope := paramScope(prog.Params, jsonnum.CanonicalMap(input))
+	// Values enter the interpreter in ONE canonical form — jsonnum.Canonical is
+	// the checkpoint round trip itself (int64 for a whole number in range, else
+	// float64; map[string]any/[]any containers) — so a value compares, renders
+	// and re-encodes identically on a fresh run and after a checkpoint resume
+	// (S7 replay determinism), whatever Go types the caller supplied.
+	cinput, err := jsonnum.CanonicalMap(input)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execir: input: %w", err)
+	}
+	scope := paramScope(prog.Params, cinput)
 	r := &runner{in: in, ctx: ctx, sess: sess}
 	// A top-level ErrSuspend is a clean pause, not a failure: the run is now
 	// waiting on a human decision and RunState reports where (issue #258/#270).
@@ -419,8 +428,13 @@ func (r *runner) invoke(scope map[string]any, bind string, site CallSite, args m
 		return err
 	}
 	// Canonicalize BEFORE memoizing so the live value bound below is exactly the
-	// value a resume replays from the checkpoint (S7).
-	res = jsonnum.Canonical(res)
+	// value a resume replays from the checkpoint (S7). A result with no JSON
+	// encoding could not be checkpointed, so it fails the leaf here rather than
+	// diverging from a resumed run later.
+	res, err = jsonnum.Canonical(res)
+	if err != nil {
+		return fmt.Errorf("execir: %s result: %w", key, err)
+	}
 	r.sess.putMemo(key, res)
 	if bind != "" {
 		scope[bind] = res

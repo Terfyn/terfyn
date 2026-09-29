@@ -234,9 +234,14 @@ func truthy(v any) bool {
 // for a map or slice operand. Numbers compare numerically across int64/float64
 // (1 == 1.0) without rounding integers through float64, so values above 2^53
 // stay distinct. That only holds if the operands are still exact integers when
-// they get here: runtime ingress and checkpoint hydration decode JSON through
-// internal/jsonnum (int64 for a whole number, float64 otherwise), and the
-// interpreter canonicalizes its input and leaf results the same way. strings/bools compare by value, arrays and objects structurally
+// they get here: runtime ingress (run input, HITL edits, agent output and tool-call
+// arguments, HTTP/MCP and native GitHub/Slack tool results) and checkpoint
+// hydration decode JSON through internal/jsonnum (int64 for a whole number,
+// float64 otherwise), and the interpreter canonicalizes its input and every leaf
+// result to exactly what a checkpoint round trip yields (jsonnum.Canonical), so
+// live and replayed values are identical. A producer that decodes JSON with plain
+// encoding/json has already rounded past 2^53; Canonical keeps that deterministic
+// but cannot restore the digits. strings/bools compare by value, arrays and objects structurally
 // (element- and key-wise, recursively, with the same numeric normalization),
 // and anything else via reflect.DeepEqual, which never panics. A type mismatch
 // is unequal.

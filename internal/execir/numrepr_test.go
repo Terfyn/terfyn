@@ -3,6 +3,8 @@ package execir
 import (
 	"context"
 	"encoding/json"
+	"math"
+	"reflect"
 	"testing"
 
 	"github.com/Terfyn/terfyn/internal/jsonnum"
@@ -192,6 +194,66 @@ func TestFloatInputAndSmallIntegersUnaffected(t *testing.T) {
 		// With no suspend configured the gate tool returns, so a != b reaches the memo compare.
 		if out != tc.want {
 			t.Fatalf("%s: out=%v, want %v", tc.in, out, tc.want)
+		}
+	}
+}
+
+// TestTypedLeafResultsMatchReplay: a producer returning Go types outside the
+// map[string]any/[]any/int64/float64 set (a uint64, a float32, a typed slice such
+// as workspace.grep's []map[string]any, a struct) is bound live as exactly the
+// value a checkpoint resume replays, so branches agree live and on resume (S7).
+func TestTypedLeafResultsMatchReplay(t *testing.T) {
+	t.Parallel()
+	type hit struct {
+		Line uint32 `json:"line"`
+	}
+	eq := func(x Value, y any) Expr { return BinOp{Op: "==", X: Leaf{V: x}, Y: Leaf{V: Lit{V: y}}} }
+	prog := &Program{Workflow: "W", Params: []string{"input"}, Body: []Node{
+		&InvokeTool{Bind: "r", Uses: "tool.t.n"},
+		&Branch{Cond: eq(ref("r", "u"), int64(5)), Else: []Node{&Return{Value: Lit{V: "u-mismatch"}}}},
+		&Branch{Cond: eq(ref("r", "f"), 0.1), Else: []Node{&Return{Value: Lit{V: "f-mismatch"}}}},
+		&Return{Value: ref("r")},
+	}}
+	stub := &fixedResult{res: map[string]any{
+		"u": uint64(5), "f": float32(0.1), "big": uint64(9007199254740993),
+		"matches": []map[string]any{{"n": 1.0}}, "hit": hit{Line: 3}, "hits": []hit{{Line: 4}},
+	}}
+	out, st, err := (&Interp{Invoker: stub}).RunResumable(context.Background(), prog, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"u": int64(5), "f": 0.1, "big": int64(9007199254740993),
+		"matches": []any{map[string]any{"n": int64(1)}},
+		"hit":     map[string]any{"line": int64(3)}, "hits": []any{map[string]any{"line": int64(4)}},
+	}
+	if !reflect.DeepEqual(out, want) {
+		t.Fatalf("live = %#v\nwant %#v", out, want)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored RunState
+	if err := jsonnum.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if replayed := restored.Memo[firstKey(restored.Memo)]; !reflect.DeepEqual(replayed, out) {
+		t.Fatalf("replayed %#v != live %#v", replayed, out)
+	}
+}
+
+// A leaf result with no JSON encoding cannot be checkpointed, so there is no
+// replayed value for it to equal: the leaf fails instead of flowing on live.
+func TestUnencodableLeafResultFails(t *testing.T) {
+	t.Parallel()
+	prog := &Program{Workflow: "W", Params: []string{"input"}, Body: []Node{
+		&InvokeTool{Bind: "r", Uses: "tool.t.n"},
+		&Return{Value: ref("r")},
+	}}
+	for _, res := range []any{math.NaN(), map[string]any{"x": math.Inf(1)}, make(chan int)} {
+		if _, _, err := (&Interp{Invoker: &fixedResult{res: res}}).RunResumable(context.Background(), prog, nil, nil); err == nil {
+			t.Errorf("result %#v: want error", res)
 		}
 	}
 }
