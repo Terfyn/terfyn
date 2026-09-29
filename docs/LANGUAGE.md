@@ -546,9 +546,13 @@ YAML treats an absent `with:` as an empty input object). Agent input is not vali
 so this static check is what keeps a `false`-input agent from running. Where a `with:` value lands
 in the consumer input follows the step's explicit call shape, never the key's name: the single
 positional argument of a lowered `.agent` call (`r = Reviewer(input)`, `C("hi")`, `C({q: "hi"})`,
-`WholeDocument` with the `arg0` placeholder key) is checked against the **whole** input — a literal
-there is gradual against a closed object or a scalar input and rejected only by `never` — while a
-named `with:` key, including one literally called `arg0`, is an input field.
+`WholeDocument` with the `arg0` placeholder key) is checked against the **whole** input — the
+value as a whole is gradual there and rejected at the root only by `never`, but each field or
+element of an object/array literal is also checked at its own nested location, so a field the
+consumer input does not declare (`additionalProperties: false`, a `false` property, or any field
+of a scalar input) is "not declared" there, just as a token in that field would be: `C({q: "hi"})`
+is accepted into an input that declares `q` and rejected into a closed object without `q` or into a
+scalar input — while a named `with:` key, including one literally called `arg0`, is an input field.
 
 Draft 2020-12 **boolean schemas** are honoured in every subschema position `Lookup` descends
 through — the root, `properties` and `patternProperties` values, `prefixItems`/`items`,
