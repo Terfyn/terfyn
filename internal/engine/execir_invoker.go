@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/lang/lower"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/render"
@@ -622,6 +623,10 @@ func (a *engineInvoker) run(ctx context.Context, step spec.WorkflowStep, args ma
 		a.failStepRow(ctx, qid, inJSON, err, stepCost)
 		return nil, err
 	}
+	// One canonical number representation for step output (int64 for a whole
+	// number, else float64; internal/jsonnum) so ${steps.*} interpolation and the
+	// interpreter's memo see the same value live as after a checkpoint resume (S7).
+	out = jsonnum.CanonicalMap(out)
 
 	// Commit cost, then re-check the run budget so two in-flight branches cannot
 	// jointly exceed maxTotalCostUsd (mirrors commitDAGStepSuccess).
@@ -838,8 +843,11 @@ func (e *Executor) loadExecResumeState(ctx context.Context, in RunInput, wf *spe
 	if err != nil {
 		return Context{}, 0, nil, nil, err
 	}
+	// Same canonical lossless decode as unmarshalCheckpointPayload: ExecMemo holds the
+	// completed leaves' outputs, and an int64 past 2^53 must come back as the same
+	// int64 (S7), not a float64 rounding.
 	var payload checkpointPayload
-	if err := json.Unmarshal([]byte(cp.ContextJSON), &payload); err != nil {
+	if err := jsonnum.Unmarshal([]byte(cp.ContextJSON), &payload); err != nil {
 		return Context{}, 0, nil, nil, fmt.Errorf("engine: unmarshal execir checkpoint: %w", err)
 	}
 	if !payload.ExecIR {

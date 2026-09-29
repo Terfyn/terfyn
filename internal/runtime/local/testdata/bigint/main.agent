@@ -1,0 +1,54 @@
+// bigint — exact-integer replay fixture (S7). `cmp` compares two workflow-input integers that are
+// distinct only above 2^53, both BEFORE a HITL gate (fresh run) and, from the memoized pre-gate
+// tool output, AFTER it (resume). If any runtime boundary rounded either value through float64 the
+// two would compare equal and the run would take the wrong arm or diverge on replay.
+
+tool plain {
+    type native
+    safety {
+        sideEffects false
+    }
+}
+
+tool helper {
+    type native
+    safety {
+        sideEffects false
+    }
+}
+
+policy gate {
+    approvals {
+        requiredFor {
+            tool.helper.echo
+        }
+    }
+    hitl {
+        interruptOn {
+            helper {
+                allowedDecisions { approve reject }
+            }
+        }
+    }
+}
+
+// Each arm is identified by the (uniquely named) step it runs, so a test asserts the taken arm
+// from the persisted run steps rather than from the workflow return value.
+workflow cmp(input: BigInts) policy gate {
+    seen = plain.echo(a: input.a, b: input.b)
+    if input.a == input.b {
+        equalInput = plain.echo(arm: "equal-input")
+        return equalInput
+    }
+    gated = helper.echo(a: seen.echo.a, b: seen.echo.b)
+    if seen.echo.a == seen.echo.b {
+        equalMemo = plain.echo(arm: "equal-memo")
+        return equalMemo
+    }
+    if seen.echo.a < seen.echo.b {
+        ordered = plain.echo(a: gated.echo.a, b: gated.echo.b)
+        return ordered
+    }
+    unordered = plain.echo(arm: "unordered")
+    return unordered
+}

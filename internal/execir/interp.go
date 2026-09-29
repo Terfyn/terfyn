@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
 
@@ -147,13 +148,17 @@ func (in *Interp) RunResumable(ctx context.Context, prog *Program, input map[str
 	sess := &session{memo: map[string]any{}, control: map[string]int{}}
 	if seed != nil {
 		for k, v := range seed.Memo {
-			sess.memo[k] = v
+			sess.memo[k] = jsonnum.Canonical(v)
 		}
 		for k, v := range seed.Control {
 			sess.control[k] = v
 		}
 	}
-	scope := paramScope(prog.Params, input)
+	// Numbers enter the interpreter in ONE canonical form (int64 for a whole
+	// number in range, else float64; see internal/jsonnum), so a value compares,
+	// renders and re-encodes identically on a fresh run and after a checkpoint
+	// resume (S7 replay determinism) — however the caller obtained it.
+	scope := paramScope(prog.Params, jsonnum.CanonicalMap(input))
 	r := &runner{in: in, ctx: ctx, sess: sess}
 	// A top-level ErrSuspend is a clean pause, not a failure: the run is now
 	// waiting on a human decision and RunState reports where (issue #258/#270).
@@ -413,6 +418,9 @@ func (r *runner) invoke(scope map[string]any, bind string, site CallSite, args m
 		}
 		return err
 	}
+	// Canonicalize BEFORE memoizing so the live value bound below is exactly the
+	// value a resume replays from the checkpoint (S7).
+	res = jsonnum.Canonical(res)
 	r.sess.putMemo(key, res)
 	if bind != "" {
 		scope[bind] = res
