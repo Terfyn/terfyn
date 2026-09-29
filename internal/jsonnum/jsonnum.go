@@ -17,27 +17,37 @@
 //     then canonicalized as a float64 VALUE (below);
 //   - a literal that does not fit float64 is an error, as with encoding/json.
 //
-// The canonical form of a float64 is a function of its VALUE, not of the literal
-// or of the Go type the value had before it was serialized, and it is whatever
-// encoding/json's spelling of that value decodes to. That is what makes it stable
-// across encode -> decode: encoding/json writes float64(1e6) as `1000000`, and an
-// int64(1000000) the same way, so both must decode to the same Go value or a
-// resumed run would render/compare them differently from the original. So:
+// The canonical form of a float64 is a function of its exact VALUE, never of its
+// decimal spelling: a whole float64 strictly inside (-2^63, 2^63) is exactly
+// int64(f) ("7.0", "7e0" and float64(7) are int64(7); float64(2^60) is
+// int64(1152921504606846976)), and every other float64 (fractions, ±2^63 and
+// beyond) stays float64. Canonicalization therefore never changes a number's
+// value, so the exact comparator in internal/execir sees the integer the input
+// spelled.
 //
-//   - a whole float64 in the int64 range is the int64 its shortest decimal
-//     spelling denotes: exactly int64(f) up to 2^53 ("7.0" and "7e0" are
-//     int64(7)); beyond 2^53 encoding/json writes the shortest round-tripping
-//     digits, so float64(2^60) is int64(1152921504606847000), not ...6976;
-//   - a whole float64 whose spelling falls outside int64 (float64(-2^63) is
-//     written "-9223372036854776000") stays float64, as does every fraction.
+// The S7 invariant is that canonical values are checkpoint round-trip FIXED
+// POINTS: for every v that [Canonical] accepts,
 //
-// Encoding is encoding/json's own (int64 is written as exact digits), so no
-// custom marshaler is needed: Marshal(int64) -> Unmarshal returns the same int64.
+//	Unmarshal(json.Marshal(Canonical(v))) deep-equals Canonical(v)
 //
-// [Canonical] is defined as that checkpoint round trip (json.Marshal, then
-// [Unmarshal] into `any`), so a live value and its decoded-from-checkpoint
-// counterpart are the same Go value by construction, whatever Go type a producer
-// returned.
+// and Canonical(Canonical(v)) deep-equals Canonical(v). encoding/json writes an
+// int64 as its exact digits, which decode back to that int64, and every float64
+// Canonical leaves as float64 is either non-whole or outside int64, so it decodes
+// back to the same float64. The runtime canonicalizes every value before it is
+// checkpointed (the interpreter's input and memo, the engine's step outputs), so
+// the live value and the value a resume decodes are the same Go value.
+//
+// Canonical(v) is NOT in general Unmarshal(json.Marshal(v)) of the RAW value,
+// because encoding/json spells a float64 with its shortest round-tripping digits,
+// not its exact value: json.Marshal(float64(2^60)) is "1152921504606847000",
+// which decodes to a different integer. Canonical takes int, int64, float64,
+// bool, valid-UTF-8 strings, map[string]any and []any (with valid-UTF-8 keys)
+// directly, preserving values exactly; every other Go type (uint*, float32,
+// json.Number, structs, pointers, typed slices and maps such as
+// []map[string]any or []float64) goes through that real round trip, so a whole
+// float64 past 2^53 reached only through such a type (or a float32 anywhere)
+// takes encoding/json's spelling. That is the one place raw and canonical
+// values differ, it is deterministic, and it is still a fixed point afterwards.
 package jsonnum
 
 import (
@@ -103,42 +113,68 @@ func FromNumber(n json.Number) (any, error) {
 	return canonicalFloat(f), nil
 }
 
-// canonicalFloat is the canonical form of a float64 value: what encoding/json's
-// spelling of f decodes to under FromNumber. A whole value in the int64 range is
-// written as its shortest round-tripping digits in plain notation (never an
-// exponent below 1e21), so it becomes the int64 those digits spell when that
-// fits, and stays float64 otherwise. Everything else stays float64.
+// canonicalFloat is the canonical form of a float64 value (package doc): a whole
+// value strictly inside (-2^63, 2^63) is exactly int64(f), whose JSON spelling
+// is its exact digits, so it decodes back to the same int64. Everything else
+// stays float64: fractions (and NaN/±Inf, which Canonical rejects), and whole
+// values at or past ±2^63. -2^63 itself stays float64 so that FromNumber's
+// out-of-range integer literals ("-9223372036854775809" rounds to it) are
+// canonical fixed points too; its spelling "-9223372036854776000" is below
+// MinInt64, so it also decodes back to float64(-2^63). The value is unchanged
+// either way, and the execir comparator equates it with int64(MinInt64).
 func canonicalFloat(f float64) any {
-	if f != math.Trunc(f) || f < -(1<<63) || f >= (1<<63) {
-		return f // fractions, NaN/±Inf, and whole values past int64
+	if f != math.Trunc(f) || f <= -(1<<63) || f >= (1<<63) {
+		return f
 	}
-	if f >= -(1<<53) && f <= (1<<53) {
-		return int64(f) // every integer here is a float64, so the spelling is exact
-	}
-	if i, err := strconv.ParseInt(strconv.FormatFloat(f, 'f', -1, 64), 10, 64); err == nil {
-		return i
-	}
-	return f // only -2^63, whose spelling "-9223372036854776000" is below MinInt64
+	return int64(f) // exact: f is whole and in range, so no rounding
 }
 
-// Canonical returns v in the canonical form: exactly the value a checkpoint
-// round trip (json.Marshal, then [Unmarshal] into `any`) produces, so a live
-// value and its decoded-from-checkpoint counterpart are the same Go value (S7).
-// Numbers become int64/float64 per the package doc, and every container becomes
-// map[string]any / []any: a []map[string]any, a typed struct, a uint64, a float32
-// or a json.Number all come out exactly as they would on replay.
+// MaxDepth is the deepest container nesting (JSON objects and arrays on one
+// path, the count encoding/json's decoder limits to 10000) that [Canonical]
+// accepts. A canonical value is always checkpointed inside an envelope (the
+// interpreter memo, an engine step's output map, nested subworkflow frames), so
+// the limit leaves encodingJSONMaxDepth-MaxDepth levels of headroom: a value the
+// live run accepts must also decode on resume, where it sits deeper than it did
+// live. Anything deeper, and any cyclic map[string]any/[]any, is an error.
+const MaxDepth = encodingJSONMaxDepth - checkpointEnvelopeReserve
+
+const (
+	// encodingJSONMaxDepth is encoding/json's decode nesting limit
+	// (maxNestingDepth in encoding/json/scanner.go): a document whose objects
+	// and arrays nest 10000 deep decodes, 10001 fails with "exceeded max depth".
+	encodingJSONMaxDepth = 10000
+	// checkpointEnvelopeReserve is the nesting kept free for checkpoint
+	// envelopes around a canonical value: a few levels for the payload itself
+	// plus about two per nested subworkflow frame (the default
+	// maxWorkflowNesting is 8).
+	checkpointEnvelopeReserve = 1000
+)
+
+// Canonical returns v in the canonical form (package doc): numbers become
+// int64/float64 without changing their value, and every container becomes
+// map[string]any / []any. The result is a checkpoint round-trip fixed point
+// (json.Marshal, then [Unmarshal] into `any`, returns it unchanged), so a value
+// that is canonicalized before it is checkpointed is the same Go value live and
+// after resume (S7).
 //
-// The shapes the runtime overwhelmingly carries (nil, bool, valid-UTF-8 string,
-// int, int64, finite float64, map[string]any, []any) take a copying fast path
-// that computes the same result without encoding; every other type goes through
-// the real round trip. The input is never mutated, so it is safe on values
-// shared with callers.
+// nil, bool, valid-UTF-8 string, int, int64, finite float64, map[string]any and
+// []any are copied directly, preserving numeric values exactly. Every other type
+// (a []map[string]any, a typed struct, a uint64, a float32, a json.Number, ...)
+// becomes exactly what the checkpoint round trip of it yields, including
+// encoding/json's shortest spelling of any float inside it (package doc). The
+// input is never mutated, so it is safe on values shared with callers.
 //
 // A value with no JSON encoding (NaN/±Inf, channels, funcs, complex numbers, a
-// failing MarshalJSON, cyclic data) is an error: it cannot be checkpointed, so
-// there is no replayed counterpart for it to equal, and letting it flow on live
-// would make a fresh run and a resumed run diverge.
+// failing MarshalJSON, cyclic data) or nested deeper than [MaxDepth] is an
+// error: it cannot be checkpointed and decoded back, so there is no replayed
+// counterpart for it to equal, and letting it flow on live would make a fresh
+// run and a resumed run diverge.
 func Canonical(v any) (any, error) {
+	return canonical(v, 0)
+}
+
+// canonical is Canonical for a value enclosed by depth containers.
+func canonical(v any, depth int) (any, error) {
 	switch x := v.(type) {
 	case nil:
 		return nil, nil
@@ -162,12 +198,15 @@ func Canonical(v any) (any, error) {
 		if x == nil {
 			return nil, nil // encodes as null, which decodes to an untyped nil
 		}
+		if depth >= MaxDepth {
+			return nil, errTooDeep(v)
+		}
 		out := make(map[string]any, len(x))
 		for k, e := range x {
 			if !utf8.ValidString(k) {
-				return roundTrip(v) // key rewriting could even merge keys
+				return roundTrip(v, depth) // key rewriting could even merge keys
 			}
-			c, err := Canonical(e)
+			c, err := canonical(e, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -178,9 +217,12 @@ func Canonical(v any) (any, error) {
 		if x == nil {
 			return nil, nil
 		}
+		if depth >= MaxDepth {
+			return nil, errTooDeep(v)
+		}
 		out := make([]any, len(x))
 		for i, e := range x {
-			c, err := Canonical(e)
+			c, err := canonical(e, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -188,11 +230,17 @@ func Canonical(v any) (any, error) {
 		}
 		return out, nil
 	}
-	return roundTrip(v)
+	return roundTrip(v, depth)
 }
 
-// roundTrip is the checkpoint round trip itself: the definition of Canonical.
-func roundTrip(v any) (any, error) {
+func errTooDeep(v any) error {
+	return fmt.Errorf("jsonnum: %T value nests deeper than %d levels or is cyclic, so it cannot be checkpointed and replayed", v, MaxDepth)
+}
+
+// roundTrip is the checkpoint round trip of a value enclosed by depth
+// containers: json.Marshal (which reports cycles through typed values), then
+// Unmarshal, rejecting a result that would nest past MaxDepth in place.
+func roundTrip(v any, depth int) (any, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("jsonnum: %T value has no JSON encoding, so it cannot be checkpointed and replayed identically: %w", v, err)
@@ -201,7 +249,31 @@ func roundTrip(v any) (any, error) {
 	if err := Unmarshal(b, &out); err != nil {
 		return nil, fmt.Errorf("jsonnum: %T value does not survive a checkpoint round trip: %w", v, err)
 	}
+	// Nesting n needs at least 2n bytes of brackets, so short encodings cannot
+	// exceed the remaining budget and skip the walk.
+	if budget := MaxDepth - depth; len(b) > 2*budget && nesting(out) > budget {
+		return nil, errTooDeep(v)
+	}
 	return out, nil
+}
+
+// nesting is the container depth of a decoded tree (a scalar is 0, [] is 1).
+// Decoding already bounded it by encoding/json's limit, so recursion is bounded.
+func nesting(v any) int {
+	n := 0
+	switch x := v.(type) {
+	case map[string]any:
+		for _, e := range x {
+			n = max(n, nesting(e))
+		}
+	case []any:
+		for _, e := range x {
+			n = max(n, nesting(e))
+		}
+	default:
+		return 0
+	}
+	return n + 1
 }
 
 // CanonicalMap is Canonical for a map[string]any, preserving a nil map as nil.

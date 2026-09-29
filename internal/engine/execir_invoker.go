@@ -626,7 +626,8 @@ func (a *engineInvoker) run(ctx context.Context, step spec.WorkflowStep, args ma
 	// One canonical number representation for step output (int64 for a whole
 	// number, else float64; internal/jsonnum) so ${steps.*} interpolation and the
 	// interpreter's memo see the same value live as after a checkpoint resume (S7).
-	// A step output with no JSON encoding could not be checkpointed; fail it.
+	// A step output with no JSON encoding (or nested past jsonnum.MaxDepth) could
+	// not be checkpointed; fail it.
 	if out, err = jsonnum.CanonicalMap(out); err != nil {
 		err = fmt.Errorf("engine: step %q output: %w", step.ID, err)
 		a.failStepRow(ctx, qid, inJSON, err, stepCost)

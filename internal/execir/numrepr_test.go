@@ -257,3 +257,87 @@ func TestUnencodableLeafResultFails(t *testing.T) {
 		}
 	}
 }
+
+// TestFloatSpelledWholeInputPast2p53ComparesExactly: a whole number past 2^53 spelled as a
+// float in JSON input ("1152921504606846976.0" is exactly float64(2^60)) keeps its exact
+// value through ingress, canonicalization, a program round trip, and a checkpoint resume. It
+// equals the same integer spelled as an int in the input, an int program literal, and a
+// float program literal (the .agent parser lowers `1152921504606846976.0` to float64(2^60),
+// which the program wire keeps as float64 and the comparator matches exactly against int64).
+func TestFloatSpelledWholeInputPast2p53ComparesExactly(t *testing.T) {
+	t.Parallel()
+	const two60 = int64(1) << 60 // 1152921504606846976
+	var input map[string]any
+	if err := jsonnum.Unmarshal([]byte(`{"a":1152921504606846976.0,"b":1152921504606846976,"c":1152921504606846977}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input["a"] != two60 || input["b"] != two60 {
+		t.Fatalf("ingress changed the value: a=%#v b=%#v", input["a"], input["b"])
+	}
+	eq := func(x, y Value) Expr { return BinOp{Op: "==", X: Leaf{V: x}, Y: Leaf{V: y}} }
+	mustBe := func(want bool, x, y Value, label string) Node {
+		br := &Branch{Cond: eq(x, y)}
+		if want {
+			br.Else = []Node{&Return{Value: Lit{V: label}}}
+		} else {
+			br.Then = []Node{&Return{Value: Lit{V: label}}}
+		}
+		return br
+	}
+	checks := func(a, b, c Value, stage string) []Node {
+		return []Node{
+			mustBe(true, a, b, stage+": a == b"),
+			mustBe(true, a, Lit{V: two60}, stage+": a == int literal"),
+			mustBe(true, a, Lit{V: float64(two60)}, stage+": a == float literal"),
+			mustBe(true, b, Lit{V: float64(two60)}, stage+": b == float literal"),
+			mustBe(false, a, c, stage+": a == c (2^60+1)"),
+			mustBe(false, c, Lit{V: float64(two60)}, stage+": c == float literal"),
+		}
+	}
+	body := checks(ref("input", "a"), ref("input", "b"), ref("input", "c"), "input")
+	body = append(body, &InvokeTool{Bind: "seen", Uses: "tool.t.echo", Args: map[string]Value{
+		"a": ref("input", "a"), "b": ref("input", "b"), "c": ref("input", "c"),
+	}})
+	body = append(body, &InvokeTool{Bind: "gate", Uses: "tool.t.gate"})
+	body = append(body, checks(ref("seen", "echo", "a"), ref("seen", "echo", "b"), ref("seen", "echo", "c"), "memo")...)
+	body = append(body, &Return{Value: Lit{V: "all-exact"}})
+
+	// Pin the program the way deploy does, so the float literal crosses the program wire.
+	wire, err := MarshalPrograms(map[string]*Program{"W": {Workflow: "W", Params: []string{"input"}, Body: body}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progs, err := UnmarshalPrograms(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prog := progs["W"]
+
+	stub := &echoStub{suspendUses: "tool.t.gate"}
+	in := &Interp{Invoker: stub}
+	out, st, err := in.RunResumable(context.Background(), prog, input, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != nil || !st.Suspended {
+		t.Fatalf("live run: out=%v suspended=%v (want every input check to pass and the gate to suspend)", out, st.Suspended)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored RunState
+	if err := jsonnum.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	out, st2, err := in.RunResumable(context.Background(), prog, input, &restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.Suspended || out != "all-exact" {
+		t.Fatalf("resumed run: out=%v", out)
+	}
+	if stub.calls["tool.t.echo"] != 1 {
+		t.Fatalf("memoized leaf re-invoked on resume: %d", stub.calls["tool.t.echo"])
+	}
+}

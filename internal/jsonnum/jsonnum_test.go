@@ -3,10 +3,13 @@ package jsonnum
 import (
 	"encoding/json"
 	"math"
+	"math/big"
 	"math/rand/v2"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestUnmarshal_CanonicalNumbers(t *testing.T) {
@@ -187,29 +190,88 @@ func checkpointRoundTrip(t *testing.T, v any) (any, error) {
 	return got["v"], nil
 }
 
-// assertCanonicalIsRoundTrip is the S7 property: the live canonical value and the
-// value a resume decodes from the checkpoint are the same Go value, and the
-// canonical form is a fixed point of both Canonical and the round trip.
-func assertCanonicalIsRoundTrip(t *testing.T, name string, v any) {
+// exactFastFloats re-specifies, independently of Canonical, the ONE way Canonical(v)
+// differs from the checkpoint round trip of the raw v: a whole float64 in (-2^63, 2^63)
+// that Canonical reaches directly (bare, or through map[string]any/[]any whose keys are
+// valid UTF-8) is taken at its exact value, int64(f), where encoding/json would write its
+// shortest digits. It returns v with those leaves replaced by int64(f), and whether any
+// replaced leaf's shortest spelling differs from its exact digits (only then do
+// Canonical(v) and the raw round trip disagree).
+func exactFastFloats(v any) (any, bool) {
+	switch x := v.(type) {
+	case float64:
+		if x == math.Trunc(x) && x > -(1<<63) && x < (1<<63) {
+			spelled, err := strconv.ParseInt(strconv.FormatFloat(x, 'f', -1, 64), 10, 64)
+			return int64(x), err != nil || spelled != int64(x)
+		}
+	case map[string]any:
+		if x == nil {
+			return v, false
+		}
+		for k := range x {
+			if !utf8.ValidString(k) {
+				return v, false // the whole map takes the round trip
+			}
+		}
+		out, differs := make(map[string]any, len(x)), false
+		for k, e := range x {
+			var d bool
+			out[k], d = exactFastFloats(e)
+			differs = differs || d
+		}
+		return out, differs
+	case []any:
+		if x == nil {
+			return v, false
+		}
+		out, differs := make([]any, len(x)), false
+		for i, e := range x {
+			var d bool
+			out[i], d = exactFastFloats(e)
+			differs = differs || d
+		}
+		return out, differs
+	}
+	return v, false
+}
+
+// assertCanonical checks the S7 property and pins exactly where Canonical departs from
+// the raw round trip:
+//
+//   - FIXED POINT (what S7 needs, for every v): Canonical(v) survives the checkpoint round
+//     trip unchanged and Canonical is idempotent, so a value canonicalized before it is
+//     checkpointed is the same Go value live and on resume;
+//   - Canonical(v) is the round trip of v with its directly reached whole float64 leaves
+//     taken at their exact value (exactFastFloats), so it equals the raw round trip
+//     wherever encoding/json's spelling is exact, and differs only where it is not.
+func assertCanonical(t *testing.T, name string, v any) {
 	t.Helper()
 	live, err := Canonical(v)
 	if err != nil {
 		t.Fatalf("%s: Canonical(%T %#v): %v", name, v, v, err)
 	}
-	replay, err := checkpointRoundTrip(t, v)
-	if err != nil {
-		t.Fatalf("%s: roundTrip(%T %#v): %v", name, v, v, err)
-	}
-	if !reflect.DeepEqual(live, replay) {
-		t.Fatalf("%s: %T %#v\n live   %T %#v\n replay %T %#v", name, v, v, live, live, replay, replay)
+	replay2, err := checkpointRoundTrip(t, live)
+	if err != nil || !reflect.DeepEqual(replay2, live) {
+		t.Fatalf("%s: canonical value not a round-trip fixed point: %#v -> %#v (%v)", name, live, replay2, err)
 	}
 	again, err := Canonical(live)
 	if err != nil || !reflect.DeepEqual(again, live) {
 		t.Fatalf("%s: Canonical not idempotent: %#v -> %#v (%v)", name, live, again, err)
 	}
-	replay2, err := checkpointRoundTrip(t, live)
-	if err != nil || !reflect.DeepEqual(replay2, live) {
-		t.Fatalf("%s: canonical value not a round-trip fixed point: %#v -> %#v (%v)", name, live, replay2, err)
+	exact, differs := exactFastFloats(v)
+	want, err := checkpointRoundTrip(t, exact)
+	if err != nil {
+		t.Fatalf("%s: roundTrip(%T %#v): %v", name, exact, exact, err)
+	}
+	if !reflect.DeepEqual(live, want) {
+		t.Fatalf("%s: %T %#v\n live   %T %#v\n want   %T %#v", name, v, v, live, live, want, want)
+	}
+	replay, err := checkpointRoundTrip(t, v)
+	if err != nil {
+		t.Fatalf("%s: roundTrip(%T %#v): %v", name, v, v, err)
+	}
+	if got := !reflect.DeepEqual(live, replay); got != differs {
+		t.Fatalf("%s: Canonical vs raw round trip differ=%v, want %v\n live   %#v\n replay %#v", name, got, differs, live, replay)
 	}
 }
 
@@ -228,7 +290,7 @@ type canonNested struct {
 	embeddedInner
 }
 
-func TestCanonical_EqualsCheckpointRoundTrip(t *testing.T) {
+func TestCanonical_FixedPointAndRoundTrip(t *testing.T) {
 	t.Parallel()
 	i64 := int64(9007199254740993)
 	f32 := float32(0.1)
@@ -264,6 +326,10 @@ func TestCanonical_EqualsCheckpointRoundTrip(t *testing.T) {
 		"float64Whole": float64(1e6),
 		"float64Neg0":  math.Copysign(0, -1),
 		"float64Two53": float64(1 << 53),
+		"float64Two60": float64(1 << 60), // exact int64, NOT encoding/json's ...6847000
+		"float64Neg60": -float64(1 << 60),
+		"float64Big63": float64(1<<63) - 1024, // largest whole float64 below 2^63
+		"float64Min1":  -float64(1<<63) + 2048,
 		"float64Min":   float64(math.MinInt64),
 		"float64Two63": float64(1 << 63),
 		"float64Big":   1e300,
@@ -309,6 +375,17 @@ func TestCanonical_EqualsCheckpointRoundTrip(t *testing.T) {
 			skip: 1, embeddedInner: embeddedInner{X: float32(0.1)},
 		},
 		"structPtr": &canonNested{ID: 9007199254740993},
+		// Whole float64 past 2^53: exact through fast-path containers; encoding/json's
+		// shortest spelling inside slow-path types (typed field, []float64,
+		// []map[string]any, a map with an invalid UTF-8 key).
+		"two60InMap":     map[string]any{"a": float64(1 << 60), "l": []any{float64(1 << 60)}},
+		"two60InStruct":  struct{ F float64 }{F: 1 << 60},
+		"two60InSlice":   []float64{1 << 60},
+		"two60InRows":    []map[string]any{{"n": float64(1 << 60)}},
+		"two60InBadKey":  map[string]any{"aÿ": float64(1 << 60)},
+		"two60InPtr":     &struct{ Any any }{Any: map[string]any{"n": float64(1 << 60)}},
+		"two60F32":       float32(1 << 60),
+		"two60MixedRows": map[string]any{"fast": float64(1 << 60), "slow": []float64{1 << 60}},
 		// Fast-path containers holding slow-path leaves.
 		"mixed": map[string]any{
 			"u": uint64(5), "f32": float32(0.1), "rows": []map[string]any{{"id": uint64(1)}},
@@ -316,13 +393,14 @@ func TestCanonical_EqualsCheckpointRoundTrip(t *testing.T) {
 		},
 	}
 	for name, v := range cases {
-		assertCanonicalIsRoundTrip(t, name, v)
+		assertCanonical(t, name, v)
 	}
 }
 
-// Random values of every numeric kind: Canonical(v) must deep-equal the checkpoint
-// round trip for all of them, not just hand-picked ones.
-func TestCanonical_EqualsCheckpointRoundTrip_Random(t *testing.T) {
+// Random values of every numeric kind (random float64 bit patterns are mostly whole
+// values past 2^53): every Canonical(v) is a round-trip fixed point, and differs from
+// the raw round trip exactly where assertCanonical says, not just for hand-picked cases.
+func TestCanonical_FixedPointAndRoundTrip_Random(t *testing.T) {
 	t.Parallel()
 	r := rand.New(rand.NewPCG(1, 2))
 	for i := 0; i < 5000; i++ {
@@ -339,10 +417,10 @@ func TestCanonical_EqualsCheckpointRoundTrip_Random(t *testing.T) {
 			int(bits), int8(bits), int16(bits), int32(bits), int64(bits),
 			uint(bits), uint8(bits), uint16(bits), uint32(bits), bits, uintptr(bits),
 			f32, f64, float64(int64(bits)), float32(int32(bits)),
-			[]any{bits, f32}, map[string]any{"k": []uint64{bits}},
+			[]any{bits, f32, f64}, map[string]any{"k": []uint64{bits}, "f": f64, "t": []float64{f64}},
 		}
 		for _, v := range vals {
-			assertCanonicalIsRoundTrip(t, "random", v)
+			assertCanonical(t, "random", v)
 		}
 	}
 }
@@ -392,7 +470,9 @@ func TestFromNumber_Int64Boundaries(t *testing.T) {
 		"9223372036854775808.0":    float64(1 << 63),
 		"-9223372036854775808.0":   -float64(1 << 63), // float literal: value -2^63 is canonically float64
 		"-9.223372036854775808e18": -float64(1 << 63),
-		"1152921504606846976.0":    int64(1152921504606847000), // float64(2^60), as encoding/json spells it
+		"1152921504606846976.0":    int64(1152921504606846976), // float64(2^60), exactly
+		"1152921504606847000.0":    int64(1152921504606846976), // the same binary64 value
+		"1152921504606846977.0":    int64(1152921504606846976), // float literal rounds to binary64
 		"9007199254740993.0":       int64(9007199254740992),    // float literal rounds; plain integers do not
 		"9007199254740993":         int64(9007199254740993),
 	}
@@ -407,7 +487,7 @@ func TestFromNumber_Int64Boundaries(t *testing.T) {
 			t.Errorf("Unmarshal(%s) = %#v, %v", lit, m["v"], err)
 		}
 		// The decoded value is stable across another checkpoint round trip.
-		assertCanonicalIsRoundTrip(t, lit, got)
+		assertCanonical(t, lit, got)
 	}
 	if _, err := FromNumber(json.Number("1" + strings.Repeat("0", 400))); err == nil {
 		t.Error("an integer literal past float64 must be an error, as with encoding/json")
@@ -450,5 +530,176 @@ func TestUnmarshal_EmbeddedUnexportedStructs(t *testing.T) {
 	var o2 outer
 	if err := Unmarshal([]byte(`{"x":1,"y":2}`), &o2); err != nil || o2.X != int64(1) || o2.mid != nil {
 		t.Fatalf("nil embedded pointer: %+v %v", o2, err)
+	}
+}
+
+// A whole float64 keeps its exact VALUE: canonicalization must never hand the exact
+// comparator a different integer than the number the input held. Swept around every
+// boundary where binary64 spacing or the int64 range changes, plus random bit patterns.
+func TestCanonical_WholeFloatKeepsExactValue(t *testing.T) {
+	t.Parallel()
+	check := func(f float64) {
+		t.Helper()
+		c, err := Canonical(f)
+		if err != nil {
+			t.Fatalf("Canonical(%v): %v", f, err)
+		}
+		switch x := c.(type) {
+		case int64:
+			if new(big.Float).SetInt64(x).Cmp(big.NewFloat(f)) != 0 {
+				t.Fatalf("Canonical(%v) = int64(%d): value changed", f, x)
+			}
+		case float64:
+			if x != f {
+				t.Fatalf("Canonical(%v) = float64(%v): value changed", f, x)
+			}
+			if f == math.Trunc(f) && f > -(1<<63) && f < (1<<63) {
+				t.Fatalf("Canonical(%v) = float64, want the exact int64", f)
+			}
+		default:
+			t.Fatalf("Canonical(%v) = %T", f, c)
+		}
+		assertCanonical(t, "exact", f)
+	}
+	for _, center := range []float64{
+		1 << 53, 1 << 60, 1 << 62, float64(1<<63) - 1024, 1 << 63, 1e21, 1e-6, 0,
+		-(1 << 53), -(1 << 60), -(1 << 63),
+	} {
+		up, down := center, center
+		for i := 0; i < 500; i++ {
+			check(up)
+			check(down)
+			up, down = math.Nextafter(up, math.Inf(1)), math.Nextafter(down, math.Inf(-1))
+		}
+	}
+	r := rand.New(rand.NewPCG(3, 4))
+	for i := 0; i < 5000; i++ {
+		f := math.Float64frombits(r.Uint64())
+		if !math.IsNaN(f) && !math.IsInf(f, 0) {
+			check(f)
+		}
+	}
+	// The review's repro: float64(2^60) is exactly 1152921504606846976, and must not
+	// become 1152921504606847000 (encoding/json's shortest spelling of it).
+	if c, _ := Canonical(float64(1 << 60)); c != int64(1152921504606846976) {
+		t.Fatalf("Canonical(float64(2^60)) = %T(%v)", c, c)
+	}
+	if c, _ := Canonical(-float64(1 << 63)); c != -float64(1<<63) {
+		t.Fatalf("Canonical(float64(-2^63)) = %T(%v), want float64 (like FromNumber)", c, c)
+	}
+}
+
+// The one raw-vs-round-trip difference, pinned: a whole float64 past 2^53 reached only
+// through a type Canonical does not take directly (here []float64) gets encoding/json's
+// shortest spelling. That is still deterministic and a fixed point, so live and replayed
+// values agree; it is not the exact value, which only the direct path preserves.
+func TestCanonical_SlowPathFloatTakesEncodingJSONSpelling(t *testing.T) {
+	t.Parallel()
+	got, err := Canonical(map[string]any{"fast": float64(1 << 60), "slow": []float64{1 << 60}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"fast": int64(1152921504606846976), "slow": []any{int64(1152921504606847000)}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v want %#v", got, want)
+	}
+}
+
+func nestSlices(n int) any {
+	var v any = []any{}
+	for i := 1; i < n; i++ {
+		v = []any{v}
+	}
+	return v
+}
+
+func nestMaps(n int, leaf any) any {
+	v := leaf
+	for i := 0; i < n; i++ {
+		v = map[string]any{"k": v}
+	}
+	return v
+}
+
+// The limits Canonical mirrors: encoding/json decodes objects/arrays nested exactly
+// encodingJSONMaxDepth deep and rejects one more level.
+func TestEncodingJSONMaxDepth(t *testing.T) {
+	t.Parallel()
+	doc := func(n int) []byte { return []byte(strings.Repeat("[", n) + strings.Repeat("]", n)) }
+	var v any
+	if err := Unmarshal(doc(encodingJSONMaxDepth), &v); err != nil {
+		t.Fatalf("depth %d: %v", encodingJSONMaxDepth, err)
+	}
+	if err := Unmarshal(doc(encodingJSONMaxDepth+1), &v); err == nil {
+		t.Fatalf("depth %d decoded; encodingJSONMaxDepth is stale", encodingJSONMaxDepth+1)
+	}
+	if nesting(nestSlices(7)) != 7 || nesting(nestMaps(7, 1)) != 7 {
+		t.Fatal("nesting miscounts")
+	}
+}
+
+// Cyclic map[string]any/[]any used to recurse until the runtime aborted the process
+// (unrecoverable stack overflow). It must be an error, like any cycle json.Marshal finds.
+func TestCanonical_CyclesAreErrors(t *testing.T) {
+	t.Parallel()
+	selfMap := map[string]any{}
+	selfMap["m"] = selfMap
+	viaSlice := []any{nil}
+	sliceHolder := map[string]any{"s": viaSlice}
+	viaSlice[0] = sliceHolder
+	viaTyped := map[string]any{}
+	viaTyped["rows"] = []map[string]any{viaTyped}
+	for name, v := range map[string]any{"map": selfMap, "sliceViaMap": sliceHolder, "slice": viaSlice, "typed": viaTyped} {
+		if got, err := Canonical(v); err == nil {
+			t.Errorf("%s: Canonical = %T, want error", name, got)
+		}
+	}
+}
+
+// Canonical accepts exactly MaxDepth levels of nesting, on the direct path, through
+// slow-path subtrees, and mixed; a value it accepts round-trips even inside a checkpoint
+// envelope (where it sits deeper), and one more level is an error.
+func TestCanonical_DepthLimit(t *testing.T) {
+	t.Parallel()
+	ok := map[string]any{
+		"slices":    nestSlices(MaxDepth),
+		"maps":      nestMaps(MaxDepth, int64(1)),
+		"slowLeaf":  nestMaps(MaxDepth-1, []int{1}),                     // typed slice is the last level
+		"slowRows":  nestMaps(MaxDepth-2, []map[string]any{{"n": 1.0}}), // two levels via the round trip
+		"slowOuter": []map[string]any{nestMaps(MaxDepth-1, int64(1)).(map[string]any)},
+		"badKey":    nestMaps(MaxDepth-2, map[string]any{"aÿ": []any{}}), // round trip adds 2
+	}
+	for name, v := range ok {
+		live, err := Canonical(v)
+		if err != nil {
+			t.Fatalf("%s at MaxDepth: %v", name, err)
+		}
+		if nesting(live) != MaxDepth {
+			t.Fatalf("%s: nesting %d, want %d", name, nesting(live), MaxDepth)
+		}
+		// Wrap in a deep checkpoint-like envelope and round trip it.
+		env := nestMaps(checkpointEnvelopeReserve-1, live)
+		b, err := json.Marshal(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back any
+		if err := Unmarshal(b, &back); err != nil || !reflect.DeepEqual(back, env) {
+			t.Fatalf("%s: canonical value at MaxDepth does not survive a checkpoint envelope: %v", name, err)
+		}
+	}
+	tooDeep := map[string]any{
+		"slices":    nestSlices(MaxDepth + 1),
+		"maps":      nestMaps(MaxDepth+1, int64(1)),
+		"slowLeaf":  nestMaps(MaxDepth, []int{1}),
+		"slowRows":  nestMaps(MaxDepth-1, []map[string]any{{"n": 1.0}}),
+		"slowOuter": []map[string]any{nestMaps(MaxDepth, int64(1)).(map[string]any)},
+		"badKey":    nestMaps(MaxDepth-1, map[string]any{"aÿ": []any{}}),
+		"pastJSON":  []map[string]any{nestMaps(encodingJSONMaxDepth, int64(1)).(map[string]any)},
+	}
+	for name, v := range tooDeep {
+		if _, err := Canonical(v); err == nil {
+			t.Errorf("%s at MaxDepth+1: want error", name)
+		}
 	}
 }

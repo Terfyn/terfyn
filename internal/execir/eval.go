@@ -237,11 +237,15 @@ func truthy(v any) bool {
 // they get here: runtime ingress (run input, HITL edits, agent output and tool-call
 // arguments, HTTP/MCP and native GitHub/Slack tool results) and checkpoint
 // hydration decode JSON through internal/jsonnum (int64 for a whole number,
-// float64 otherwise), and the interpreter canonicalizes its input and every leaf
-// result to exactly what a checkpoint round trip yields (jsonnum.Canonical), so
-// live and replayed values are identical. A producer that decodes JSON with plain
-// encoding/json has already rounded past 2^53; Canonical keeps that deterministic
-// but cannot restore the digits. strings/bools compare by value, arrays and objects structurally
+// float64 otherwise, by exact value), and the interpreter canonicalizes its input
+// and every leaf result (jsonnum.Canonical) to a form that is a checkpoint
+// round-trip fixed point, so live and replayed values are identical. Program
+// literals are not canonicalized; the comparison below is exact across
+// int64/float64, so a float literal 2^60 equals the int64 2^60. A producer that
+// decodes JSON with plain encoding/json has already rounded past 2^53, and a
+// float64 inside a typed producer value (a struct field, []float64) takes
+// encoding/json's shortest spelling; Canonical keeps both deterministic but
+// cannot restore the digits. strings/bools compare by value, arrays and objects structurally
 // (element- and key-wise, recursively, with the same numeric normalization),
 // and anything else via reflect.DeepEqual, which never panics. A type mismatch
 // is unequal.
