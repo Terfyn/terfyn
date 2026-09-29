@@ -288,14 +288,15 @@ func lookupObject(d *Document, node map[string]any, path []string, depth int) Lo
 // matched (§10.3.2.3). ok is false when no properties/patternProperties entry governs key, so the
 // caller falls through to items / additionalProperties.
 //
-// The conjuncts are combined conservatively, since a LookupResult cannot represent an
-// intersection of two constrained subschemas:
+// The value at key must satisfy every conjunct, so they combine as an intersection at the level
+// a LookupResult represents (its TypeSet):
 //   - any conjunct that forbids key (a false subschema, or a Missing deeper path) makes the key
 //     Missing — anything and false is false, the same as properties: {x: false};
-//   - conjuncts that are unconstrained (true, {}) add nothing and are dropped;
-//   - one remaining constrained conjunct is the result;
-//   - two or more constrained conjuncts look up as unconstrained (gradual), never as a guess at
-//     their intersection.
+//   - conjuncts with no type constraint (true, {}, or a subschema without "type") are the identity
+//     of the intersection and are dropped; when every conjunct is untyped the key is gradual;
+//   - the typed conjuncts' type sets are intersected ([intersectTypes], keeping integer ⊂ number:
+//     integer ∧ number is integer). An empty intersection means no value can satisfy the key, so
+//     it must be absent: Missing, like a false subschema.
 //
 // Patterns are compiled with Go's regexp (RE2) and matched unanchored, as Draft 2020-12 requires.
 // JSON Schema specifies ECMA-262 regular expressions; the runtime validator
@@ -334,19 +335,43 @@ func lookupNamedProperty(d *Document, node map[string]any, types TypeSet, key st
 	if len(conjuncts) == 0 && !unknown {
 		return LookupResult{}, false
 	}
-	var constrained []LookupResult
+	var meet TypeSet // nil: no typed conjunct yet
 	for _, c := range conjuncts {
 		if c.Missing {
 			return LookupResult{Missing: true}, true
 		}
-		if c.Known || len(c.Types) > 0 {
-			constrained = append(constrained, c)
+		if len(c.Types) == 0 {
+			continue
 		}
+		if meet == nil {
+			meet = c.Types
+			continue
+		}
+		meet = intersectTypes(meet, c.Types)
 	}
-	if len(constrained) != 1 {
+	if meet == nil {
 		return LookupResult{}, true
 	}
-	return constrained[0], true
+	if len(meet) == 0 {
+		return LookupResult{Missing: true}, true
+	}
+	return LookupResult{Types: meet, Known: true}, true
+}
+
+// intersectTypes returns the JSON types an instance satisfying both a and b can have. It keeps
+// the integer ⊂ number subtyping [Compatible] uses: an integer satisfies "number", so integer
+// meets number at integer.
+func intersectTypes(a, b TypeSet) TypeSet {
+	out := TypeSet{}
+	for t := range a {
+		if b.Has(t) || (t == TypeInteger && b.Has(TypeNumber)) {
+			out[t] = struct{}{}
+		}
+	}
+	if a.Has(TypeNumber) && b.Has(TypeInteger) {
+		out[TypeInteger] = struct{}{}
+	}
+	return out
 }
 
 // patternCache memoizes compiled patternProperties expressions (and compile failures) by source.

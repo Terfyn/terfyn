@@ -345,7 +345,17 @@ func TestLookup_patternProperties(t *testing.T) {
 		{"properties and true pattern", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":true}}`, []string{"body"}, str},
 		{"properties and false pattern", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":false}}`, []string{"body"}, forbidden},
 		{"true property and false pattern", `{"type":"object","properties":{"body":true},"patternProperties":{"^b":false}}`, []string{"body"}, forbidden},
-		{"two typed conjuncts are gradual", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":{"type":"integer"}}}`, []string{"body"}, unconstrained},
+		// Overlapping conjuncts intersect their type sets (#575 review): the value satisfies all of them.
+		{"same-typed properties and pattern", `{"type":"object","properties":{"a":{"type":"string"}},"patternProperties":{".*":{"type":"string"}}}`, []string{"a"}, str},
+		{"disjoint typed conjuncts forbid key", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":{"type":"integer"}}}`, []string{"body"}, forbidden},
+		{"integer meets number at integer", `{"type":"object","properties":{"n":{"type":"integer"}},"patternProperties":{"^n":{"type":"number"}}}`, []string{"n"}, integer},
+		{"number meets integer at integer", `{"type":"object","properties":{"n":{"type":"number"}},"patternProperties":{"^n":{"type":"integer"}}}`, []string{"n"}, integer},
+		{"union conjuncts intersect", `{"type":"object","properties":{"v":{"type":["string","integer"]}},"patternProperties":{"^v":{"type":["integer","null"]}}}`, []string{"v"}, integer},
+		{"number union meets integer", `{"type":"object","properties":{"v":{"type":["string","number"]}},"patternProperties":{"^v":{"type":"integer"}}}`, []string{"v"}, integer},
+		{"untyped conjunct is the identity", `{"type":"object","properties":{"a":{"type":"string"}},"patternProperties":{"^a":{"minLength":1}}}`, []string{"a"}, str},
+		{"all untyped conjuncts stay gradual", `{"type":"object","properties":{"a":{"minLength":1}},"patternProperties":{"^a":{"maxLength":9}}}`, []string{"a"}, unconstrained},
+		{"three conjuncts intersect", `{"type":"object","properties":{"a":{"type":["string","integer"]}},"patternProperties":{"^a":{"type":["string","null"]},"a$":{"type":"string"}}}`, []string{"a"}, str},
+		{"nested disjoint conjuncts forbid descent", `{"type":"object","properties":{"a":{"type":"object","properties":{"x":{"type":"string"}}}},"patternProperties":{"^a":{"type":"object","properties":{"x":{"type":"integer"}}}}}`, []string{"a", "x"}, forbidden},
 		{"ref false pattern forbids key", `{"type":"object","patternProperties":{"^body$":{"$ref":"#/$defs/n"}},"$defs":{"n":false}}`, []string{"body"}, forbidden},
 		{"pattern ignored for array-only type", `{"type":"array","patternProperties":{"^0$":false},"items":{"type":"string"}}`, []string{"0"}, str},
 	}
@@ -365,6 +375,27 @@ func TestLookup_patternProperties(t *testing.T) {
 				t.Fatalf("Lookup(%v) = %+v (impossible=%v), want %+v", tc.path, gotW, got.Impossible, tc.want)
 			}
 		})
+	}
+}
+
+// TestLookup_overlappingConjunctsKeepPrecision: the #575 review's shape, declared keys plus an
+// all-strings map. Before the conjuncts were intersected, a second constrained conjunct made the
+// key gradual and let an integer producer into a string slot.
+func TestLookup_overlappingConjunctsKeepPrecision(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(p, []byte(`{"type":"object","properties":{"a":{"type":"string"}},"patternProperties":{".*":{"type":"string"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := LoadDocument(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cons := doc.Lookup([]string{"a"})
+	if CompatibleLookup(LookupResult{Types: TypeSet{TypeInteger: {}}, Known: true}, cons) {
+		t.Fatalf("integer producer must not flow into %v", cons)
+	}
+	if !CompatibleLookup(LookupResult{Types: TypeSet{TypeString: {}}, Known: true}, cons) {
+		t.Fatalf("string producer must flow into %v", cons)
 	}
 }
 

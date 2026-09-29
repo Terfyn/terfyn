@@ -483,6 +483,55 @@ func TestValidateProjectGraph_multiPositionalAgentArgsAreNotWholeDocument(t *tes
 	}
 }
 
+// The literal / untyped fallback (a with value with no typed token) honours the explicit call
+// shape exactly like the token path (#575 review): a whole-document argument is checked at the
+// consumer's input root, so a literal or a bare ${input} into a closed-object or scalar input
+// validates, and only a never root rejects it. Without the bit the same key is a field called
+// arg0 (a named call, or one argument of a multi-positional call) and is checked as one.
+func TestValidateProjectGraph_wholeDocumentLiteralFallback(t *testing.T) {
+	const closed = `{"type":"object","properties":{"title":{"type":"string"}},"additionalProperties":false}`
+	cases := []struct {
+		name     string
+		consumer string
+		with     map[string]any
+		whole    bool
+		wantErr  string // "" = accepted
+	}{
+		{name: "string literal into scalar", consumer: `{"type":"string"}`, with: map[string]any{"arg0": "hi"}, whole: true},
+		{name: "number literal into scalar", consumer: `{"type":"string"}`, with: map[string]any{"arg0": 42}, whole: true},
+		{name: "object literal into closed object", consumer: closed, with: map[string]any{"arg0": map[string]any{"title": "hi"}}, whole: true},
+		{name: "bare input into closed object", consumer: closed, with: map[string]any{"arg0": "${input}"}, whole: true},
+		{name: "status token into scalar", consumer: `{"type":"string"}`, with: map[string]any{"arg0": "${steps.value.status}"}, whole: true},
+		{name: "literal into never", consumer: `false`, with: map[string]any{"arg0": "hi"}, whole: true,
+			wantErr: `literal value (any) does not match Agent/consumer input "input" (never)`},
+		{name: "empty object literal into never", consumer: `false`, with: map[string]any{"arg0": map[string]any{}}, whole: true,
+			wantErr: `literal value (any) does not match Agent/consumer input "input" (never)`},
+		{name: "bare input into never", consumer: `false`, with: map[string]any{"arg0": "${input}"}, whole: true,
+			wantErr: `untyped value (any) does not match Agent/consumer input "input" (never)`},
+		{name: "named arg0 literal into closed object", consumer: closed, with: map[string]any{"arg0": "hi"},
+			wantErr: `with "arg0" is not declared`},
+		{name: "multi-positional literals into closed object", consumer: closed, with: map[string]any{"arg0": "a", "arg1": "b"},
+			wantErr: `with "arg0" is not declared`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSchema(t, root, "schemas/out.json", `{"type":"string"}`)
+			writeSchema(t, root, "schemas/in.json", tc.consumer)
+			err := ValidateProjectGraph(wholeDocumentGraph(t, tc.with, tc.whole), root)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 // The bit is a representation invariant: on a non-agent step, or an agent step
 // whose with: is not exactly one placeholder argument, validation fails loudly.
 func TestValidateProjectGraph_wholeDocumentBitShapeInvariant(t *testing.T) {

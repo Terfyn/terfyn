@@ -826,7 +826,10 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 // A string-template field is typed by checkTemplate, the rule graph validation applies.
 func (wc *wfChecker) checkValueAgainst(e lang.Expr, pos lang.Pos, want typeRef, what string) lang.Diagnostics {
 	obj, ok := e.(*lang.ObjectExpr)
-	if !ok || want.doc == nil {
+	// A never (false) location accepts no value, so the object literal itself — an untyped
+	// producer — is rejected there as one value: descending into its fields would let an
+	// empty literal ({}) through with nothing checked, while graph validation rejects it.
+	if !ok || want.doc == nil || want.result().Impossible {
 		got, _ := wc.checkValue(e)
 		return wc.checkCompatible(pos, got, want, what)
 	}

@@ -541,7 +541,12 @@ only from those) are checked like any other flow, which is gradual against every
 `never`. A missing argument is rejected into a `never` consumer on both — `C()` and a YAML agent
 step with no `with:` (for a typed, non-`never` input the `.agent` zero-argument rule is stricter:
 YAML treats an absent `with:` as an empty input object). Agent input is not validated at run time,
-so this static check is what keeps a `false`-input agent from running.
+so this static check is what keeps a `false`-input agent from running. Where a `with:` value lands
+in the consumer input follows the step's explicit call shape, never the key's name: the single
+positional argument of a lowered `.agent` call (`r = Reviewer(input)`, `C("hi")`, `C({q: "hi"})`,
+`WholeDocument` with the `arg0` placeholder key) is checked against the **whole** input — a literal
+there is gradual against a closed object or a scalar input and rejected only by `never` — while a
+named `with:` key, including one literally called `arg0`, is an input field.
 
 Draft 2020-12 **boolean schemas** are honoured in every subschema position `Lookup` descends
 through — the root, `properties` and `patternProperties` values, `prefixItems`/`items`,
@@ -552,8 +557,10 @@ interpret, such as `allOf`/`anyOf`/`not`, are not consulted at all): `true` is u
 — is **`never`, the bottom type**. `patternProperties` follows §10.3.2.3: a key matched by
 `properties` or by any pattern (Go RE2 syntax, matched unanchored — the runtime validator compiles
 patterns with the same engine) is not subject to `additionalProperties`; when several of them
-match, any `false` forbids the key and two or more constrained matches look up as `any` rather
-than a guessed intersection.
+match, the value must satisfy all of them: any `false` forbids the key, and the typed matches'
+type sets are intersected (`integer` meets `number` at `integer`; an untyped match such as `true`
+or `{"minLength":1}` adds no type constraint). An empty intersection — `properties: {a: string}`
+with a matching `integer` pattern — is unsatisfiable, so the key is reported as not declared.
 
 `never` flows into every consumer, because a `never` producer cannot yield a value where its schema
 is enforced at the source: an agent's output is always validated (a step whose output must satisfy
@@ -591,7 +598,8 @@ What is checked:
   named parameter list. An **object-literal** argument (`Reviewer({repo: r, number: n})`)
   is checked field by field (recursively for nested literals): each field value against
   that field's declared type, and a field the type forbids (`additionalProperties: false`)
-  is an error — the same per-field rule graph validation applies to the lowered step (#550). Every OTHER call shape against a known input type is a diagnostic,
+  is an error — the same per-field rule graph validation applies to the lowered step (#550);
+  into a `never` input the literal (even `{}`) is rejected as one value. Every OTHER call shape against a known input type is a diagnostic,
   not a smaller version of the same problem to skip past quietly: **zero arguments** is an
   **error** (a declared input was never supplied); a **single named argument**
   (`A(input: x)`) and **more than one argument** — the ADR 002 normative surface's own
