@@ -454,6 +454,40 @@ func TestValidateProjectGraph_arrayElementsCheckedAgainstItems(t *testing.T) {
 	}
 }
 
+// The "array without items" exemption applies only under a parent that may be an
+// array: an element under a closed object or a scalar is undeclared, whole-document
+// or named (#579 review).
+func TestValidateProjectGraph_arrayElementUnderNonArrayIsUndeclared(t *testing.T) {
+	tok := "${steps.value.output}"
+	whole := map[string]any{WholeDocumentArgKey: []any{tok}}
+	err := validateWiring(t, `{"type":"string"}`, reviewRequestSchema, whole, true)
+	if err == nil || !strings.Contains(err.Error(), `input field "0" is not declared`) {
+		t.Fatalf("whole-document array into a closed object must be rejected, got %v", err)
+	}
+	err = validateWiring(t, `{"type":"string"}`, `{"type":"string"}`, whole, true)
+	if err == nil || !strings.Contains(err.Error(), `input field "0" is not declared`) {
+		t.Fatalf("whole-document array into a string input must be rejected, got %v", err)
+	}
+	stringTags := `{"type":"object","properties":{"tags":{"type":"string"}}}`
+	err = validateWiring(t, `{"type":"string"}`, stringTags, map[string]any{"tags": []any{tok}}, false)
+	if err == nil || !strings.Contains(err.Error(), `with "tags.0" is not declared`) {
+		t.Fatalf("named array into a string field must be rejected, got %v", err)
+	}
+	// An array (or untyped) parent without items still accepts any element.
+	for _, in := range []string{
+		`{"type":"object","properties":{"tags":{"type":"array"}}}`,
+		`{"type":"object","properties":{"tags":{"type":["array","string"]}}}`,
+		`{"type":"object","properties":{"tags":{}}}`,
+	} {
+		if err := validateWiring(t, `{"type":"integer"}`, in, map[string]any{"tags": []any{tok}}, false); err != nil {
+			t.Fatalf("%s: an element of an array without items is unknown, got %v", in, err)
+		}
+	}
+	if err := validateWiring(t, `{"type":"integer"}`, `{"type":"array"}`, whole, true); err != nil {
+		t.Fatalf("whole-document array without items accepts any element, got %v", err)
+	}
+}
+
 // A token embedded in a larger string yields a string, wherever it sits.
 func TestValidateProjectGraph_wholeDocumentEmbeddedTokenIsString(t *testing.T) {
 	with := map[string]any{WholeDocumentArgKey: map[string]any{"repo": "org/${steps.value.output}"}}

@@ -143,7 +143,9 @@ func walkWiringValue(v any, site wiringSite, fn func(wiringSite, string)) {
 // lookupConsumer resolves the consumer input type at site. An array element is typed
 // by the array's items; an array schema that declares no items accepts any element,
 // which [schema.Document.Lookup] reports as Missing, so such an element is unknown
-// (gradual) rather than undeclared.
+// (gradual) rather than undeclared. That exemption applies only when the element's
+// parent may be an array (its types are unconstrained or include array): an element
+// under a parent that cannot be an array (a closed object, a scalar) is undeclared.
 func lookupConsumer(consumer *schema.Document, site wiringSite) schema.LookupResult {
 	path := site.consumerPath()
 	res := consumer.Lookup(path)
@@ -153,11 +155,15 @@ func lookupConsumer(consumer *schema.Document, site wiringSite) schema.LookupRes
 	off := len(path) - len(site.nested)
 	for _, e := range site.elems {
 		i := off + e
-		if consumer.Lookup(path[:i]).Missing {
+		parent := consumer.Lookup(path[:i])
+		if parent.Missing {
 			break
 		}
 		if consumer.Lookup(path[:i+1]).Missing {
-			return schema.LookupResult{}
+			if len(parent.Types) == 0 || parent.Types.Has(schema.TypeArray) {
+				return schema.LookupResult{}
+			}
+			break
 		}
 	}
 	return res

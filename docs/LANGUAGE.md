@@ -580,6 +580,14 @@ What is checked:
   `schema.Document.Lookup`, and a field the schema declares forbidden
   (`additionalProperties: false`) is a positioned error.
 - A `return <expr>` against the enclosing workflow's declared result type.
+- A **string template** in a value position (an argument or a field of one, an approval
+  payload entry, a return value) is typed by the rule graph validation applies to the
+  lowered interpolation (#550): a string that is exactly one `${binding…}` token has the
+  referenced binding's type, and any other string containing a token is a `string`. Each
+  token is resolved like a reference, so an undeclared member path or a binding that is not
+  definitely assigned is an error. A string without a token stays an untyped literal. This
+  holds inside control-flow bodies too, whose synthetic steps graph validation skips, so
+  `Reviewer({repo: "${count}"})` is refused in a `while` body exactly as it is straight-line.
 - A dotted (tool) callee's arguments are checked for their own internal well-formedness
   (nested calls, member access) but not against a declared parameter type — there is no
   `.agent`-visible tool schema.
