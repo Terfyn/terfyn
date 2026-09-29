@@ -436,8 +436,14 @@ as data (#551, #552); the runtime never guesses it from key names or output shap
   so neither the order nor the number of `return`s changes the shape: `return {value: x}` is
   the document `{value: x}` whether it is the workflow's only `return` or one arm of several.
   The one object literal that keeps the envelope is YAML's: `output.value: {value: <map>}`
-  outputs `{value: <map>}`. (A `.agent` program pinned in a deployment snapshot before this
-  rule keeps the shape it was pinned with.) That document is the step's one runtime value: the run's output, the persisted `run_steps`
+  outputs `{value: <map>}`. The same rule classifies a `.agent` program pinned in a deployment
+  snapshot applied with an earlier release (tested against programs compiled by main at
+  8741333): for a workflow without control flow, a nested call of it and a caller's binding of
+  `<call>.value` or `${steps.<id>.output.value}` give exactly what they gave on that release.
+  Two things differ, both #551 fixes a fresh apply shows too: a root run of a workflow whose
+  only `return` is a `{value: x}` literal outputs `{value: x}` (earlier releases doubled it to
+  `{value: {value: x}}` at the root only), and a nested call of a control-flow workflow outputs
+  what the program returned instead of the last-lowered `return`'s projection. That document is the step's one runtime value: the run's output, the persisted `run_steps`
   output, and what a YAML caller reads as `${steps.<id>.output}`. A `.agent` binding
   `r = Identity(x)` is the callee's **return value**: when the callee uses the `{value: …}`
   envelope the checker sets the node's `ProjectValue` bit and the interpreter binds the `value`

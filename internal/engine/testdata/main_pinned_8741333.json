@@ -1,0 +1,1018 @@
+{
+  "commit": "8741333b83d6ee6a16c295aee5033d35da7464d5",
+  "agentSource": "\nworkflow P2(a: Anything, b: Anything) -\u003e Anything {\n    return { value: a }\n}\n\nworkflow PLit(a: Anything, b: Anything) -\u003e Anything {\n    return { value: \"lit\" }\n}\n\nworkflow Free() -\u003e Anything {\n    return { value: \"free\" }\n}\n\nworkflow PMap(a: Anything, b: Anything) -\u003e Anything {\n    return { value: { x: a } }\n}\n\nworkflow CP2(input: Anything) -\u003e Anything {\n    p = P2(input.a, input.b)\n    return { p: p, pv: p.value }\n}\n\nworkflow CLit(input: Anything) -\u003e Anything {\n    l = PLit(input.a, input.b)\n    return { l: l, lv: l.value }\n}\n\nworkflow CFree(input: Anything) -\u003e Anything {\n    f = Free()\n    return { f: f, fv: f.value }\n}\n\nworkflow CMap(input: Anything) -\u003e Anything {\n    m = PMap(input.a, input.b)\n    return { m: m, mv: m.value }\n}\n",
+  "graph": {
+    "Spec": {},
+    "Agents": {},
+    "Tools": {
+      "echo": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Tool",
+        "metadata": {
+          "name": "echo"
+        },
+        "spec": {
+          "type": "native",
+          "safety": {
+            "sideEffects": false
+          }
+        }
+      }
+    },
+    "Workflows": {
+      "CFree": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "CFree"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "f",
+              "workflow": "Free",
+              "needsDeclared": true
+            }
+          ],
+          "output": {
+            "value": {
+              "f": "${steps.f.output}",
+              "fv": "${steps.f.output.value}"
+            }
+          }
+        }
+      },
+      "CLit": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "CLit"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "l",
+              "workflow": "PLit",
+              "with": {
+                "a": "${input.a}",
+                "b": "${input.b}"
+              },
+              "needsDeclared": true
+            }
+          ],
+          "output": {
+            "value": {
+              "l": "${steps.l.output}",
+              "lv": "${steps.l.output.value}"
+            }
+          }
+        }
+      },
+      "CMap": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "CMap"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "m",
+              "workflow": "PMap",
+              "with": {
+                "a": "${input.a}",
+                "b": "${input.b}"
+              },
+              "needsDeclared": true
+            }
+          ],
+          "output": {
+            "value": {
+              "m": "${steps.m.output}",
+              "mv": "${steps.m.output.value}"
+            }
+          }
+        }
+      },
+      "CP2": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "CP2"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "p",
+              "workflow": "P2",
+              "with": {
+                "a": "${input.a}",
+                "b": "${input.b}"
+              },
+              "needsDeclared": true
+            }
+          ],
+          "output": {
+            "value": {
+              "p": "${steps.p.output}",
+              "pv": "${steps.p.output.value}"
+            }
+          }
+        }
+      },
+      "Free": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "Free"
+        },
+        "spec": {
+          "output": {
+            "value": {
+              "value": "free"
+            }
+          }
+        }
+      },
+      "P2": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "P2"
+        },
+        "spec": {
+          "output": {
+            "value": {
+              "value": "${input.a}"
+            }
+          }
+        }
+      },
+      "PLit": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "PLit"
+        },
+        "spec": {
+          "output": {
+            "value": {
+              "value": "lit"
+            }
+          }
+        }
+      },
+      "PMap": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "PMap"
+        },
+        "spec": {
+          "output": {
+            "value": {
+              "value": {
+                "x": "${input.a}"
+              }
+            }
+          }
+        }
+      },
+      "YC": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "YC"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "m",
+              "workflow": "YMap",
+              "with": {
+                "a": "${input.a}"
+              }
+            }
+          ],
+          "output": {
+            "value": {
+              "got": "${steps.m.output.value}",
+              "whole": "${steps.m.output}"
+            }
+          }
+        }
+      },
+      "YFree": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "YFree"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "f",
+              "workflow": "Free"
+            }
+          ],
+          "output": {
+            "value": {
+              "got": "${steps.f.output.value}",
+              "whole": "${steps.f.output}"
+            }
+          }
+        }
+      },
+      "YLit": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "YLit"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "l",
+              "workflow": "PLit",
+              "with": {
+                "a": "${input.a}",
+                "b": "${input.b}"
+              }
+            }
+          ],
+          "output": {
+            "value": {
+              "got": "${steps.l.output.value}",
+              "whole": "${steps.l.output}"
+            }
+          }
+        }
+      },
+      "YMap": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "YMap"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "s",
+              "uses": "tool.echo.echo",
+              "with": {
+                "msg": "${input.a}"
+              }
+            }
+          ],
+          "output": {
+            "value": {
+              "value": {
+                "e": "${steps.s.output.echo.msg}",
+                "x": "${input.a}"
+              }
+            }
+          }
+        }
+      },
+      "YP2": {
+        "apiVersion": "agentic.dev/v0",
+        "kind": "Workflow",
+        "metadata": {
+          "name": "YP2"
+        },
+        "spec": {
+          "steps": [
+            {
+              "id": "p",
+              "workflow": "P2",
+              "with": {
+                "a": "${input.a}",
+                "b": "${input.b}"
+              }
+            }
+          ],
+          "output": {
+            "value": {
+              "got": "${steps.p.output.value}",
+              "whole": "${steps.p.output}"
+            }
+          }
+        }
+      }
+    },
+    "Policies": {},
+    "Environments": {}
+  },
+  "programs": {
+    "formatVersion": "agentic.dev/execir/v1",
+    "programs": {
+      "CFree": {
+        "workflow": "CFree",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "f",
+            "workflow": "Free"
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "f",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "f"
+                    ]
+                  }
+                },
+                {
+                  "key": "fv",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "f",
+                      "value"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "CLit": {
+        "workflow": "CLit",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "l",
+            "workflow": "PLit",
+            "args": {
+              "a": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              },
+              "b": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "l",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "l"
+                    ]
+                  }
+                },
+                {
+                  "key": "lv",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "l",
+                      "value"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "CMap": {
+        "workflow": "CMap",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "m",
+            "workflow": "PMap",
+            "args": {
+              "a": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              },
+              "b": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "m",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "m"
+                    ]
+                  }
+                },
+                {
+                  "key": "mv",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "m",
+                      "value"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "CP2": {
+        "workflow": "CP2",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "p",
+            "workflow": "P2",
+            "args": {
+              "a": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              },
+              "b": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "p",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "p"
+                    ]
+                  }
+                },
+                {
+                  "key": "pv",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "p",
+                      "value"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "Free": {
+        "workflow": "Free",
+        "body": [
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "value",
+                  "val": {
+                    "kind": "lit",
+                    "litType": "s",
+                    "v": "free"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "P2": {
+        "workflow": "P2",
+        "params": [
+          "a",
+          "b"
+        ],
+        "body": [
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "value",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "a"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "PLit": {
+        "workflow": "PLit",
+        "params": [
+          "a",
+          "b"
+        ],
+        "body": [
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "value",
+                  "val": {
+                    "kind": "lit",
+                    "litType": "s",
+                    "v": "lit"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "PMap": {
+        "workflow": "PMap",
+        "params": [
+          "a",
+          "b"
+        ],
+        "body": [
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "value",
+                  "val": {
+                    "kind": "object",
+                    "fields": [
+                      {
+                        "key": "x",
+                        "val": {
+                          "kind": "ref",
+                          "path": [
+                            "a"
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "YC": {
+        "workflow": "YC",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "m",
+            "workflow": "YMap",
+            "args": {
+              "a": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "got",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "m",
+                      "value"
+                    ]
+                  }
+                },
+                {
+                  "key": "whole",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "m"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "YFree": {
+        "workflow": "YFree",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "f",
+            "workflow": "Free"
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "got",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "f",
+                      "value"
+                    ]
+                  }
+                },
+                {
+                  "key": "whole",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "f"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "YLit": {
+        "workflow": "YLit",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "l",
+            "workflow": "PLit",
+            "args": {
+              "a": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              },
+              "b": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "got",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "l",
+                      "value"
+                    ]
+                  }
+                },
+                {
+                  "key": "whole",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "l"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "YMap": {
+        "workflow": "YMap",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeTool",
+            "bind": "s",
+            "uses": "tool.echo.echo",
+            "args": {
+              "msg": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "e",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "s",
+                      "echo",
+                      "msg"
+                    ]
+                  }
+                },
+                {
+                  "key": "x",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "input",
+                      "a"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "YP2": {
+        "workflow": "YP2",
+        "params": [
+          "input"
+        ],
+        "body": [
+          {
+            "kind": "invokeWorkflow",
+            "bind": "p",
+            "workflow": "P2",
+            "args": {
+              "a": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "a"
+                ]
+              },
+              "b": {
+                "kind": "ref",
+                "path": [
+                  "input",
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "return",
+            "value": {
+              "kind": "object",
+              "fields": [
+                {
+                  "key": "got",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "p",
+                      "value"
+                    ]
+                  }
+                },
+                {
+                  "key": "whole",
+                  "val": {
+                    "kind": "ref",
+                    "path": [
+                      "p"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "digests": {
+    "CFree": "773d3e130334132c869e3fe648e40c85ad38d223cfbc6aa339f5e46538ee3036",
+    "CLit": "d163ee20ae9e06ce73188225e0b8fbfc9689180d3ebba284de95112e1034ad92",
+    "CMap": "d8ba60635653972c31519589d0867f3ccabddec9c3d368b114b6b3d1408f5e83",
+    "CP2": "db5d7454bd1404916ec34af6409f0404f234baebbdb1092f1c0d90cbb3d39c19",
+    "Free": "2be9fae0a2622ec0f1f6a8939b582eb07d3ffb438b1efe1f7d2d4460fa3692d0",
+    "P2": "45bc0a623db734b2b06e1d54757606f47f9112300a67bd246dace382d37b01fe",
+    "PLit": "ace87f7373ebdf8f800876c9a1efda911dabbee83b7785e45d681eeb06d2a3bc",
+    "PMap": "1e0ef37852861044c7fdf11979078adf3b37f9af2e8ffa17f44b9d52743fc8cc",
+    "YC": "3f75129457b6b4650f902bde63b6e7e955ae2af5e360e4c86e20d3827f5f5d79",
+    "YFree": "ac2b0321fdb82a024b476d8838d1d46d6007f5357e4968cf1f4d13e28ae8b586",
+    "YLit": "8b46b7e8e60b7f7fa326f865c5873cbfd7e2a2d26015f4fe242c8044b77270be",
+    "YMap": "d0eeff352fea00aba4e9efdc57aca8dcd105bcad0af4b02de47144f05e2be917",
+    "YP2": "1bdbd02f3c9d62251ddf6f967e751e48aa6bdd0b6e4b3871e97276d99609a22c"
+  },
+  "input": {
+    "a": "A",
+    "b": "B"
+  },
+  "runs": {
+    "CFree": {
+      "status": "succeeded",
+      "output": "{\"f\":{\"value\":\"free\"},\"fv\":\"free\"}",
+      "steps": {
+        "f": {
+          "status": "succeeded",
+          "input": "{}",
+          "output": "{\"value\":\"free\"}"
+        }
+      }
+    },
+    "CLit": {
+      "status": "succeeded",
+      "output": "{\"l\":{\"value\":\"lit\"},\"lv\":\"lit\"}",
+      "steps": {
+        "l": {
+          "status": "succeeded",
+          "input": "{\"a\":\"A\",\"b\":\"B\"}",
+          "output": "{\"value\":\"lit\"}"
+        }
+      }
+    },
+    "CMap": {
+      "status": "succeeded",
+      "output": "{\"m\":{\"value\":{\"x\":\"A\"}},\"mv\":{\"x\":\"A\"}}",
+      "steps": {
+        "m": {
+          "status": "succeeded",
+          "input": "{\"a\":\"A\",\"b\":\"B\"}",
+          "output": "{\"value\":{\"x\":\"A\"}}"
+        }
+      }
+    },
+    "CP2": {
+      "status": "succeeded",
+      "output": "{\"p\":{\"value\":\"A\"},\"pv\":\"A\"}",
+      "steps": {
+        "p": {
+          "status": "succeeded",
+          "input": "{\"a\":\"A\",\"b\":\"B\"}",
+          "output": "{\"value\":\"A\"}"
+        }
+      }
+    },
+    "Free": {
+      "status": "succeeded",
+      "output": "{\"value\":{\"value\":\"free\"}}"
+    },
+    "P2": {
+      "status": "succeeded",
+      "output": "{\"value\":{\"value\":\"A\"}}"
+    },
+    "PLit": {
+      "status": "succeeded",
+      "output": "{\"value\":{\"value\":\"lit\"}}"
+    },
+    "PMap": {
+      "status": "succeeded",
+      "output": "{\"value\":{\"value\":{\"x\":\"A\"}}}"
+    },
+    "YC": {
+      "status": "succeeded",
+      "output": "{\"got\":{\"e\":\"A\",\"x\":\"A\"},\"whole\":{\"value\":{\"e\":\"A\",\"x\":\"A\"}}}",
+      "steps": {
+        "m": {
+          "status": "succeeded",
+          "input": "{\"a\":\"A\"}",
+          "output": "{\"value\":{\"e\":\"A\",\"x\":\"A\"}}"
+        },
+        "m/s": {
+          "status": "succeeded",
+          "input": "{\"msg\":\"A\"}",
+          "output": "{\"echo\":{\"msg\":\"A\"}}"
+        }
+      }
+    },
+    "YFree": {
+      "status": "succeeded",
+      "output": "{\"got\":\"free\",\"whole\":{\"value\":\"free\"}}",
+      "steps": {
+        "f": {
+          "status": "succeeded",
+          "input": "{}",
+          "output": "{\"value\":\"free\"}"
+        }
+      }
+    },
+    "YLit": {
+      "status": "succeeded",
+      "output": "{\"got\":\"lit\",\"whole\":{\"value\":\"lit\"}}",
+      "steps": {
+        "l": {
+          "status": "succeeded",
+          "input": "{\"a\":\"A\",\"b\":\"B\"}",
+          "output": "{\"value\":\"lit\"}"
+        }
+      }
+    },
+    "YMap": {
+      "status": "succeeded",
+      "output": "{\"value\":{\"e\":\"A\",\"x\":\"A\"}}",
+      "steps": {
+        "s": {
+          "status": "succeeded",
+          "input": "{\"msg\":\"A\"}",
+          "output": "{\"echo\":{\"msg\":\"A\"}}"
+        }
+      }
+    },
+    "YP2": {
+      "status": "succeeded",
+      "output": "{\"got\":\"A\",\"whole\":{\"value\":\"A\"}}",
+      "steps": {
+        "p": {
+          "status": "succeeded",
+          "input": "{\"a\":\"A\",\"b\":\"B\"}",
+          "output": "{\"value\":\"A\"}"
+        }
+      }
+    }
+  }
+}

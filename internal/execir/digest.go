@@ -28,9 +28,10 @@ func (p *Program) Digest() string {
 		b.WriteString(strings.Join(p.Params, ","))
 		b.WriteString("]")
 		if p.DocumentReturn {
-			// The output shape is executable identity: the same Return is the output
-			// document with the bit and the `value` of a {value: …} envelope without
-			// it. Only written when set, so existing programs keep their digest.
+			// The output shape is executable identity: the bit records at lowering
+			// that the program's one `{value: <object>}` Return is the output
+			// document (lower.WorkflowReturnShape). Only written when set, so
+			// existing programs keep their digest.
 			b.WriteString("!docreturn")
 		}
 		encodeNodes(&b, p.Body)

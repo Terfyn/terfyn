@@ -1,0 +1,197 @@
+// Generator for main_pinned_8741333.json (review #578): the programs, graph,
+// digests and run results below were produced by the MAIN binary at 8741333,
+// the released baseline, not by this branch. To regenerate:
+//
+//	git worktree add --detach /tmp/main-8741333 8741333
+//	cp internal/engine/testdata/main_pinned_8741333_gen.go.txt \
+//	   /tmp/main-8741333/internal/engine/zz_gen_main_fixture_test.go
+//	out=$PWD/internal/engine/testdata/main_pinned_8741333.json
+//	(cd /tmp/main-8741333 && GEN_FIXTURE_COMMIT=8741333b83d6ee6a16c295aee5033d35da7464d5 \
+//	   GEN_FIXTURE_OUT=$out go test ./internal/engine/ -run TestZZGenerateMainPinnedFixture -count=1)
+//	git worktree remove --force /tmp/main-8741333
+
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/lang/lower"
+	"github.com/Terfyn/terfyn/internal/models"
+	"github.com/Terfyn/terfyn/internal/project"
+	"github.com/Terfyn/terfyn/internal/spec"
+	"github.com/Terfyn/terfyn/internal/state"
+	"github.com/Terfyn/terfyn/internal/state/sqlite"
+	"github.com/Terfyn/terfyn/internal/tools"
+	"github.com/Terfyn/terfyn/internal/trace"
+)
+
+const genAgentSrc = `
+workflow P2(a: Anything, b: Anything) -> Anything {
+    return { value: a }
+}
+
+workflow PLit(a: Anything, b: Anything) -> Anything {
+    return { value: "lit" }
+}
+
+workflow Free() -> Anything {
+    return { value: "free" }
+}
+
+workflow PMap(a: Anything, b: Anything) -> Anything {
+    return { value: { x: a } }
+}
+
+workflow CP2(input: Anything) -> Anything {
+    p = P2(input.a, input.b)
+    return { p: p, pv: p.value }
+}
+
+workflow CLit(input: Anything) -> Anything {
+    l = PLit(input.a, input.b)
+    return { l: l, lv: l.value }
+}
+
+workflow CFree(input: Anything) -> Anything {
+    f = Free()
+    return { f: f, fv: f.value }
+}
+
+workflow CMap(input: Anything) -> Anything {
+    m = PMap(input.a, input.b)
+    return { m: m, mv: m.value }
+}
+`
+
+type genStep struct {
+	Status string `json:"status"`
+	Input  string `json:"input"`
+	Output string `json:"output"`
+}
+
+type genRun struct {
+	Status string             `json:"status"`
+	Error  string             `json:"error,omitempty"`
+	Output string             `json:"output"`
+	Steps  map[string]genStep `json:"steps,omitempty"`
+}
+
+type genFixture struct {
+	Commit   string              `json:"commit"`
+	Source   string              `json:"agentSource"`
+	Graph    *spec.ProjectGraph  `json:"graph"`
+	Programs json.RawMessage     `json:"programs"`
+	Digests  map[string]string   `json:"digests"`
+	Input    map[string]any      `json:"input"`
+	Runs     map[string]genRun   `json:"runs"`
+}
+
+func TestZZGenerateMainPinnedFixture(t *testing.T) {
+	out := os.Getenv("GEN_FIXTURE_OUT")
+	if out == "" {
+		t.Skip("GEN_FIXTURE_OUT not set")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.agent"), []byte(genAgentSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph, execs, err := project.LoadProjectWithExecutables(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if graph.Tools == nil {
+		graph.Tools = map[string]*spec.ToolResource{}
+	}
+	graph.Tools["echo"] = nativeTool("echo")
+	yaml := func(name string, steps []spec.WorkflowStep, output map[string]any) {
+		wf := &spec.WorkflowResource{
+			APIVersion: spec.APIVersionV0, Kind: spec.KindWorkflow, Metadata: spec.Metadata{Name: name},
+			Spec: spec.WorkflowSpec{Steps: steps, Output: &spec.WorkflowOutput{Value: output}},
+		}
+		graph.Workflows[name] = wf
+		prog, diags := lower.LowerWorkflowResource(wf)
+		if derr := diags.AsError(); derr != nil {
+			t.Fatal(derr)
+		}
+		execs[name] = prog
+	}
+	// YAML callee whose output.value is the envelope around a map.
+	yaml("YMap", []spec.WorkflowStep{{ID: "s", Uses: "tool.echo.echo", With: map[string]any{"msg": "${input.a}"}}},
+		map[string]any{"value": map[string]any{"x": "${input.a}", "e": "${steps.s.output.echo.msg}"}})
+	yaml("YC", []spec.WorkflowStep{{ID: "m", Workflow: "YMap", With: map[string]any{"a": "${input.a}"}}},
+		map[string]any{"got": "${steps.m.output.value}", "whole": "${steps.m.output}"})
+	// YAML consumers of the `.agent` callees.
+	yaml("YP2", []spec.WorkflowStep{{ID: "p", Workflow: "P2", With: map[string]any{"a": "${input.a}", "b": "${input.b}"}}},
+		map[string]any{"got": "${steps.p.output.value}", "whole": "${steps.p.output}"})
+	yaml("YLit", []spec.WorkflowStep{{ID: "l", Workflow: "PLit", With: map[string]any{"a": "${input.a}", "b": "${input.b}"}}},
+		map[string]any{"got": "${steps.l.output.value}", "whole": "${steps.l.output}"})
+	yaml("YFree", []spec.WorkflowStep{{ID: "f", Workflow: "Free"}},
+		map[string]any{"got": "${steps.f.output.value}", "whole": "${steps.f.output}"})
+
+	wire, err := execir.MarshalPrograms(execs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := genFixture{
+		Commit: os.Getenv("GEN_FIXTURE_COMMIT"), Source: genAgentSrc, Graph: graph, Programs: wire,
+		Digests: map[string]string{}, Input: map[string]any{"a": "A", "b": "B"}, Runs: map[string]genRun{},
+	}
+	names := make([]string, 0, len(execs))
+	for name, p := range execs {
+		fx.Digests[name] = p.Digest()
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fx.Runs[name] = genRunOne(t, graph, execs, name, fx.Input)
+	}
+	b, err := json.MarshalIndent(fx, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func genRunOne(t *testing.T, graph *spec.ProjectGraph, execs map[string]*execir.Program, wf string, input map[string]any) genRun {
+	t.Helper()
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "run.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runID := "run-" + wf
+	started := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	inJSON, _ := json.Marshal(input)
+	if err := st.StartRun(ctx, state.Run{RunID: runID, WorkflowName: wf, Env: "dev", Status: state.RunStatusRunning, StartedAt: started, InputJSON: string(inJSON)}); err != nil {
+		t.Fatal(err)
+	}
+	ex := &Executor{
+		Graph: graph, ProjectRoot: t.TempDir(), Executables: execs, PinnedGraph: true,
+		Tools: tools.NewRegistry(graph), Models: models.NewRegistry(graph),
+		Store: st, Trace: trace.NewRecorder(st), Now: func() time.Time { return started },
+	}
+	_ = ex.Run(ctx, RunInput{RunID: runID, WorkflowName: wf, Env: "dev", StartedAt: started, Input: input})
+	run, err := st.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gr := genRun{Status: run.Status, Error: run.ErrorText, Output: run.OutputJSON, Steps: map[string]genStep{}}
+	steps, err := st.ListRunStepsByRunID(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range steps {
+		gr.Steps[s.StepID] = genStep{Status: s.Status, Input: s.InputJSON, Output: s.OutputJSON}
+	}
+	return gr
+}

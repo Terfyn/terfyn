@@ -54,15 +54,19 @@ type Pos = spec.Pos
 //
 // DocumentReturn is the output-shape bit (see lower.WorkflowReturnShape): true
 // when the program's one Return is an object literal whose only key is `value`
-// and that returned object IS the output document (`.agent` `return {value: x}`
-// → `{value: x}`). Without it the shape rule reads such a program as the YAML
-// single-value envelope, because a YAML `output.value: {value: <map>}` lowers to
-// the same one object-literal Return. The `.agent` lowering (lower.LowerExec)
-// sets it in exactly that case and nowhere else; the YAML lowering never sets it.
-// Like the InvokeWorkflow bits it is part of the program's identity (digest and
-// wire form) but written only when true, so every other program keeps its digest
-// and wire bytes, and a program pinned before the bit existed keeps the shape it
-// had then.
+// and whose `value` field is itself an object literal, and that returned object
+// IS the output document (`.agent` `return {value: {k: x}}` → `{value: {k: x}}`).
+// It is the one `.agent` form whose resource output.value has the shape of the
+// YAML envelope around a map (`output.value: {value: <map>}`, which lowers to a
+// single object-literal Return), so the lowering records its shape instead of
+// leaving the shape rule to tell the two apart from the Return's structure. The
+// `.agent` lowering (lower.LowerExec) sets it in exactly that case and nowhere
+// else (a lone `return {value: x}` with any other x is the document unmarked);
+// the YAML lowering never sets it. Like the InvokeWorkflow bits it is part of the
+// program's identity (digest and wire form) but written only when true, so every
+// other program keeps its digest and wire bytes. A program pinned before the bit
+// existed is unmarked and classified by the same rule (its Return does not mirror
+// the map as YAML's does), so it gets the same shape.
 type Program struct {
 	Workflow       string
 	Params         []string

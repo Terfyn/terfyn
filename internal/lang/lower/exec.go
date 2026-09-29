@@ -40,7 +40,8 @@ func LowerExec(wd *lang.WorkflowDecl, workflows map[string]bool) (*execir.Progra
 	prog.Body = el.lowerStmts(wd.Body)
 	// A `.agent` program's output shape comes from its Return nodes alone; mark
 	// the one Return form the shape rule would otherwise read as the YAML
-	// single-value envelope (see [WorkflowReturnShape]).
+	// `{value: <map>}` envelope — a lone `return {value: {…}}` (see
+	// [WorkflowReturnShape]).
 	prog.DocumentReturn = isLoneValueObjectReturn(prog.Body)
 	return prog, el.diags
 }
