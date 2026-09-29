@@ -1,9 +1,11 @@
 package check
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/Terfyn/terfyn/internal/execir"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
 
@@ -190,5 +192,99 @@ workflow demo(input: String) -> String {
 	}
 	if _, diags := Check(parseOrFatal(t, src(`"n=${v}"`)), Options{SchemaDir: "testdata"}); diags.HasErrors() {
 		t.Fatalf("a mixed template return is a string, got %v", diagMessages(diags))
+	}
+}
+
+// forCollectionSrc is a workflow whose (parallel) for loop iterates coll; s is a
+// CodingState whose feedback field is an array of strings.
+func forCollectionSrc(coll string, parallel bool) string {
+	kw := "for"
+	if parallel {
+		kw = "parallel for"
+	}
+	return `
+agent producer {
+    model mock/default
+    instructions "return a value"
+    input String
+    output CodingState
+}
+
+agent echo {
+    model mock/default
+    instructions "echo"
+    input String
+    output String
+}
+
+workflow demo(input: String) -> String {
+    s = producer(input)
+    ` + kw + ` x in ` + coll + ` {
+        r = echo(x)
+    }
+    return input
+}
+`
+}
+
+// A for / parallel for collection is a value position: the execution IR lowers it
+// with lowerValue, so `for x in "${xs}"` iterates the binding xs. The checker must
+// resolve its tokens (graph validation never sees the collection), so an unresolved
+// token is a checker error reported exactly once rather than a validate-clean
+// program that fails at run time with `execir: unresolved reference`.
+func TestCheck_ForCollectionTemplateResolved(t *testing.T) {
+	t.Parallel()
+	for _, parallel := range []bool{false, true} {
+		name := "for"
+		if parallel {
+			name = "parallel for"
+		}
+		t.Run(name+"/unresolved", func(t *testing.T) {
+			t.Parallel()
+			_, diags := Check(parseOrFatal(t, forCollectionSrc(`"${zz}"`, parallel)), Options{SchemaDir: "testdata"})
+			n := 0
+			for _, m := range diagMessages(diags) {
+				if strings.Contains(m, `unresolved reference "zz"`) {
+					n++
+				}
+			}
+			if !diags.HasErrors() || n != 1 {
+				t.Fatalf("an unresolved collection token must be reported exactly once, got %v", diagMessages(diags))
+			}
+		})
+		t.Run(name+"/undeclared path", func(t *testing.T) {
+			t.Parallel()
+			_, diags := Check(parseOrFatal(t, forCollectionSrc(`"${s.nope}"`, parallel)), Options{SchemaDir: "testdata"})
+			if !diags.HasErrors() || !strings.Contains(strings.Join(diagMessages(diags), "\n"), `"nope" is not declared in the schema for "s"`) {
+				t.Fatalf("an undeclared collection token path must be a checker error, got %v", diagMessages(diags))
+			}
+		})
+		t.Run(name+"/resolved list", func(t *testing.T) {
+			t.Parallel()
+			prog, diags := Check(parseOrFatal(t, forCollectionSrc(`"${s.feedback}"`, parallel)), Options{SchemaDir: "testdata"})
+			if diags.HasErrors() {
+				t.Fatalf("a collection token naming a list binding must check clean, got %v", diagMessages(diags))
+			}
+			if errs := spec.ValidateProjectGraph(prog.Graph, "testdata"); errs != nil {
+				t.Fatalf("must validate, got %v", errs)
+			}
+			ex := prog.Executables["demo"]
+			if ex == nil {
+				t.Fatalf("expected execution IR for demo")
+			}
+			var loop *execir.Loop
+			for _, n := range ex.Body {
+				if l, ok := n.(*execir.Loop); ok {
+					loop = l
+				}
+			}
+			if loop == nil || loop.Parallel != parallel {
+				t.Fatalf("expected a Loop (parallel=%v), got %#v", parallel, ex.Body)
+			}
+			ref, ok := loop.Collection.(execir.Ref)
+			if !ok || !reflect.DeepEqual(ref.Path, []string{"s", "feedback"}) {
+				t.Fatalf("the collection template must lower to Ref[s feedback], got %#v", loop.Collection)
+			}
+		})
 	}
 }

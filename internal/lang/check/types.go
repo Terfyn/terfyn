@@ -316,8 +316,12 @@ func (wc *wfChecker) checkStmt(st lang.Stmt) lang.Diagnostics {
 		wc.env = joinEnv(thenEnv, elseEnv)
 		return diags
 	case *lang.ForStmt:
+		// The collection (sequential and parallel alike) is a value position: the
+		// execution IR lowers it with lowerValue, so `for x in "${xs}"` iterates the
+		// binding xs, and its tokens must resolve here (graph validation never sees
+		// s.In — the resource projection does not lower it).
 		var diags lang.Diagnostics
-		_, d := wc.checkExpr(s.In)
+		_, d := wc.checkValue(s.In)
 		diags = append(diags, d...)
 		// The loop variable is untyped — element-type inference from the
 		// collection is a follow-up; gradual typing keeps a reference to it
@@ -549,13 +553,16 @@ func (wc *wfChecker) resolveRef(r *lang.RefExpr, unresolvedFmt string) (typeRef,
 	return cur, nil
 }
 
-// checkValue types e in a VALUE position — a call argument or a field of one, an
-// approval payload entry, a return value — which is where lowering interpolates a
-// string literal's ${…} tokens (#316: lowerArg/interpolateArg for the resource
-// projection, lowerValue/stringTemplateValue for the execution IR). A string
-// literal there is typed by checkTemplate; every other expression by checkExpr. A
-// literal in any other position (a condition operand, a literal binding) is never
-// interpolated, so checkExpr keeps it an untyped literal.
+// checkValue types e in a VALUE position, which is exactly where the execution IR
+// lowers an expression with execLowerer.lowerValue and so interpolates a string
+// literal's ${…} tokens (stringTemplateValue): a call argument (agent, workflow or
+// tool, statement or binding), a field of an object literal in one of these
+// positions, an approval `with` payload entry, a return value, and a `for` /
+// `parallel for` collection. A string literal there is typed by checkTemplate;
+// every other expression by checkExpr. A literal in any other position — a
+// condition operand (if/while/retry, lowered by lowerCond), or the whole value of a
+// binding `x = "…"` or a `parallel { }` branch (lowered by lowerAssign as a plain
+// Lit) — is never interpolated, so checkExpr keeps it an untyped literal.
 func (wc *wfChecker) checkValue(e lang.Expr) (typeRef, lang.Diagnostics) {
 	if lit, ok := e.(*lang.LitExpr); ok {
 		if s, ok := lit.Value.(string); ok {
