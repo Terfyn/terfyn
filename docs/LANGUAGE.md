@@ -432,11 +432,12 @@ as data (#551, #552); the runtime never guesses it from key names or output shap
   as a YAML `with:` map is passed.
 - **Results.** A workflow's output document is `{value: <return>}` for a scalar/non-literal
   `return` and the returned object itself when every `return` is an object literal
-  (`lower.WorkflowReturnShape`). A workflow with several `return`s is classified from its
-  `return`s alone, so swapping the arms of an `if` never changes the shape; only a
-  single-`return` workflow whose output is exactly `{value: …}` keeps the envelope around an
-  object literal (a YAML `output.value: {value: <map>}`, or a `.agent` `return {value: x}`).
-  That document is the step's one runtime value: the run's output, the persisted `run_steps`
+  (`lower.WorkflowReturnShape`). A `.agent` workflow is classified from its `return`s alone,
+  so neither the order nor the number of `return`s changes the shape: `return {value: x}` is
+  the document `{value: x}` whether it is the workflow's only `return` or one arm of several.
+  The one object literal that keeps the envelope is YAML's: `output.value: {value: <map>}`
+  outputs `{value: <map>}`. (A `.agent` program pinned in a deployment snapshot before this
+  rule keeps the shape it was pinned with.) That document is the step's one runtime value: the run's output, the persisted `run_steps`
   output, and what a YAML caller reads as `${steps.<id>.output}`. A `.agent` binding
   `r = Identity(x)` is the callee's **return value**: when the callee uses the `{value: …}`
   envelope the checker sets the node's `ProjectValue` bit and the interpreter binds the `value`

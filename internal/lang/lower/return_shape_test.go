@@ -37,6 +37,9 @@ func TestWorkflowReturnShape(t *testing.T) {
 		{"object literal", []execir.Node{ret(obj("r"))}, wfOut(map[string]any{"r": "${input.r}"}), ReturnDocument},
 		{"multi-return object literals", []execir.Node{branch(ret(obj("r")), ret(obj("s")))}, wfOut(map[string]any{"s": "${input.s}"}), ReturnDocument},
 		{"mixed returns", []execir.Node{branch(ret(ref), ret(obj("s")))}, wfOut(map[string]any{"s": "${input.s}"}), ReturnValueEnvelope},
+		// Unmarked, a lone `{value: …}` object-literal Return with a `{value: …}`
+		// resource is the YAML `{value: <map>}` envelope; a `.agent` program of this
+		// form is marked DocumentReturn by LowerExec (return_shape_digest_test.go).
 		{"object literal with only a value key", []execir.Node{ret(obj("value"))}, wfOut(map[string]any{"value": "${input.value}"}), ReturnValueEnvelope},
 		// A multi-Return program is classified from its Return nodes alone: the
 		// flattened resource records only the last-lowered arm, so a `{value: …}`
@@ -49,6 +52,16 @@ func TestWorkflowReturnShape(t *testing.T) {
 		if got := WorkflowReturnShape(&execir.Program{Body: tc.body}, tc.wf); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	// DocumentReturn skips the YAML-envelope exception and nothing else: a
+	// non-object Return is still the envelope.
+	marked := &execir.Program{DocumentReturn: true, Body: []execir.Node{ret(obj("value"))}}
+	if got := WorkflowReturnShape(marked, wfOut(map[string]any{"value": "${input.value}"})); got != ReturnDocument {
+		t.Errorf("marked lone value literal: got %v, want ReturnDocument", got)
+	}
+	marked.Body = []execir.Node{ret(ref)}
+	if got := WorkflowReturnShape(marked, wfOut(valueOut)); got != ReturnValueEnvelope {
+		t.Errorf("marked scalar return: got %v, want ReturnValueEnvelope", got)
 	}
 }
 

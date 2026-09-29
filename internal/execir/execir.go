@@ -51,10 +51,23 @@ type Pos = spec.Pos
 // Program is the execution lowering of one workflow: its parameter names, the
 // ordered top-level nodes to execute, and a canonical digest that folds into the
 // workflow hash (ADR 002 §5; see [Program.Digest] and internal/plan).
+//
+// DocumentReturn is the output-shape bit (see lower.WorkflowReturnShape): true
+// when the program's one Return is an object literal whose only key is `value`
+// and that returned object IS the output document (`.agent` `return {value: x}`
+// → `{value: x}`). Without it the shape rule reads such a program as the YAML
+// single-value envelope, because a YAML `output.value: {value: <map>}` lowers to
+// the same one object-literal Return. The `.agent` lowering (lower.LowerExec)
+// sets it in exactly that case and nowhere else; the YAML lowering never sets it.
+// Like the InvokeWorkflow bits it is part of the program's identity (digest and
+// wire form) but written only when true, so every other program keeps its digest
+// and wire bytes, and a program pinned before the bit existed keeps the shape it
+// had then.
 type Program struct {
-	Workflow string
-	Params   []string
-	Body     []Node
+	Workflow       string
+	Params         []string
+	Body           []Node
+	DocumentReturn bool
 }
 
 // Node is one execution-IR construct.

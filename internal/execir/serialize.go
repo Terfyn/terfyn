@@ -28,9 +28,10 @@ func MarshalPrograms(programs map[string]*Program) ([]byte, error) {
 			return nil, fmt.Errorf("execir: encode program %q: %w", name, err)
 		}
 		w.Programs[name] = programWire{
-			Workflow: p.Workflow,
-			Params:   p.Params,
-			Body:     body,
+			Workflow:       p.Workflow,
+			Params:         p.Params,
+			Body:           body,
+			DocumentReturn: p.DocumentReturn,
 		}
 	}
 	return json.Marshal(w)
@@ -52,7 +53,7 @@ func UnmarshalPrograms(payload []byte) (map[string]*Program, error) {
 		if err != nil {
 			return nil, fmt.Errorf("execir: program %q: %w", name, err)
 		}
-		out[name] = &Program{Workflow: pw.Workflow, Params: pw.Params, Body: body}
+		out[name] = &Program{Workflow: pw.Workflow, Params: pw.Params, Body: body, DocumentReturn: pw.DocumentReturn}
 	}
 	return out, nil
 }
@@ -68,6 +69,10 @@ type programWire struct {
 	Workflow string     `json:"workflow"`
 	Params   []string   `json:"params,omitempty"`
 	Body     []nodeWire `json:"body,omitempty"`
+	// DocumentReturn is Program.DocumentReturn; omitted when false so every
+	// program without it (all YAML programs, every pre-existing pinned program)
+	// serializes to the same bytes as before the bit existed.
+	DocumentReturn bool `json:"documentReturn,omitempty"`
 }
 
 // nodeWire is a flat tagged union: Kind selects which fields are meaningful.

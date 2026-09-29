@@ -690,8 +690,12 @@ workflow VaultMain(input: Anything) -> Anything policy gate {
 // recorded last. A and B are the same logic with the arms swapped — one arm
 // returns `{r: …}`, the other a `{value: …}`-only literal — and the taken arm is
 // the `{r: …}` one in both, so the root output and the nested run_steps output
-// are identical (review #578 finding 2; WorkflowReturnShape consults the
-// resource only for a single-Return program).
+// are identical (review #578 finding 2).
+//
+// Nor may it depend on how many `return`s there are (review #578 round 3): V1 (a
+// lone `return {value: b}`), V3 (the same return inside an if with no else) and V2
+// (two `{value: …}` arms) all output the returned object `{"value":"B"}` — root
+// and nested run_steps — and a `.agent` caller binds that same document.
 func TestExecIR_multiReturnShapeIndependentOfArmOrder(t *testing.T) {
 	t.Parallel()
 	root := writeAgentProject(t, `
@@ -720,6 +724,39 @@ workflow CallB(input: Anything) -> Anything {
     p = B(input)
     return { nested: p }
 }
+
+workflow V1(input: Anything) -> Anything {
+    return { value: input.b }
+}
+
+workflow V2(input: Anything) -> Anything {
+    if input.flag {
+        return { value: input.a }
+    } else {
+        return { value: input.b }
+    }
+}
+
+workflow V3(input: Anything) -> Anything {
+    if input.flag {
+        return { value: input.b }
+    }
+}
+
+workflow CV1(input: Anything) -> Anything {
+    p = V1(input)
+    return { nested: p, inner: p.value }
+}
+
+workflow CV2(input: Anything) -> Anything {
+    p = V2(input)
+    return { nested: p, inner: p.value }
+}
+
+workflow CV3(input: Anything) -> Anything {
+    p = V3(input)
+    return { nested: p, inner: p.value }
+}
 `)
 	const want = `{"r":"A"}`
 	for _, tc := range []struct {
@@ -745,6 +782,27 @@ workflow CallB(input: Anything) -> Anything {
 		_, _, run := runAgentWorkflow(t, root, callee, map[string]any{"flag": flag, "a": "A", "b": "B"})
 		if got, want := run.OutputJSON, `{"value":"B"}`; got != want {
 			t.Errorf("root %s value arm output %s, want %s", callee, got, want)
+		}
+	}
+	// Arm count: V1, V2 (flag=false) and V3 (flag=true) take a `{value: input.b}`
+	// return, so all three output that object — not V1/V3 {"value":{"value":"B"}}.
+	for _, tc := range []struct {
+		callee, caller string
+		flag           bool
+	}{{"V1", "CV1", false}, {"V2", "CV2", false}, {"V3", "CV3", true}} {
+		const want = `{"value":"B"}`
+		in := map[string]any{"flag": tc.flag, "a": "A", "b": "B"}
+		_, _, run := runAgentWorkflow(t, root, tc.callee, in)
+		if run.OutputJSON != want {
+			t.Errorf("root %s output %s, want %s", tc.callee, run.OutputJSON, want)
+		}
+		st, runID, run := runAgentWorkflow(t, root, tc.caller, in)
+		if got := jsonOf(t, subworkflowStepOutput(t, st, runID, "p")); got != want {
+			t.Errorf("%s: run_steps p output %s, want %s", tc.caller, got, want)
+		}
+		// The `.agent` binding is unchanged: p is {value: "B"}, as before.
+		if got, wantOut := run.OutputJSON, `{"inner":"B","nested":`+want+`}`; got != wantOut {
+			t.Errorf("%s output %s, want %s", tc.caller, got, wantOut)
 		}
 	}
 }
