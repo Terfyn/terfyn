@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **Native `issues.list` and `pull_request.list` no longer return only GitHub's first page** (issue #559): both operations now request `per_page=100` and follow `Link: rel="next"` up to 10 pages (the same bound as `githubFindAgenticReviewCommentID`). An empty terminal page ends the walk. Hitting the page cap with a remaining next link sets `truncated: true` so a partial list is not presented as complete.
+- **Native `issues.list` and `pull_request.list` no longer return only GitHub's first page** (issue #559): both operations now request `per_page=100` and follow `Link: rel="next"` up to 10 pages (the same bound as `githubFindAgenticReviewCommentID`). An empty terminal page ends the walk. Hitting the page cap with a remaining next link sets `truncated: true` so a partial list is not presented as complete. Only same-origin next links are followed (exact scheme, host, and port with default-port normalization, no userinfo, under the `GITHUB_API_URL` base path), so the bearer token is never sent over a downgraded scheme or to another host; a `rel="next"` link that is present but unfollowable or malformed fails the operation with an error instead of returning the first page as complete.
 
 - **`terfyn logs` table output no longer cuts JSON in the middle of a UTF-8 rune** (issue #558): `clipJSONForTable` sliced by raw bytes, so a CJK or emoji payload that landed on a multibyte boundary produced invalid UTF-8 in the table cell. Clipping now walks back to a rune start and keeps the existing byte budget, matching `clipString` in state. Tests cover 2-, 3-, and 4-byte runes plus an emoji run that previously overflowed a 96-byte cap.
 

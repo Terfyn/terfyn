@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestGithubPullRequestGet_happyPath(t *testing.T) {
@@ -690,21 +693,250 @@ func TestGithubGETArrayStopsAtMaxPages(t *testing.T) {
 }
 
 func TestParseGitHubLinkNext(t *testing.T) {
-	got := parseGitHubLinkNext(`<https://api.github.com/repos/o/r/issues?page=2>; rel="next", <https://api.github.com/repos/o/r/issues?page=4>; rel="last"`)
-	if got != "https://api.github.com/repos/o/r/issues?page=2" {
-		t.Fatalf("next = %q", got)
+	got, present := parseGitHubLinkNext(`<https://api.github.com/repos/o/r/issues?page=2>; rel="next", <https://api.github.com/repos/o/r/issues?page=4>; rel="last"`)
+	if !present || got != "https://api.github.com/repos/o/r/issues?page=2" {
+		t.Fatalf("next = %q present=%v", got, present)
 	}
-	if parseGitHubLinkNext(`<https://api.github.com/repos/o/r/issues?page=4>; rel="last"`) != "" {
-		t.Fatal("expected empty without rel=next")
+	if got, present := parseGitHubLinkNext(`<https://api.github.com/repos/o/r/issues?page=4>; rel="last"`); present || got != "" {
+		t.Fatalf("expected no next without rel=next, got %q present=%v", got, present)
+	}
+	if _, present := parseGitHubLinkNext(""); present {
+		t.Fatal("empty header must not report a next link")
+	}
+	// A comma inside <...> must not split the entry.
+	if got, present := parseGitHubLinkNext(`<https://api.github.com/x?labels=a,b&page=2>; rel="next"`); !present || got != "https://api.github.com/x?labels=a,b&page=2" {
+		t.Fatalf("comma in target: %q present=%v", got, present)
+	}
+	// rel may be a list of relation types.
+	if _, present := parseGitHubLinkNext(`<https://api.github.com/x?page=2>; rel="next last"`); !present {
+		t.Fatal("rel list containing next not detected")
+	}
+	// Malformed entries that name rel=next are present-but-unusable, not absent.
+	for _, bad := range []string{
+		`https://api.github.com/x?page=2; rel="next"`,
+		`<https://api.github.com/x?page=2; rel="next"`,
+		`<>; rel="next"`,
+		`rel="next"`,
+	} {
+		got, present := parseGitHubLinkNext(bad)
+		if !present || got != "" {
+			t.Fatalf("%q: got %q present=%v, want present with empty target", bad, got, present)
+		}
 	}
 }
 
-func TestGithubAllowFollowRejectsForeignHost(t *testing.T) {
-	t.Setenv("GITHUB_API_URL", "https://api.github.com")
-	if _, ok := githubAllowFollow("https://evil.example/repos/o/r/issues?page=2"); ok {
-		t.Fatal("followed foreign host")
+func TestGithubFollowNext(t *testing.T) {
+	const cur = "https://ghe.example.com/api/v3/repos/o/r/issues?per_page=100"
+	t.Setenv("GITHUB_API_URL", "https://ghe.example.com/api/v3/")
+	tests := []struct {
+		name  string
+		link  []string
+		state githubNextState
+		want  string
+	}{
+		{"no link", nil, githubNextNone, ""},
+		{"only last", []string{`<https://ghe.example.com/api/v3/x?page=9>; rel="last"`}, githubNextNone, ""},
+		{"same origin", []string{`<https://ghe.example.com/api/v3/repos/o/r/issues?page=2>; rel="next"`}, githubNextFollow, "https://ghe.example.com/api/v3/repos/o/r/issues?page=2"},
+		{"explicit default port", []string{`<https://ghe.example.com:443/api/v3/repos/o/r/issues?page=2>; rel="next"`}, githubNextFollow, "https://ghe.example.com:443/api/v3/repos/o/r/issues?page=2"},
+		{"host case", []string{`<https://GHE.Example.com/api/v3/repos/o/r/issues?page=2>; rel="next"`}, githubNextFollow, "https://GHE.Example.com/api/v3/repos/o/r/issues?page=2"},
+		{"relative under base", []string{`</api/v3/repos/o/r/issues?page=2>; rel="next"`}, githubNextFollow, "https://ghe.example.com/api/v3/repos/o/r/issues?page=2"},
+		{"multiple header lines", []string{`<https://ghe.example.com/api/v3/y>; rel="prev"`, `<https://ghe.example.com/api/v3/z>; rel="next"`}, githubNextFollow, "https://ghe.example.com/api/v3/z"},
+		{"scheme downgrade", []string{`<http://ghe.example.com/api/v3/repos/o/r/issues?page=2>; rel="next"`}, githubNextRejected, ""},
+		{"other host", []string{`<https://evil.example/api/v3/repos/o/r/issues?page=2>; rel="next"`}, githubNextRejected, ""},
+		{"host suffix trick", []string{`<https://ghe.example.com.evil.example/api/v3/x>; rel="next"`}, githubNextRejected, ""},
+		{"other port", []string{`<https://ghe.example.com:8443/api/v3/x>; rel="next"`}, githubNextRejected, ""},
+		{"userinfo", []string{`<https://user:pw@ghe.example.com/api/v3/x>; rel="next"`}, githubNextRejected, ""},
+		{"scheme-relative foreign host", []string{`<//evil.example/api/v3/x>; rel="next"`}, githubNextRejected, ""},
+		{"path outside base", []string{`<https://ghe.example.com/other/x>; rel="next"`}, githubNextRejected, ""},
+		{"path prefix lookalike", []string{`<https://ghe.example.com/api/v3evil/x>; rel="next"`}, githubNextRejected, ""},
+		{"dot segments", []string{`<https://ghe.example.com/api/v3/../../x>; rel="next"`}, githubNextRejected, ""},
+		{"non-http scheme", []string{`<ftp://ghe.example.com/api/v3/x>; rel="next"`}, githubNextRejected, ""},
+		{"malformed next", []string{`https://ghe.example.com/api/v3/x; rel="next"`}, githubNextRejected, ""},
+		{"empty target", []string{`<>; rel="next"`}, githubNextRejected, ""},
 	}
-	if got, ok := githubAllowFollow("/repos/o/r/issues?page=2"); !ok || got != "/repos/o/r/issues?page=2" {
-		t.Fatalf("path follow = %q ok=%v", got, ok)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, state, reason := githubFollowNext(cur, tc.link)
+			if state != tc.state {
+				t.Fatalf("state = %v (reason %q), want %v", state, reason, tc.state)
+			}
+			if got != tc.want {
+				t.Fatalf("next = %q, want %q", got, tc.want)
+			}
+			if state == githubNextRejected && reason == "" {
+				t.Fatal("rejected without a reason")
+			}
+			if strings.Contains(reason, "pw") {
+				t.Fatalf("reason leaks credentials: %q", reason)
+			}
+		})
+	}
+}
+
+func TestGithubFollowNextDefaultPortNormalization(t *testing.T) {
+	t.Setenv("GITHUB_API_URL", "http://ghe.example.com:80")
+	if _, st, r := githubFollowNext("http://ghe.example.com:80/repos/o/r/issues", []string{`<http://ghe.example.com/repos/o/r/issues?page=2>; rel="next"`}); st != githubNextFollow {
+		t.Fatalf("http :80 vs implicit port: state %v (%s)", st, r)
+	}
+	if _, st, _ := githubFollowNext("http://ghe.example.com:80/repos/o/r/issues", []string{`<https://ghe.example.com/repos/o/r/issues?page=2>; rel="next"`}); st != githubNextRejected {
+		t.Fatalf("http base must not accept https link: state %v", st)
+	}
+	t.Setenv("GITHUB_API_URL", "")
+	if _, st, r := githubFollowNext("https://api.github.com/repos/o/r/issues", []string{`<https://api.github.com/repos/o/r/issues?page=2>; rel="next"`}); st != githubNextFollow {
+		t.Fatalf("default base: state %v (%s)", st, r)
+	}
+}
+
+// recordedReq captures what a test server saw, so tests can prove where the token went.
+type recordedReq struct{ path, auth string }
+
+func TestGithubGETArrayRejectedNextFailsAndNeverSendsToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret-token")
+
+	type linkFn func(apiURL string, other *httptest.Server) string
+	tests := []struct {
+		name string
+		link linkFn
+	}{
+		{"different host", func(_ string, other *httptest.Server) string {
+			return fmt.Sprintf(`<%s/repos/o/r/issues?page=2>; rel="next"`, other.URL)
+		}},
+		{"malformed next", func(api string, _ *httptest.Server) string {
+			return fmt.Sprintf(`%s/repos/o/r/issues?page=2; rel="next"`, api)
+		}},
+		{"different port same host", func(api string, _ *httptest.Server) string {
+			u, _ := url.Parse(api)
+			return fmt.Sprintf(`<http://%s:1/repos/o/r/issues?page=2>; rel="next"`, u.Hostname())
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var otherReqs []recordedReq
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				otherReqs = append(otherReqs, recordedReq{r.URL.Path, r.Header.Get("Authorization")})
+				mu.Unlock()
+				_, _ = w.Write([]byte(`[{"number":99}]`))
+			}))
+			t.Cleanup(other.Close)
+			var api *httptest.Server
+			api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Link", tc.link(api.URL, other))
+				_, _ = w.Write([]byte(`[{"number":1}]`))
+			}))
+			t.Cleanup(api.Close)
+			t.Setenv("GITHUB_API_URL", api.URL)
+
+			arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+			if err == nil {
+				t.Fatalf("want error for unfollowable next link, got %d items truncated=%v", len(arr), truncated)
+			}
+			if arr != nil {
+				t.Fatalf("partial list returned alongside error: %v", arr)
+			}
+			if !strings.Contains(err.Error(), "next page") || strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("unexpected error text: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(otherReqs) != 0 {
+				t.Fatalf("request reached foreign server: %+v", otherReqs)
+			}
+		})
+	}
+}
+
+func TestGithubGETArrayHTTPSDowngradeNextIsRejectedWithoutToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret-token")
+	var mu sync.Mutex
+	var plain []recordedReq
+	// The downgrade target: a plain-HTTP listener. It shares a hostname (127.0.0.1) with
+	// the HTTPS API server but not a scheme or port.
+	plainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		plain = append(plain, recordedReq{r.URL.Path, r.Header.Get("Authorization")})
+		mu.Unlock()
+		_, _ = w.Write([]byte(`[{"number":2}]`))
+	}))
+	t.Cleanup(plainSrv.Close)
+
+	var tlsAuth []string
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		tlsAuth = append(tlsAuth, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?page=2>; rel="next"`, plainSrv.URL))
+		_, _ = w.Write([]byte(`[{"number":1}]`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+	t.Setenv("GITHUB_API_URL", tlsSrv.URL)
+
+	// Trust the test server's certificate for this client only.
+	orig := defaultGitHubHTTPClient
+	defaultGitHubHTTPClient = func() *http.Client {
+		c := tlsSrv.Client()
+		c.Timeout = 10 * time.Second
+		return c
+	}
+	t.Cleanup(func() { defaultGitHubHTTPClient = orig })
+
+	_, _, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	if err == nil {
+		t.Fatal("want error for https -> http next link on the same host")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(plain) != 0 {
+		t.Fatalf("downgraded request was sent (token exposure): %+v", plain)
+	}
+	if len(tlsAuth) != 1 || tlsAuth[0] != "Bearer secret-token" {
+		t.Fatalf("API server saw auth headers %v, want exactly one bearer request", tlsAuth)
+	}
+}
+
+func TestGithubGETArrayNoNextLinkIsComplete(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// rel="last"/"prev" only: no continuation.
+		w.Header().Set("Link", `<http://elsewhere.invalid/x?page=1>; rel="prev", <http://elsewhere.invalid/x?page=1>; rel="last"`)
+		_, _ = w.Write([]byte(`[{"number":1},{"number":2}]`))
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	if err != nil || truncated || len(arr) != 2 {
+		t.Fatalf("arr=%d truncated=%v err=%v, want complete 2 items", len(arr), truncated, err)
+	}
+}
+
+func TestGithubGETArrayFollowsSameOriginNextWithToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret-token")
+	var mu sync.Mutex
+	var auths []string
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"number":2}]`))
+			return
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?page=2>; rel="next"`, api.URL))
+		_, _ = w.Write([]byte(`[{"number":1}]`))
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	if err != nil || truncated || len(arr) != 2 {
+		t.Fatalf("arr=%d truncated=%v err=%v, want 2 items complete", len(arr), truncated, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auths) != 2 || auths[0] != "Bearer secret-token" || auths[1] != "Bearer secret-token" {
+		t.Fatalf("auth headers = %v", auths)
 	}
 }

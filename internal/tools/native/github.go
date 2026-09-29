@@ -124,7 +124,9 @@ func githubPOSTJSON(ctx context.Context, path string, payload any, maxResp int64
 	return githubJSONRequest(ctx, http.MethodPost, path, payload, maxResp)
 }
 
-func defaultGitHubHTTPClient() *http.Client {
+// defaultGitHubHTTPClient builds the client for GitHub API calls. It is a variable
+// only so tests can inject a client that trusts an httptest TLS server.
+var defaultGitHubHTTPClient = func() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
 }
 
