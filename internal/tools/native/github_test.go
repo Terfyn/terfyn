@@ -2,6 +2,7 @@ package native
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,8 +10,10 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
+
+	"github.com/Terfyn/terfyn/internal/spec"
 )
 
 func TestGithubPullRequestGet_happyPath(t *testing.T) {
@@ -607,8 +610,8 @@ func TestIssuesListFollowsPagination(t *testing.T) {
 	if issues := got["issues"].([]any); len(issues) != 2 {
 		t.Fatalf("issues.list returned %d item(s), want both pages", len(issues))
 	}
-	if _, ok := got["truncated"]; ok {
-		t.Fatalf("truncated set on a complete two-page list: %#v", got)
+	if got["truncated"] != false {
+		t.Fatalf("truncated must be false on a complete two-page list: %#v", got)
 	}
 }
 
@@ -652,7 +655,7 @@ func TestGithubGETArrayEmptyTerminalPage(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 	t.Setenv("GITHUB_API_URL", srv.URL)
 
-	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +680,7 @@ func TestGithubGETArrayStopsAtMaxPages(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 	t.Setenv("GITHUB_API_URL", srv.URL)
 
-	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -760,8 +763,8 @@ func TestGithubFollowNext(t *testing.T) {
 			if state != tc.state {
 				t.Fatalf("state = %v (reason %q), want %v", state, reason, tc.state)
 			}
-			if got != tc.want {
-				t.Fatalf("next = %q, want %q", got, tc.want)
+			if got.String() != tc.want {
+				t.Fatalf("next = %q, want %q", got.String(), tc.want)
 			}
 			if state == githubNextRejected && reason == "" {
 				t.Fatal("rejected without a reason")
@@ -828,7 +831,7 @@ func TestGithubGETArrayRejectedNextFailsAndNeverSendsToken(t *testing.T) {
 			t.Cleanup(api.Close)
 			t.Setenv("GITHUB_API_URL", api.URL)
 
-			arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+			arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
 			if err == nil {
 				t.Fatalf("want error for unfollowable next link, got %d items truncated=%v", len(arr), truncated)
 			}
@@ -875,13 +878,11 @@ func TestGithubGETArrayHTTPSDowngradeNextIsRejectedWithoutToken(t *testing.T) {
 	// Trust the test server's certificate for this client only.
 	orig := defaultGitHubHTTPClient
 	defaultGitHubHTTPClient = func() *http.Client {
-		c := tlsSrv.Client()
-		c.Timeout = 10 * time.Second
-		return c
+		return newGitHubHTTPClient(tlsSrv.Client().Transport)
 	}
 	t.Cleanup(func() { defaultGitHubHTTPClient = orig })
 
-	_, _, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	_, _, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
 	if err == nil {
 		t.Fatal("want error for https -> http next link on the same host")
 	}
@@ -905,7 +906,7 @@ func TestGithubGETArrayNoNextLinkIsComplete(t *testing.T) {
 	t.Cleanup(api.Close)
 	t.Setenv("GITHUB_API_URL", api.URL)
 
-	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
 	if err != nil || truncated || len(arr) != 2 {
 		t.Fatalf("arr=%d truncated=%v err=%v, want complete 2 items", len(arr), truncated, err)
 	}
@@ -930,7 +931,7 @@ func TestGithubGETArrayFollowsSameOriginNextWithToken(t *testing.T) {
 	t.Cleanup(api.Close)
 	t.Setenv("GITHUB_API_URL", api.URL)
 
-	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list")
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
 	if err != nil || truncated || len(arr) != 2 {
 		t.Fatalf("arr=%d truncated=%v err=%v, want 2 items complete", len(arr), truncated, err)
 	}
@@ -938,5 +939,420 @@ func TestGithubGETArrayFollowsSameOriginNextWithToken(t *testing.T) {
 	defer mu.Unlock()
 	if len(auths) != 2 || auths[0] != "Bearer secret-token" || auths[1] != "Bearer secret-token" {
 		t.Fatalf("auth headers = %v", auths)
+	}
+}
+
+// fakeGitHubIssue returns an object shaped like a real GitHub REST issue (URL fields,
+// a user object, labels, reactions) with a body of bodyLen bytes, so size-sensitive
+// tests see payloads close to what GitHub actually sends (a few KB to ~15 KB each).
+func fakeGitHubIssue(number, bodyLen int) map[string]any {
+	api := "https://api.github.com/repos/o/r/issues/" + fmt.Sprint(number)
+	user := map[string]any{
+		"login": "someone", "id": 12345, "node_id": "MDQ6VXNlcjEyMzQ1", "type": "User", "site_admin": false,
+		"avatar_url": "https://avatars.githubusercontent.com/u/12345?v=4", "gravatar_id": "",
+		"url": "https://api.github.com/users/someone", "html_url": "https://github.com/someone",
+		"followers_url":       "https://api.github.com/users/someone/followers",
+		"following_url":       "https://api.github.com/users/someone/following{/other_user}",
+		"gists_url":           "https://api.github.com/users/someone/gists{/gist_id}",
+		"starred_url":         "https://api.github.com/users/someone/starred{/owner}{/repo}",
+		"subscriptions_url":   "https://api.github.com/users/someone/subscriptions",
+		"organizations_url":   "https://api.github.com/users/someone/orgs",
+		"repos_url":           "https://api.github.com/users/someone/repos",
+		"events_url":          "https://api.github.com/users/someone/events{/privacy}",
+		"received_events_url": "https://api.github.com/users/someone/received_events",
+	}
+	label := map[string]any{
+		"id": 1, "node_id": "MDU6TGFiZWwx", "name": "NeedsInvestigation", "color": "ededed", "default": false,
+		"url": "https://api.github.com/repos/o/r/labels/NeedsInvestigation", "description": "Someone must examine and confirm this is a valid issue",
+	}
+	return map[string]any{
+		"url": api, "repository_url": "https://api.github.com/repos/o/r",
+		"labels_url": api + "/labels{/name}", "comments_url": api + "/comments", "events_url": api + "/events",
+		"html_url": "https://github.com/o/r/issues/" + fmt.Sprint(number), "id": 1000000 + number,
+		"node_id": "I_kwDOAWBuf86" + fmt.Sprint(number), "number": number,
+		"title": fmt.Sprintf("issue %d: something is broken in a moderately long title", number),
+		"user":  user, "labels": []any{label, label}, "state": "open", "locked": false,
+		"assignee": nil, "assignees": []any{}, "milestone": nil, "comments": 3,
+		"created_at": "2026-09-01T12:00:00Z", "updated_at": "2026-09-02T12:00:00Z", "closed_at": nil,
+		"author_association": "CONTRIBUTOR", "active_lock_reason": nil,
+		"body":         strings.Repeat("lorem ipsum <dolor> & sit amet, ", bodyLen/32+1)[:bodyLen],
+		"reactions":    map[string]any{"url": api + "/reactions", "total_count": 0, "+1": 0, "-1": 0, "laugh": 0, "hooray": 0, "confused": 0, "heart": 0, "rocket": 0, "eyes": 0},
+		"timeline_url": api + "/timeline", "performed_via_github_app": nil, "state_reason": nil,
+	}
+}
+
+// fakeIssueBodyLen cycles issue bodies through 3-15 KB.
+func fakeIssueBodyLen(number int) int { return 3000 + (number*1237)%12000 }
+
+func TestIssuesListStopsAtByteBudgetWithRealisticItems(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var requests atomic.Int32
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			_, _ = fmt.Sscan(p, &page)
+		}
+		items := make([]any, 0, githubListPerPage)
+		for i := 0; i < githubListPerPage; i++ {
+			n := (page-1)*githubListPerPage + i + 1
+			items = append(items, fakeGitHubIssue(n, fakeIssueBodyLen(n)))
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?per_page=100&page=%d>; rel="next"`, api.URL, page+1))
+		_ = json.NewEncoder(w).Encode(items)
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "issues.list", map[string]any{"owner": "o", "repo": "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["truncated"] != true {
+		t.Fatalf("truncated = %v, want true when the byte budget stops the walk", out["truncated"])
+	}
+	issues := out["issues"].([]any)
+	if len(issues) == 0 || len(issues) >= githubListPerPage {
+		t.Fatalf("got %d issues, want a non-empty prefix of the first page", len(issues))
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("made %d requests, want 1 (budget reached within the first page)", got)
+	}
+	itemsBytes := 0
+	for i, it := range issues {
+		m := it.(map[string]any)
+		n := i + 1
+		if int(m["number"].(float64)) != n {
+			t.Fatalf("item %d is issue %v, want GitHub order preserved", i, m["number"])
+		}
+		if len(m["body"].(string)) != fakeIssueBodyLen(n) {
+			t.Fatalf("issue %d body cut to %d bytes, want whole items", n, len(m["body"].(string)))
+		}
+		b, _ := json.Marshal(it)
+		itemsBytes += len(b) + 1
+	}
+	// The budget is filled: the next whole item would not have fit.
+	nextB, _ := json.Marshal(fakeGitHubIssue(len(issues)+1, fakeIssueBodyLen(len(issues)+1)))
+	if itemsBytes+len(nextB) <= githubListMaxOutputBytes {
+		t.Fatalf("stopped at %d bytes although the next %d-byte item fit in %d", itemsBytes, len(nextB), githubListMaxOutputBytes)
+	}
+	total, _ := json.Marshal(out)
+	if len(total) > spec.DefaultMaxToolOutputBytes {
+		t.Fatalf("result is %d bytes, over the default tool-output limit %d", len(total), spec.DefaultMaxToolOutputBytes)
+	}
+}
+
+func TestIssuesListKeepsOversizedFirstItem(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]any{
+			fakeGitHubIssue(1, githubListMaxOutputBytes+1),
+			fakeGitHubIssue(2, 100),
+		})
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	arr, truncated, err := githubGETArray(context.Background(), "/repos/o/r/issues", "issues.list", githubListMaxLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 || !truncated {
+		t.Fatalf("got %d items truncated=%v, want the oversized first item alone and truncated", len(arr), truncated)
+	}
+}
+
+func TestIssuesListLimit(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	tests := []struct {
+		name          string
+		limit         any
+		total         int // items the repository has
+		wantPerPage   string
+		wantItems     int
+		wantTruncated bool
+		wantRequests  int32
+	}{
+		{"small limit, more remain", float64(3), 250, "3", 3, true, 1},
+		{"limit across pages", 150, 250, "100", 150, true, 2},
+		{"limit equals total", "5", 5, "5", 5, false, 1},
+		{"limit above total", 40, 7, "40", 7, false, 1},
+		{"limit at page boundary, more remain", 100, 250, "100", 100, true, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			var api *httptest.Server
+			api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if got := r.URL.Query().Get("per_page"); got != tc.wantPerPage {
+					t.Errorf("per_page = %q, want %q", got, tc.wantPerPage)
+				}
+				var per, page int
+				_, _ = fmt.Sscan(r.URL.Query().Get("per_page"), &per)
+				page = 1
+				if p := r.URL.Query().Get("page"); p != "" {
+					_, _ = fmt.Sscan(p, &page)
+				}
+				start := (page - 1) * per
+				end := min(start+per, tc.total)
+				items := []any{}
+				for n := start + 1; n <= end; n++ {
+					items = append(items, map[string]any{"number": n})
+				}
+				if end < tc.total {
+					w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?per_page=%d&page=%d>; rel="next"`, api.URL, per, page+1))
+				}
+				_ = json.NewEncoder(w).Encode(items)
+			}))
+			t.Cleanup(api.Close)
+			t.Setenv("GITHUB_API_URL", api.URL)
+
+			out, _, err := NewRegistry().Dispatch(context.Background(), "issues.list", map[string]any{"owner": "o", "repo": "r", "limit": tc.limit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := len(out["issues"].([]any)); n != tc.wantItems {
+				t.Fatalf("got %d issues, want %d", n, tc.wantItems)
+			}
+			if out["truncated"] != tc.wantTruncated {
+				t.Fatalf("truncated = %v, want %v", out["truncated"], tc.wantTruncated)
+			}
+			if got := requests.Load(); got != tc.wantRequests {
+				t.Fatalf("made %d requests, want %d", got, tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestListLimitValidation(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("GITHUB_API_URL", "http://127.0.0.1:1") // never reached
+	for _, op := range []string{"issues.list", "pull_request.list"} {
+		for _, bad := range []any{0, -1, githubListMaxLimit + 1, 2.5, "many", true} {
+			_, _, err := NewRegistry().Dispatch(context.Background(), op, map[string]any{"owner": "o", "repo": "r", "limit": bad})
+			if err == nil || !strings.Contains(err.Error(), "limit") {
+				t.Fatalf("%s limit=%v: err = %v, want a limit validation error", op, bad, err)
+			}
+		}
+	}
+}
+
+func TestListSchemasDeclareLimit(t *testing.T) {
+	for _, op := range []string{"issues.list", "pull_request.list"} {
+		raw, ok := OperationInputSchema(op)
+		if !ok {
+			t.Fatalf("%s: no input schema", op)
+		}
+		var sc struct {
+			Properties map[string]struct {
+				Type    string `json:"type"`
+				Minimum *int   `json:"minimum"`
+				Maximum *int   `json:"maximum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &sc); err != nil {
+			t.Fatal(err)
+		}
+		l, ok := sc.Properties["limit"]
+		if !ok || l.Type != "integer" || l.Minimum == nil || *l.Minimum != 1 || l.Maximum == nil || *l.Maximum != githubListMaxLimit {
+			t.Fatalf("%s: limit schema = %+v, want integer in [1, %d]", op, l, githubListMaxLimit)
+		}
+		args, _ := TopLevelArgsForOperation(op)
+		if !containsString(args, "limit") {
+			t.Fatalf("%s: catalog args %v missing limit", op, args)
+		}
+	}
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFindAgenticReviewCommentFollowsLinkCursor(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var posted, patched bool
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/9/comments":
+			if r.URL.Query().Get("after") == "cur1" {
+				_, _ = w.Write([]byte(`[{"id":77,"body":"old ` + AgenticReviewMarker + `"}]`))
+				return
+			}
+			// A short first page with a cursor next link: the old page=N / len<per_page
+			// loop stopped here and created a duplicate.
+			w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues/9/comments?per_page=100&after=cur1>; rel="next"`, api.URL))
+			_, _ = w.Write([]byte(`[{"id":1,"body":"unrelated"}]`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/o/r/issues/comments/77":
+			patched = true
+			_, _ = w.Write([]byte(`{"id":77}`))
+		case r.Method == http.MethodPost:
+			posted = true
+			_, _ = w.Write([]byte(`{"id":78}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "pull_request.post_comment", map[string]any{
+		"owner": "o", "repo": "r", "number": "9", "body": "new review",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !patched || posted || out["updated"] != true {
+		t.Fatalf("patched=%v posted=%v updated=%v, want the page-2 marker comment updated", patched, posted, out["updated"])
+	}
+}
+
+func TestFindAgenticReviewCommentCapIsErrorNotDuplicate(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var gets atomic.Int32
+	var posted atomic.Bool
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted.Store(true)
+			_, _ = w.Write([]byte(`{"id":1}`))
+			return
+		}
+		n := gets.Add(1)
+		comments := make([]any, githubListPerPage)
+		for i := range comments {
+			comments[i] = map[string]any{"id": int(n)*1000 + i, "body": "chatter"}
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues/4/comments?per_page=100&page=%d>; rel="next"`, api.URL, n+1))
+		_ = json.NewEncoder(w).Encode(comments)
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	_, _, err := NewRegistry().Dispatch(context.Background(), "pull_request.post_comment", map[string]any{
+		"owner": "o", "repo": "r", "number": "4", "body": "review",
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("err = %v, want a refusal when the marker search hits the page cap", err)
+	}
+	if posted.Load() {
+		t.Fatal("posted a new comment although earlier comments were never searched")
+	}
+	if got := gets.Load(); got != githubListMaxPages {
+		t.Fatalf("fetched %d comment pages, want %d", got, githubListMaxPages)
+	}
+}
+
+func TestFindAgenticReviewCommentEndOfListCreates(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var posted bool
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+			_, _ = w.Write([]byte(`{"id":5}`))
+			return
+		}
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"id":2,"body":"b"}]`))
+			return
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues/4/comments?page=2>; rel="next"`, api.URL))
+		_, _ = w.Write([]byte(`[{"id":1,"body":"a"}]`))
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "pull_request.post_comment", map[string]any{
+		"owner": "o", "repo": "r", "number": "4", "body": "review",
+	})
+	if err != nil || !posted || out["created"] != true {
+		t.Fatalf("err=%v posted=%v created=%v, want a new comment once the list truly ends", err, posted, out["created"])
+	}
+}
+
+func TestGithubRequestIsPathOnly(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret-token")
+	var hits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(other.Close)
+	t.Setenv("GITHUB_API_URL", "http://127.0.0.1:1")
+	u, _ := url.Parse(other.URL)
+	for _, p := range []string{other.URL + "/repos/o/r", "@" + u.Host + "/repos/o/r", "repos/o/r"} {
+		if _, err := githubGET(context.Background(), p, githubAcceptJSON, maxGitHubJSONBody); err == nil || !strings.Contains(err.Error(), "API-relative") {
+			t.Fatalf("githubGET(%q): err = %v, want path-only refusal", p, err)
+		}
+		if _, err := githubPOSTJSON(context.Background(), p, map[string]any{}, maxGitHubJSONBody); err == nil || !strings.Contains(err.Error(), "API-relative") {
+			t.Fatalf("githubPOSTJSON(%q): err = %v, want path-only refusal", p, err)
+		}
+	}
+	if _, _, err := githubGETURL(context.Background(), githubVettedURL{}, githubAcceptJSON, maxGitHubJSONBody); err == nil {
+		t.Fatal("githubGETURL accepted an unvetted (zero) URL")
+	}
+	if hits.Load() != 0 {
+		t.Fatal("a request reached a server other than GITHUB_API_URL")
+	}
+}
+
+func TestGithubRedirectPolicy(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret-token")
+	var mu sync.Mutex
+	var plainAuth []string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		plainAuth = append(plainAuth, r.Header.Get("Authorization"))
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"number":1}`))
+	}))
+	t.Cleanup(plain.Close)
+	var sameOriginAuth string
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/issues/1": // same host, downgraded scheme and different port
+			http.Redirect(w, r, plain.URL+"/repos/o/r/issues/1", http.StatusFound)
+		case "/repos/o/r/issues/2": // renamed repo: same-origin redirect
+			http.Redirect(w, r, "/repositories/42/issues/2", http.StatusMovedPermanently)
+		case "/repositories/42/issues/2":
+			mu.Lock()
+			sameOriginAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"number":2}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(tlsSrv.Close)
+	t.Setenv("GITHUB_API_URL", tlsSrv.URL)
+	orig := defaultGitHubHTTPClient
+	defaultGitHubHTTPClient = func() *http.Client { return newGitHubHTTPClient(tlsSrv.Client().Transport) }
+	t.Cleanup(func() { defaultGitHubHTTPClient = orig })
+
+	_, err := githubGET(context.Background(), "/repos/o/r/issues/1", githubAcceptJSON, maxGitHubJSONBody)
+	if err == nil || !strings.Contains(err.Error(), "different origin") || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("err = %v, want a refused cross-origin redirect", err)
+	}
+	if _, err := githubGET(context.Background(), "/repos/o/r/issues/2", githubAcceptJSON, maxGitHubJSONBody); err != nil {
+		t.Fatalf("same-origin redirect: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(plainAuth) != 0 {
+		t.Fatalf("downgraded redirect was followed (auth %v)", plainAuth)
+	}
+	if sameOriginAuth != "Bearer secret-token" {
+		t.Fatalf("same-origin redirect auth = %q", sameOriginAuth)
+	}
+	if defaultGitHubHTTPClient == nil || orig().CheckRedirect == nil {
+		t.Fatal("production GitHub client has no redirect policy")
 	}
 }

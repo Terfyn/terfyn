@@ -19,9 +19,6 @@ const AgenticReviewMarker = "<!-- agentic-review -->"
 const (
 	commentStrategyAppend  = "append"
 	commentStrategyReplace = "replace"
-
-	githubCommentsPerPage  = 100
-	githubCommentsMaxPages = 10
 )
 
 // githubCommentStrategy returns append or replace for live post_comment calls.
@@ -122,24 +119,38 @@ func githubPullRequestReplaceComment(ctx context.Context, owner, repo, number, b
 	return out, nil
 }
 
+// githubFindAgenticReviewCommentID returns the id of the issue comment carrying
+// AgenticReviewMarker, or "" when the PR has none. It walks the comments with the
+// shared Link-following walker (githubWalkArray) and stops at the first match. If the
+// page cap is reached with comments remaining and no match, it fails instead of
+// returning "": "not found" would make replace create a second marker comment.
 func githubFindAgenticReviewCommentID(ctx context.Context, owner, repo, number string) (string, error) {
-	for page := 1; page <= githubCommentsMaxPages; page++ {
-		comments, err := githubListIssueCommentsPage(ctx, owner, repo, number, page)
-		if err != nil {
-			return "", err
-		}
-		for _, c := range comments {
-			id, body, ok := commentIDAndBody(c)
+	path := fmt.Sprintf("/repos/%s/%s/issues/%s/comments?per_page=%d",
+		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(number), githubListPerPage)
+	var found string
+	more, err := githubWalkArray(ctx, path, "pull_request.post_comment list comments", func(page []any) bool {
+		for _, raw := range page {
+			c, ok := raw.(map[string]any)
 			if !ok {
 				continue
 			}
-			if strings.Contains(body, AgenticReviewMarker) {
-				return id, nil
+			id, body, ok := commentIDAndBody(c)
+			if ok && strings.Contains(body, AgenticReviewMarker) {
+				found = id
+				return false
 			}
 		}
-		if len(comments) < githubCommentsPerPage {
-			break
-		}
+		return true
+	})
+	if err != nil {
+		return "", err
+	}
+	if found != "" {
+		return found, nil
+	}
+	if more {
+		return "", fmt.Errorf("native: pull_request.post_comment: no %s comment in the first %d comments and more remain; refusing to post a possibly duplicate comment (pass comment_id, or comment_strategy: append)",
+			AgenticReviewMarker, githubListMaxLimit)
 	}
 	return "", nil
 }
@@ -162,21 +173,6 @@ func commentIDAndBody(c map[string]any) (id, body string, ok bool) {
 		return "", "", false
 	}
 	return idStr, bodyStr, true
-}
-
-func githubListIssueCommentsPage(ctx context.Context, owner, repo, number string, page int) ([]map[string]any, error) {
-	path := fmt.Sprintf("/repos/%s/%s/issues/%s/comments?per_page=%d&page=%d",
-		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(number),
-		githubCommentsPerPage, page)
-	b, err := githubGET(ctx, path, githubAcceptJSON, maxGitHubJSONBody)
-	if err != nil {
-		return nil, err
-	}
-	var comments []map[string]any
-	if err := json.Unmarshal(b, &comments); err != nil {
-		return nil, fmt.Errorf("native: list issue comments decode: %w", err)
-	}
-	return comments, nil
 }
 
 func githubUpdateIssueComment(ctx context.Context, owner, repo, commentID, body string) (map[string]any, error) {
@@ -227,7 +223,10 @@ func githubJSONRequest(ctx context.Context, method, path string, payload any, ma
 		}
 		body = bytes.NewReader(bodyBytes)
 	}
-	fullURL := strings.TrimSuffix(githubAPIBase(), "/") + path
+	fullURL, err := githubPathURL(path)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
 		return nil, err
