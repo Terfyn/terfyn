@@ -19,5 +19,9 @@ policy default {
 
 workflow demo(input: any) policy default {
     ping = helper.echo(msg: input.topic)
+    // A missing topic is a run failure: the echo must carry it back.
+    retry until ping.echo.msg limit 1 {
+        ping = helper.echo(msg: input.topic)
+    }
     return { topic: input.topic, echoed: ping.echo.msg }
 }

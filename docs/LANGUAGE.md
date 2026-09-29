@@ -415,9 +415,29 @@ so `state = input; Implementer(state)` — handing an agent the entire input, as
 implement/review flagship does — compiles and runs. The resource projection carries an inert
 `${input}`: it is a sound over-approximation for effect analysis and is no longer executed (the
 `WorkflowStep` DAG runtime was retired, #278), so there is no run-time `resolvePath` to
-fail-close against. (Whole-input **pass-through to a subworkflow** — a callee input-document
-mapping rather than a one-key `with:` map — remains a separate follow-up; the agent-argument
-case the flagship needs is resolved.)
+fail-close against. Whole-input pass-through to a subworkflow is covered by the call rules
+below.
+
+### Subworkflow calls
+
+A `.agent` call to a `.agent` workflow and a YAML `workflow:` step share one execution-IR node
+(`execir.InvokeWorkflow`) but not one contract, so the checker records the difference on the node
+as data (#551, #552); the runtime never guesses it from key names or output shapes:
+
+- **Arguments.** A call that passes exactly one argument binding the callee's one declared
+  parameter — `Identity(x)` or `Identity(value: x)` — hands the callee `x` itself as its whole
+  input document (any JSON value), which is what the single parameter binds to. This is the
+  node's `WholeDocument` bit. Every other call (several parameters, or a callee the checker
+  cannot resolve, such as a YAML-only workflow) passes the argument map as the document, exactly
+  as a YAML `with:` map is passed.
+- **Results.** A workflow's output document is `{value: <return>}` for a scalar/non-literal
+  `return` and the returned object itself when every `return` is an object literal
+  (`lower.WorkflowReturnShape`). That document is the step's one runtime value: the run's
+  output, the persisted `run_steps` output, and what a YAML caller reads as
+  `${steps.<id>.output}`. A `.agent` binding `r = Identity(x)` is the callee's **return value**:
+  when the callee uses the `{value: …}` envelope the checker sets the node's `ProjectValue` bit
+  and the interpreter binds the `value` field. A call to a YAML-only workflow binds its output
+  document.
 
 ### String templates in arguments
 

@@ -22,33 +22,42 @@ import (
 // invoker, interpreter start, schema validation, and checkpoint/resume rather
 // than being asserted to be an object.
 
-func TestUnwrapSingleParamWorkflowInput(t *testing.T) {
+// The call shape comes only from the node's explicit WholeDocument bit: with it,
+// the single argument is the document whatever JSON value it is; without it, the
+// argument map is the document whatever its keys — a YAML `with: {input: …}` or
+// `{arg0: …}` is never unwrapped.
+func TestWorkflowInputDocument(t *testing.T) {
 	t.Parallel()
-	one := &execir.Program{Params: []string{"value"}}
-	two := &execir.Program{Params: []string{"a", "b"}}
+	whole := execir.CallSite{Bind: "c", WholeDocument: true}
+	plain := execir.CallSite{Bind: "c"}
 	tests := []struct {
 		name string
-		prog *execir.Program
+		site execir.CallSite
 		args map[string]any
 		want any
 	}{
-		{"string", one, map[string]any{"value": "hello"}, "hello"},
-		{"number", one, map[string]any{"value": 1.5}, 1.5},
-		{"bool", one, map[string]any{"value": false}, false},
-		{"array", one, map[string]any{"value": []any{"a", 2.0}}, []any{"a", 2.0}},
-		{"null", one, map[string]any{"value": nil}, nil},
-		{"object", one, map[string]any{"value": map[string]any{"x": "y"}}, map[string]any{"x": "y"}},
-		{"positional key", one, map[string]any{"arg0": "hello"}, "hello"},
-		{"unrelated key is a YAML with-map", one, map[string]any{"topic": "hello"}, map[string]any{"topic": "hello"}},
-		{"no args stays null", one, nil, nil},
-		{"several args stay a map", one, map[string]any{"a": 1, "b": 2}, map[string]any{"a": 1, "b": 2}},
-		{"multi-param keeps the args map", two, map[string]any{"a": "x"}, map[string]any{"a": "x"}},
-		{"nil program keeps the args map", nil, map[string]any{"a": "x"}, map[string]any{"a": "x"}},
+		{"string", whole, map[string]any{"value": "hello"}, "hello"},
+		{"number", whole, map[string]any{"value": 1.5}, 1.5},
+		{"bool", whole, map[string]any{"value": false}, false},
+		{"array", whole, map[string]any{"value": []any{"a", 2.0}}, []any{"a", 2.0}},
+		{"null", whole, map[string]any{"value": nil}, nil},
+		{"object", whole, map[string]any{"value": map[string]any{"x": "y"}}, map[string]any{"x": "y"}},
+		{"YAML input key stays a map", plain, map[string]any{"input": map[string]any{"x": "y"}}, map[string]any{"input": map[string]any{"x": "y"}}},
+		{"YAML arg0 key stays a map", plain, map[string]any{"arg0": "hello"}, map[string]any{"arg0": "hello"}},
+		{"several args stay a map", plain, map[string]any{"a": 1, "b": 2}, map[string]any{"a": 1, "b": 2}},
 	}
 	for _, tc := range tests {
-		got := unwrapSingleParamWorkflowInput(tc.prog, tc.args)
+		got, err := workflowInputDocument(tc.site, "child", tc.args)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %#v, want %#v", tc.name, got, tc.want)
+		}
+	}
+	for _, bad := range []map[string]any{nil, {"a": 1, "b": 2}} {
+		if _, err := workflowInputDocument(whole, "child", bad); err == nil {
+			t.Errorf("whole-document site with %d args must be refused", len(bad))
 		}
 	}
 }
@@ -243,7 +252,7 @@ func docResumeGraph() *spec.ProjectGraph {
 func docResumePrograms() map[string]*execir.Program {
 	return map[string]*execir.Program{
 		"parent": {Workflow: "parent", Params: []string{"input"}, Body: []execir.Node{
-			&execir.InvokeWorkflow{Bind: "c", Workflow: "child", Args: map[string]execir.Value{"value": execir.Ref{Path: []string{"input", "doc"}}}},
+			&execir.InvokeWorkflow{Bind: "c", Workflow: "child", WholeDocument: true, ProjectValue: true, Args: map[string]execir.Value{"value": execir.Ref{Path: []string{"input", "doc"}}}},
 			&execir.Return{Value: execir.Ref{Path: []string{"c"}}},
 		}},
 		"child": {Workflow: "child", Params: []string{"value"}, Body: []execir.Node{

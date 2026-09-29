@@ -62,10 +62,17 @@ type ApprovalInfo struct {
 //   - Loop is the enclosing loop iteration indices (outermost first), so the same
 //     static node executed on different iterations has distinct identity. It is
 //     empty on the YAML path (no loops) and non-empty only under `.agent` loops.
+//   - WholeDocument is the call shape of a subworkflow invocation (see
+//     [InvokeWorkflow.WholeDocument]): true when the single argument is the
+//     callee's whole input document rather than a field of an input object. It is
+//     the interpreter's carrier of the node's explicit shape bit to the Invoker,
+//     NOT part of the site's identity — [CallKey] ignores it (a node's shape is
+//     fixed by its static address).
 type CallSite struct {
-	Bind string
-	Path []int
-	Loop []int
+	Bind          string
+	Path          []int
+	Loop          []int
+	WholeDocument bool
 }
 
 // Invoker performs the effectful leaf operations. The execution IR carries no
@@ -348,10 +355,25 @@ func (r *runner) exec(scope map[string]any, n Node, path, loop []int) error {
 			return r.in.Invoker.InvokeAgent(r.ctx, site, v.Agent, a)
 		})
 	case *InvokeWorkflow:
-		site := CallSite{Bind: v.Bind, Path: path, Loop: loop}
-		return r.invoke(scope, v.Bind, site, v.Args, func(a map[string]any) (any, error) {
+		site := CallSite{Bind: v.Bind, Path: path, Loop: loop, WholeDocument: v.WholeDocument}
+		bind := v.Bind
+		if err := r.invoke(scope, bind, site, v.Args, func(a map[string]any) (any, error) {
 			return r.in.Invoker.InvokeWorkflow(r.ctx, site, v.Workflow, a)
-		})
+		}); err != nil {
+			return err
+		}
+		if v.ProjectValue && bind != "" {
+			// The invoker's result (memoized, persisted) is the callee's output
+			// document; a `.agent` caller of a single-value-envelope callee binds its
+			// `value` field — the callee's return value (#551). Applied after memo
+			// replay too, so a resumed run binds exactly what a fresh one does.
+			projected, err := projectValueField(v.Workflow, scope[bind])
+			if err != nil {
+				return err
+			}
+			scope[bind] = projected
+		}
+		return nil
 	case *Let:
 		val, err := evalValue(scope, v.Value)
 		if err != nil {
@@ -425,6 +447,22 @@ func (r *runner) invoke(scope map[string]any, bind string, site CallSite, args m
 		scope[bind] = res
 	}
 	return nil
+}
+
+// projectValueField returns the `value` field of a subworkflow's output document
+// — the callee's return value under the single-value envelope — for an
+// [InvokeWorkflow] with ProjectValue set. The output document of a completed
+// subworkflow is always an object; anything else means the program and the
+// callee disagree about the envelope, which is refused rather than bound as nil.
+func projectValueField(workflow string, doc any) (any, error) {
+	switch m := doc.(type) {
+	case map[string]any:
+		return m["value"], nil
+	case nil:
+		return nil, fmt.Errorf("execir: subworkflow %q returned no output document to project a value from", workflow)
+	default:
+		return nil, fmt.Errorf("execir: subworkflow %q output is %T, not an output document with a value field", workflow, doc)
+	}
 }
 
 func (r *runner) execBranch(scope map[string]any, b *Branch, path, loop []int) error {

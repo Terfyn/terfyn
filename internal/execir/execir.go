@@ -83,11 +83,37 @@ type InvokeAgent struct {
 func (*InvokeAgent) node() {}
 
 // InvokeWorkflow invokes a declared subworkflow. Bind is the result binding, or "".
+//
+// Two source-level call contracts share this node, and both bits below are
+// decided at check time (internal/lang/check), never inferred by the runtime from
+// key names or output shapes (#551, #552):
+//
+//   - WholeDocument is the call-shape bit: true exactly when a `.agent` call passes
+//     ONE argument that binds the ONE declared parameter of a `.agent` callee
+//     (`Identity(x)` or `Identity(value: x)`). Args then holds that single value
+//     (keyed by the parameter name) and the value itself — any JSON value, not an
+//     object wrapping it — is the callee's whole input document, which is what the
+//     callee's single parameter binds to. Every other shape (a YAML `with:` map,
+//     several arguments, a callee the checker cannot resolve) has WholeDocument
+//     false and Args is the input document.
+//   - ProjectValue is the result-binding bit: true when a `.agent` caller binds the
+//     result of a `.agent` callee whose output uses the single-value envelope
+//     (`{value: <return>}`, see lower.WorkflowReturnShape). The invoker's result —
+//     and so the memo, the persisted step output, and a YAML consumer's
+//     `${steps.<id>.output}` — stays the callee's output document; only the
+//     binding in the caller's scope is its `value` field, i.e. the callee's return
+//     value. A YAML caller never sets it: its step output IS the callee's
+//     output.value (DESIGN_DOC §13.2).
+//
+// Both bits are part of the program's identity (digest and wire form) but are
+// written only when true, so every program that sets neither keeps its digest.
 type InvokeWorkflow struct {
-	Pos      Pos
-	Bind     string
-	Workflow string
-	Args     map[string]Value
+	Pos           Pos
+	Bind          string
+	Workflow      string
+	Args          map[string]Value
+	WholeDocument bool
+	ProjectValue  bool
 }
 
 func (*InvokeWorkflow) node() {}

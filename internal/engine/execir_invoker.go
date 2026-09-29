@@ -204,35 +204,44 @@ func (e *Executor) runViaExecIR(ctx context.Context, in RunInput, wf *spec.Workf
 		return e.suspendExecIR(ctx, in, wf, inv, runState, cost.get())
 	}
 	ictx := inv.snapshotIctx()
-	out, err := e.execIROutput(wf, returnValue, ictx)
+	out, err := execIROutput(prog, wf, returnValue)
 	if err != nil {
 		return e.failRun(ctx, in, err, cost.get())
 	}
 	return e.finishRunWithOutput(ctx, in, wf, ictx, cost.get(), out)
 }
 
-// execIROutput builds the workflow output on the execir path (#259). For a
-// control-flow workflow the flattened resource output.value references only the
-// last-lowered arm, so it cannot address the taken arm's result; the interpreter's
-// Return value is the correct output. The `.agent` convention is a single
-// `{value: <token>}` output, which becomes `{value: <return value>}`; a multi-key
-// YAML output is built by buildWorkflowOutput (its step ids align with the ictx),
-// preserving DAG parity for straight-line/YAML runs.
-func (e *Executor) execIROutput(wf *spec.WorkflowResource, returnValue any, ictx Context) (map[string]any, error) {
-	if isSingleValueOutput(wf) {
+// execIROutput builds a workflow's output document from the interpreter's Return
+// value — the ONE output path for a root run and a nested subworkflow alike
+// (#551, #259). The flattened resource output.value is never interpolated: it
+// references only the last-lowered arm of a control-flow workflow and the inert
+// resource-model tokens of an identity return, so it cannot describe what the
+// program returned. How the Return value maps onto the document is
+// [lower.WorkflowReturnShape]: {} for a program with no Return, the returned
+// object itself for object-literal returns, and {value: <return>} for the
+// single-value envelope. A YAML workflow lowers output.value to that same trailing
+// Return (LowerWorkflowResource), so its output is the evaluated output.value.
+func execIROutput(prog *execir.Program, wf *spec.WorkflowResource, returnValue any) (map[string]any, error) {
+	switch lower.WorkflowReturnShape(prog, wf) {
+	case lower.ReturnNone:
+		return map[string]any{}, nil
+	case lower.ReturnDocument:
+		switch m := returnValue.(type) {
+		case map[string]any:
+			if m == nil {
+				return map[string]any{}, nil
+			}
+			return m, nil
+		case nil:
+			// Every Return is an object literal, but none fired (a branch fell off
+			// the end without returning): the program returned nothing.
+			return map[string]any{}, nil
+		default:
+			return nil, fmt.Errorf("engine: workflow output must be an object, got %T", returnValue)
+		}
+	default:
 		return map[string]any{"value": returnValue}, nil
 	}
-	return buildWorkflowOutput(wf, ictx)
-}
-
-// isSingleValueOutput reports the `.agent`-return convention: output.value is a
-// single `value:` key (see internal/lang/lower workflow.go lowerBody).
-func isSingleValueOutput(wf *spec.WorkflowResource) bool {
-	if wf == nil || wf.Spec.Output == nil || len(wf.Spec.Output.Value) != 1 {
-		return false
-	}
-	_, ok := wf.Spec.Output.Value["value"]
-	return ok
 }
 
 func newEngineInvoker(e *Executor, in RunInput, wf *spec.WorkflowResource, wfPol policy.PolicyEvaluator, runHandle *telemetry.RunHandle, cost *liveCost, runStartedAt time.Time) *engineInvoker {
@@ -436,7 +445,10 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	if depth > maxDepth {
 		return nil, fmt.Errorf("engine: step %q: workflow nesting depth %d exceeds maxWorkflowNesting %d", site.Bind, depth, maxDepth)
 	}
-	childInput := unwrapSingleParamWorkflowInput(a.e.Executables[workflow], args)
+	childInput, err := workflowInputDocument(site, workflow, args)
+	if err != nil {
+		return nil, fmt.Errorf("engine: step %q: %w", site.Bind, err)
+	}
 	if err := a.e.validateWorkflowInputSchema(callee, childInput); err != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q input: %w", site.Bind, workflow, err)
 	}
@@ -445,7 +457,9 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	// on completion below), matching the DAG's per-step envelope so a subworkflow
 	// call is addressable in run_steps like any other step.
 	wfQID := a.e.qualID(site.Bind)
-	wfInJSON := a.redactStepJSON(args)
+	// The audit row records the document the callee actually receives (validated
+	// above and bound by the child run), not the call's argument map (#552).
+	wfInJSON := a.redactStepJSON(childInput)
 	wfStarted := a.e.now()
 	_ = a.e.Store.UpsertRunStep(ctx, state.RunStep{RunID: a.in.RunID, StepID: wfQID, Status: "running", StartedAt: &wfStarted, InputJSON: string(wfInJSON)})
 
@@ -539,9 +553,9 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	}
 
 	childInterp := &execir.Interp{Invoker: childInv, MaxConcurrency: a.in.MaxConcurrentSteps}
-	// Keep the interpreter return value. The flattened WorkflowStep projection is
-	// inert for execir control flow, so rebuilding output from it (buildWorkflowOutput)
-	// drops identity/branch/loop returns (#551). Root already uses execIROutput.
+	// Keep the interpreter return value: the output is built from it by the same
+	// execIROutput the root run uses, never from the flattened resource projection,
+	// which is inert for execir control flow and identity returns (#551).
 	returnValue, childState, rerr := childInterp.RunResumable(ctx, childProg, childInv.ictx.Input, childSeed)
 	if rerr != nil {
 		return nil, rerr
@@ -569,26 +583,13 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 		return nil, execir.ErrSuspend
 	}
 
-	snap := childInv.snapshotIctx()
-	out, oerr := child.execIROutput(callee, returnValue, snap)
+	// out is this step's ONE runtime value: the callee's output document, exactly
+	// what run_steps.output_json and ictx.Steps hold and what a YAML caller reads as
+	// ${steps.<id>.output}. A `.agent` caller that binds the callee's return value
+	// instead gets it through the node's explicit ProjectValue bit (#551).
+	out, oerr := execIROutput(childProg, callee, returnValue)
 	if oerr != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q output: %w", site.Bind, workflow, oerr)
-	}
-	// Caller-visible value is the child's Return (single-value .agent) or the
-	// multi-key YAML output map. Wrapping the Return in {value: …} here would
-	// double-wrap when the parent also goes through execIROutput.
-	caller := any(out)
-	if isSingleValueOutput(callee) {
-		caller = returnValue
-	} else if returnValue != nil {
-		// Object-literal returns flatten to multi-key output.value, so
-		// execIROutput would interpolate the inert projection. Use the Return.
-		if m, ok := returnValue.(map[string]any); ok {
-			out = m
-			caller = m
-		} else {
-			caller = returnValue
-		}
 	}
 	if a.e.Trace != nil {
 		_, _ = a.e.Trace.Append(ctx, a.in.RunID, a.e.qualID(site.Bind), trace.EventWorkflowCallFinished, trace.ActorSystem, map[string]any{
@@ -604,36 +605,29 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	a.mu.Lock()
 	a.ictx.Steps[site.Bind] = StepResult{Output: out, Meta: map[string]any{}}
 	a.mu.Unlock()
-	return caller, nil
+	return out, nil
 }
 
-// unwrapSingleParamWorkflowInput implements whole-document call semantics for a
-// single-parameter callee (#552). Positional lowering emits {param: document}
-// (the checker rebinds arg0 to the parameter name; an unresolved call keeps
-// {arg0: document}); paramScope then binds the parameter to that wrapper. When
-// the callee declares one parameter and the call supplied exactly one argument
-// under that parameter's (or the positional) name, the argument IS the child's
-// input document, whatever JSON value it is: an object, array, string, number,
-// bool, or null. Anything else keeps the args map as the input document.
-//
-// prog must be the callee's authored program (Executables). A YAML callee lowers
-// to the conventional single parameter `input` (LowerWorkflowResource) and takes
-// its `with:` map AS the document, so a one-key `with:` must never be unwrapped;
-// callers pass nil for it.
-func unwrapSingleParamWorkflowInput(prog *execir.Program, args map[string]any) any {
-	if args == nil {
-		return nil
+// workflowInputDocument returns the input document a subworkflow call hands the
+// callee. The call shape is the explicit site.WholeDocument bit the checker set on
+// the InvokeWorkflow node (#552): a whole-document call (`Identity(x)` against a
+// single-parameter `.agent` callee) passes its one argument's value itself — any
+// JSON value — while every other call, including every YAML `with:` map whatever
+// its keys, passes the argument map as the document. The shape is never inferred
+// from key names or the callee's parameter list. A site carrying the bit without
+// exactly one argument violates the node's representation invariant and is
+// refused rather than silently sent as an object.
+func workflowInputDocument(site execir.CallSite, workflow string, args map[string]any) (any, error) {
+	if !site.WholeDocument {
+		return args, nil
 	}
-	if prog == nil || len(prog.Params) != 1 || len(args) != 1 {
-		return args
+	if len(args) != 1 {
+		return nil, fmt.Errorf("subworkflow %q is a whole-document call but has %d arguments (want exactly one)", workflow, len(args))
 	}
-	if v, ok := args[prog.Params[0]]; ok {
-		return v
+	for _, v := range args {
+		return v, nil
 	}
-	if v, ok := args["arg0"]; ok {
-		return v
-	}
-	return args
+	return nil, nil // unreachable: len(args) == 1
 }
 
 // run wraps one leaf invocation with the admit/persist/cost/commit envelope the

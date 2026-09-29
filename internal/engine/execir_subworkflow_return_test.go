@@ -3,13 +3,17 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Terfyn/terfyn/internal/models"
+	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/project"
+	"github.com/Terfyn/terfyn/internal/spec"
 	"github.com/Terfyn/terfyn/internal/state"
 	"github.com/Terfyn/terfyn/internal/state/sqlite"
 	"github.com/Terfyn/terfyn/internal/tools"
@@ -224,5 +228,266 @@ workflow Main(input: Anything) -> Anything {
 	})
 	if runOutputValue(t, run) != "c" {
 		t.Fatalf("loop-carried return %v, want c", runOutputValue(t, run))
+	}
+}
+
+// TestExecIR_objectLiteralReturnNamedValueParam is review finding 3's repro: a
+// nested callee returning a multi-key object literal must not consult the inert
+// resource projection (whose `${input}` token fails to interpolate, #551).
+func TestExecIR_objectLiteralReturnNamedValueParam(t *testing.T) {
+	t.Parallel()
+	root := writeAgentProject(t, `
+workflow Pack(value: Anything) -> Anything {
+    return { doc: value, tag: "t" }
+}
+
+workflow Main(input: Anything) -> Anything {
+    return Pack(input)
+}
+`)
+	_, _, run := runAgentWorkflow(t, root, "Main", map[string]any{"x": "y"})
+	if got, want := jsonOf(t, runOutputValue(t, run)), `{"doc":{"x":"y"},"tag":"t"}`; got != want {
+		t.Fatalf("object literal return %s, want %s", got, want)
+	}
+}
+
+// TestExecIR_multiReturnObjectLiteralRootAndNested is review finding 3's root
+// half: `if … {return {r: …}} else {return {s: …}}` must return the TAKEN arm's
+// object at root (the flattened projection records only the last arm) and the
+// same document when the workflow runs nested.
+func TestExecIR_multiReturnObjectLiteralRootAndNested(t *testing.T) {
+	t.Parallel()
+	root := writeAgentProject(t, `
+workflow Pick(input: Anything) -> Anything {
+    if input.flag {
+        return { r: input.a }
+    } else {
+        return { s: input.b }
+    }
+}
+
+workflow Main(input: Anything) -> Anything {
+    p = Pick(input)
+    return { nested: p }
+}
+`)
+	for _, tc := range []struct {
+		flag bool
+		want string
+	}{{true, `{"r":"A"}`}, {false, `{"s":"B"}`}} {
+		in := map[string]any{"flag": tc.flag, "a": "A", "b": "B"}
+		_, _, run := runAgentWorkflow(t, root, "Pick", in)
+		if got := run.OutputJSON; got != tc.want {
+			t.Fatalf("root Pick flag=%v output %s, want %s", tc.flag, got, tc.want)
+		}
+		st, runID, run := runAgentWorkflow(t, root, "Main", in)
+		if got, want := run.OutputJSON, `{"nested":`+tc.want+`}`; got != want {
+			t.Fatalf("nested Pick flag=%v output %s, want %s", tc.flag, got, want)
+		}
+		if got := jsonOf(t, subworkflowStepOutput(t, st, runID, "p")); got != tc.want {
+			t.Fatalf("run_steps p output %s, want %s (root and nested share one output document)", got, tc.want)
+		}
+	}
+}
+
+// TestExecIR_mixedAndValueKeyReturns pins the output document for the shapes the
+// resource projection cannot describe on its own: a workflow mixing a scalar
+// return with an object-literal return, and an object literal whose only key is
+// `value`. Whatever the callee's output envelope, a `.agent` caller binds the
+// callee's RETURN VALUE.
+func TestExecIR_mixedAndValueKeyReturns(t *testing.T) {
+	t.Parallel()
+	root := writeAgentProject(t, `
+workflow Mixed(input: Anything) -> Anything {
+    if input.flag {
+        return input.a
+    } else {
+        return { s: input.b }
+    }
+}
+
+workflow ValueKey(input: Anything) -> Anything {
+    return { value: input.a }
+}
+
+workflow Main(input: Anything) -> Anything {
+    m = Mixed(input)
+    v = ValueKey(input)
+    return { m: m, v: v }
+}
+`)
+	_, _, run := runAgentWorkflow(t, root, "Main", map[string]any{"flag": true, "a": "A", "b": "B"})
+	if got, want := run.OutputJSON, `{"m":"A","v":{"value":"A"}}`; got != want {
+		t.Fatalf("flag=true output %s, want %s", got, want)
+	}
+	_, _, run = runAgentWorkflow(t, root, "Main", map[string]any{"flag": false, "a": "A", "b": "B"})
+	if got, want := run.OutputJSON, `{"m":{"s":"B"},"v":{"value":"A"}}`; got != want {
+		t.Fatalf("flag=false output %s, want %s", got, want)
+	}
+}
+
+// TestExecIR_scalarReturnBindingAndAuditRows: a `.agent` binding of a
+// scalar-returning callee is the return value, while the step's persisted output
+// stays the callee's output document {value: X} (the ONE runtime value a YAML
+// consumer reads), and the run_steps input records the whole document the callee
+// received — not the {"value": doc} argument wrapper (review finding 4).
+func TestExecIR_scalarReturnBindingAndAuditRows(t *testing.T) {
+	t.Parallel()
+	root := writeAgentProject(t, `
+workflow Identity(value: Anything) -> Anything {
+    return value
+}
+
+workflow Main(input: Anything) -> Anything {
+    r = Identity(input.doc)
+    n = Identity(value: input.doc)
+    return { got: r, named: n }
+}
+`)
+	st, runID, run := runAgentWorkflow(t, root, "Main", map[string]any{"doc": "hello"})
+	if got, want := run.OutputJSON, `{"got":"hello","named":"hello"}`; got != want {
+		t.Fatalf("output %s, want %s", got, want)
+	}
+	steps, err := st.ListRunStepsByRunID(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, s := range steps {
+		if s.StepID != "r" && s.StepID != "n" {
+			continue
+		}
+		seen++
+		if s.InputJSON != `"hello"` {
+			t.Errorf("run_steps %s input %s, want the whole document \"hello\"", s.StepID, s.InputJSON)
+		}
+		if s.OutputJSON != `{"value":"hello"}` {
+			t.Errorf("run_steps %s output %s, want the callee output document", s.StepID, s.OutputJSON)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("found %d of the r/n run_steps rows", seen)
+	}
+}
+
+// agentGateSrc is a `.agent` project whose Identity callee runs a HITL-gated
+// publisher before returning its whole input document, and whose Main binds the
+// result and then runs a second gated publish AFTER the call — so a resume
+// replays the completed call from the parent's memo and must re-apply the
+// value projection to the memoized output document.
+const agentGateSrc = `
+tool helper {
+    type native
+    safety {
+        sideEffects false
+    }
+}
+
+tool publisher {
+    type native
+    safety {
+        sideEffects true
+    }
+}
+
+policy gate {
+    approvals {
+        requiredFor {
+            tool.publisher.echo
+        }
+    }
+    hitl {
+        interruptOn {
+            publisher {
+                allowedDecisions { approve reject }
+            }
+        }
+    }
+}
+
+workflow Identity(value: Anything) -> Anything policy gate {
+    p = publisher.echo(msg: "inner")
+    return value
+}
+
+workflow Main(input: Anything) -> Anything policy gate {
+    r = Identity(input.doc)
+    q = publisher.echo(msg: "outer")
+    return { got: r }
+}
+`
+
+// TestExecIR_agentSubworkflowResumeProductionExecutables suspends twice (inside
+// the callee, then after the call in the parent) with production executables and
+// asserts the resumed binding is the callee's return value for every JSON kind,
+// that the parent's memo keeps the callee's output document (the shape main
+// memoized, so a checkpoint written before this change replays the same), and
+// that each gated effect runs exactly once.
+func TestExecIR_agentSubworkflowResumeProductionExecutables(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		doc  any
+		want string
+	}{
+		{"string", "hello", `"hello"`},
+		{"array", []any{"a", 2.0}, `["a",2]`},
+		{"null", nil, `null`},
+		{"object", map[string]any{"x": "y"}, `{"x":"y"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeAgentProject(t, agentGateSrc)
+			graph, execs, err := project.LoadProjectWithExecutables(root)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			ex, _, runID, started := newResumeExecutor(t, graph, "Main")
+			ex.Executables = execs
+			ct := &countingTools{inner: tools.NewRegistry(graph)}
+			ex.Tools = ct
+			ctx := context.Background()
+			input := map[string]any{"doc": tc.doc}
+			approve := HitlRunOptions{Actor: "alice", Decision: &policy.HitlDecisionInput{Kind: spec.HitlDecisionApprove, Actor: "alice"}}
+
+			if err := ex.Run(ctx, RunInput{RunID: runID, WorkflowName: "Main", Env: "dev", StartedAt: started, Input: input}); !errors.Is(err, ErrInterrupted) {
+				t.Fatalf("fresh run should interrupt at the inner gate, got %v", err)
+			}
+			if err := ex.Run(ctx, RunInput{RunID: runID, WorkflowName: "Main", Env: "dev", StartedAt: started, Input: input, Resume: true, Hitl: approve}); !errors.Is(err, ErrInterrupted) {
+				t.Fatalf("first resume should interrupt at the outer gate, got %v", err)
+			}
+			cp, err := ex.Store.GetLatestCheckpoint(ctx, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload struct {
+				ExecMemo map[string]json.RawMessage `json:"execMemo"`
+			}
+			if err := json.Unmarshal([]byte(cp.ContextJSON), &payload); err != nil {
+				t.Fatal(err)
+			}
+			var memoR json.RawMessage
+			for k, v := range payload.ExecMemo {
+				if strings.HasPrefix(k, "r|") {
+					memoR = v
+				}
+			}
+			if got, want := string(memoR), `{"value":`+tc.want+`}`; got != want {
+				t.Fatalf("parent memo for r = %s, want the callee output document %s (checkpoint %s)", got, want, cp.ContextJSON)
+			}
+			if err := ex.Run(ctx, RunInput{RunID: runID, WorkflowName: "Main", Env: "dev", StartedAt: started, Input: input, Resume: true, Hitl: approve}); err != nil {
+				t.Fatalf("second resume: %v", err)
+			}
+			run, _ := ex.Store.GetRun(ctx, runID)
+			if run.Status != state.RunStatusSucceeded {
+				t.Fatalf("status %q err=%q", run.Status, run.ErrorText)
+			}
+			if got, want := run.OutputJSON, `{"got":`+tc.want+`}`; got != want {
+				t.Fatalf("resumed output %s, want %s", got, want)
+			}
+			if got := ct.count("tool.publisher.echo"); got != 2 {
+				t.Fatalf("gated publishes ran %d times, want exactly 2 (one inner, one outer)", got)
+			}
+		})
 	}
 }
