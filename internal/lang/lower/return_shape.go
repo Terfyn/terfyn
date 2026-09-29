@@ -9,11 +9,11 @@ import (
 // document — the one value that is the run's output, the persisted run_steps
 // output of a workflow: step, and what a YAML caller reads as
 // `${steps.<id>.output}` (DESIGN_DOC §13.2). It is a pure function of the
-// executable program (and, for an unmarked single object-literal Return only,
-// its resource projection — see [WorkflowReturnShape]), so the engine (building the
-// output) and the checker (deciding whether a `.agent` caller binds the output's
-// `value` field, [execir.InvokeWorkflow.ProjectValue]) can never disagree about
-// it.
+// executable program's Return nodes (and, for a single object-literal Return
+// only, its resource projection — see [WorkflowReturnShape]), so the engine
+// (building the output) and the checker (deciding whether a `.agent` caller
+// binds the output's `value` field, [execir.InvokeWorkflow.ProjectValue]) can
+// never disagree about it.
 type ReturnShape int
 
 const (
@@ -45,32 +45,40 @@ const (
 // (lowerYAMLValue lowers only a map[string]any to an [execir.Object]; a string,
 // number, bool, null or sequence becomes a Ref, Template, Lit or List), in which
 // case the Return mirrors X: an Object with X's keys at every level where X has
-// a map. So an unmarked single object-literal Return is [ReturnValueEnvelope]
-// exactly when the resource output.value is `{value: X}`, X is a map, and the
-// Return mirrors X ([isYAMLMapEnvelope]); otherwise it is [ReturnDocument].
+// a map. So a single object-literal Return is [ReturnValueEnvelope] exactly
+// when the resource output.value is `{value: X}`, X is a map, and the Return
+// mirrors X ([isYAMLMapEnvelope]); otherwise it is [ReturnDocument].
 //
 // No `.agent` program meets that test. The only ones it could are those whose
 // single Return is a `{value: e}` literal — their flattened resource output.value
 // is then `{value: X}` with X the projection of e (outputValueFor) — and such a
 // Return is `{value: <e>}`, one level deeper than X, so it never mirrors X (X
-// must be a map, i.e. e an object literal; induct on e's depth). LowerExec still
-// marks the one form that meets the map condition, `return {value: {…}}`,
-// [execir.Program.DocumentReturn], which skips the exception, so a freshly
-// lowered `.agent` program's shape is recorded at lowering, not recovered from
-// the resource.
+// must be a map, i.e. e an object literal; induct on e's depth). The rule's
+// only inputs are the Return nodes and the resource: the program carries no
+// output-shape field and nothing about the shape is recorded at lowering.
 //
 // Hence every `.agent` program is classified from its Return nodes alone:
 // `return {value: x}` outputs the document `{value: x}` whether it is the only
-// `return` or one of several, marked or not. That includes a program pinned in a
-// deployment snapshot before the bit existed: on main (8741333) a lone
+// `return` or one of several. A program pinned in a deployment snapshot by an
+// earlier release has the same Return nodes and resource, so it gets the same
+// shape and keeps its digest and wire bytes: on main (8741333) a lone
 // `return {value: x}` that fired produced `{value: x}` as a nested call — the
-// interpolated resource projection — and `{value: {value: x}}` as a root run; it
-// now produces `{value: x}` for both, as a fresh apply does
-// (internal/engine TestMainPinnedPrograms_keepMainOutputsAndBindings runs
-// programs compiled by main). A multi-Return program never
-// consults the resource: that only comes from `.agent` source, and its flattened
-// resource output.value is whichever `return` was lowered LAST (outputValueFor
-// overwrites it per arm).
+// interpolated resource projection — and `{value: {value: x}}` as a root run;
+// it now produces `{value: x}` for both, as a fresh apply does (internal/engine
+// TestMainPinnedPrograms_keepMainOutputsAndBindings runs programs compiled by
+// main). A multi-Return program never consults the resource: that only comes
+// from `.agent` source, and its flattened resource output.value is whichever
+// `return` was lowered LAST (outputValueFor overwrites it per arm).
+//
+// Pinned-caller hazard. The checker freezes [execir.InvokeWorkflow.ProjectValue]
+// into a caller's program from the callee's shape at compile time, and a pinned
+// snapshot keeps that bit; the callee's shape, though, is recomputed here by
+// whichever binary runs the snapshot. A change to this function that
+// reclassifies an existing callee therefore changes what already-pinned callers
+// bind (they keep projecting, or not projecting, `value` out of a document whose
+// shape moved). Any future change here must be tested against callers pinned by
+// earlier releases, as TestMainPinnedPrograms_keepMainOutputsAndBindings does
+// for main.
 func WorkflowReturnShape(prog *execir.Program, wf *spec.WorkflowResource) ReturnShape {
 	if prog == nil {
 		return ReturnNone
@@ -81,7 +89,7 @@ func WorkflowReturnShape(prog *execir.Program, wf *spec.WorkflowResource) Return
 		return ReturnNone
 	case returns != objects:
 		return ReturnValueEnvelope
-	case returns == 1 && !prog.DocumentReturn && isYAMLMapEnvelope(soleReturn(prog.Body), wf):
+	case returns == 1 && isYAMLMapEnvelope(soleReturn(prog.Body), wf):
 		return ReturnValueEnvelope
 	default:
 		return ReturnDocument
@@ -140,28 +148,6 @@ func soleReturn(body []execir.Node) *execir.Return {
 		return nil
 	}
 	return found
-}
-
-// isLoneValueObjectReturn reports whether body has exactly one Return and it
-// returns an object literal whose only key is `value` and whose `value` field is
-// itself an object literal (`return {value: {k: x}}`) — the only `.agent`
-// program whose resource meets the map condition of [WorkflowReturnShape]'s
-// YAML-envelope exception, and so the only one LowerExec marks
-// [execir.Program.DocumentReturn]. A lone `return {value: x}` with any other x
-// has a non-map resource `value` and is [ReturnDocument] unmarked, so it keeps
-// the digest and wire bytes it had before the bit existed, as does every other
-// program.
-func isLoneValueObjectReturn(body []execir.Node) bool {
-	ret := soleReturn(body)
-	if ret == nil {
-		return false
-	}
-	obj, ok := ret.Value.(execir.Object)
-	if !ok || len(obj.Fields) != 1 || obj.Fields[0].Key != "value" {
-		return false
-	}
-	_, inner := obj.Fields[0].Val.(execir.Object)
-	return inner
 }
 
 // countReturns counts the Return nodes reachable anywhere in nodes and how many

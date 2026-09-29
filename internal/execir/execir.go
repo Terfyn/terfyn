@@ -52,26 +52,14 @@ type Pos = spec.Pos
 // ordered top-level nodes to execute, and a canonical digest that folds into the
 // workflow hash (ADR 002 §5; see [Program.Digest] and internal/plan).
 //
-// DocumentReturn is the output-shape bit (see lower.WorkflowReturnShape): true
-// when the program's one Return is an object literal whose only key is `value`
-// and whose `value` field is itself an object literal, and that returned object
-// IS the output document (`.agent` `return {value: {k: x}}` → `{value: {k: x}}`).
-// It is the one `.agent` form whose resource output.value has the shape of the
-// YAML envelope around a map (`output.value: {value: <map>}`, which lowers to a
-// single object-literal Return), so the lowering records its shape instead of
-// leaving the shape rule to tell the two apart from the Return's structure. The
-// `.agent` lowering (lower.LowerExec) sets it in exactly that case and nowhere
-// else (a lone `return {value: x}` with any other x is the document unmarked);
-// the YAML lowering never sets it. Like the InvokeWorkflow bits it is part of the
-// program's identity (digest and wire form) but written only when true, so every
-// other program keeps its digest and wire bytes. A program pinned before the bit
-// existed is unmarked and classified by the same rule (its Return does not mirror
-// the map as YAML's does), so it gets the same shape.
+// A Program carries no output-shape field: how its Return value becomes the
+// output document is a structural test on its Return nodes (and, for a single
+// object-literal Return only, its resource output.value), recomputed by the
+// running binary (lower.WorkflowReturnShape).
 type Program struct {
-	Workflow       string
-	Params         []string
-	Body           []Node
-	DocumentReturn bool
+	Workflow string
+	Params   []string
+	Body     []Node
 }
 
 // Node is one execution-IR construct.

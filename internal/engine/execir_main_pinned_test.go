@@ -114,7 +114,7 @@ var mainPinnedCallees = map[string]struct{ caller, step string }{
 	"P2":   {"CP2", "p"},   // lone `return {value: a}`, multi-parameter, called nested
 	"PLit": {"CLit", "l"},  // lone `return {value: "lit"}`
 	"Free": {"CFree", "f"}, // input-free callee
-	"PMap": {"CMap", "m"},  // lone `return {value: {x: a}}` (the form LowerExec now marks)
+	"PMap": {"CMap", "m"},  // lone `return {value: {x: a}}` (resource value is a map)
 	"YMap": {"YC", "m"},    // YAML output.value: {value: {map}}
 }
 
@@ -198,9 +198,11 @@ func TestMainPinnedPrograms_keepMainOutputsAndBindings(t *testing.T) {
 	check("main-pinned", pinned)
 
 	// A fresh compile of the same source on this binary: the `.agent` resources
-	// are the ones main lowered, the programs differ from main's only by the
-	// DocumentReturn bit on `return {value: {…}}` (so only PMap's digest moves),
-	// and every output and binding is the same as the main-pinned run above.
+	// are the ones main lowered, and a program's digest may differ from main's
+	// only through a call bit the checker adds on an InvokeWorkflow node
+	// (WholeDocument, ProjectValue) — never through its output shape, which is
+	// not part of a program's identity. Every output and binding is the same as
+	// the main-pinned run above.
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "main.agent"), []byte(fx.Source), 0o644); err != nil {
 		t.Fatal(err)
@@ -224,15 +226,65 @@ func TestMainPinnedPrograms_keepMainOutputsAndBindings(t *testing.T) {
 		}
 		fresh[name] = prog
 	}
-	var moved []string
 	for name, p := range fresh {
-		if p.Digest() != fx.Digests[name] {
-			moved = append(moved, name)
+		if p.Digest() == fx.Digests[name] {
+			continue
+		}
+		// Only a caller carrying a new call bit may move, and clearing those bits
+		// must give back main's digest exactly.
+		b, err := execir.MarshalPrograms(map[string]*execir.Program{name: p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cp, err := execir.UnmarshalPrograms(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !clearCallBits(cp[name].Body) {
+			t.Errorf("fresh %s: digest %s differs from main's %s with no call bit (a return-shape or lowering change)", name, p.Digest(), fx.Digests[name])
+		} else if got := cp[name].Digest(); got != fx.Digests[name] {
+			t.Errorf("fresh %s: digest without call bits %s, want main's %s", name, got, fx.Digests[name])
 		}
 	}
-	sort.Strings(moved)
-	if strings.Join(moved, ",") != "PMap" || !fresh["PMap"].DocumentReturn {
-		t.Errorf("fresh digests that differ from main: %v, want only the marked PMap", moved)
+	// In particular no callee's digest moves: PMap (`return {value: {x: a}}`),
+	// P2, PLit and Free keep main's program bytes.
+	for _, name := range []string{"P2", "PLit", "Free", "PMap"} {
+		if got := fresh[name].Digest(); got != fx.Digests[name] {
+			t.Errorf("fresh callee %s: digest %s, want main's %s", name, got, fx.Digests[name])
+		}
 	}
 	check("fresh", fresh)
+}
+
+// clearCallBits clears WholeDocument and ProjectValue on every InvokeWorkflow
+// reachable in nodes and reports whether any was set.
+func clearCallBits(nodes []execir.Node) bool {
+	found := false
+	for _, n := range nodes {
+		switch v := n.(type) {
+		case *execir.InvokeWorkflow:
+			if v.WholeDocument || v.ProjectValue {
+				found = true
+			}
+			v.WholeDocument, v.ProjectValue = false, false
+		case *execir.Branch:
+			found = clearCallBits(v.Then) || found
+			found = clearCallBits(v.Else) || found
+		case *execir.Loop:
+			found = clearCallBits(v.Body) || found
+		case *execir.While:
+			found = clearCallBits(v.Body) || found
+		case *execir.Retry:
+			found = clearCallBits(v.Body) || found
+		case *execir.Fork:
+			for _, br := range v.Branches {
+				found = clearCallBits(br.Nodes) || found
+			}
+		case *execir.Graph:
+			for _, gn := range v.Nodes {
+				found = clearCallBits([]execir.Node{gn.Run}) || found
+			}
+		}
+	}
+	return found
 }

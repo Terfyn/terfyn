@@ -27,13 +27,6 @@ func (p *Program) Digest() string {
 		b.WriteString(")params[")
 		b.WriteString(strings.Join(p.Params, ","))
 		b.WriteString("]")
-		if p.DocumentReturn {
-			// The output shape is executable identity: the bit records at lowering
-			// that the program's one `{value: <object>}` Return is the output
-			// document (lower.WorkflowReturnShape). Only written when set, so
-			// existing programs keep their digest.
-			b.WriteString("!docreturn")
-		}
 		encodeNodes(&b, p.Body)
 	}
 	sum := sha256.Sum256([]byte(b.String()))

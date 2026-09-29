@@ -39,18 +39,18 @@ func TestWorkflowReturnShape(t *testing.T) {
 		{"mixed returns", []execir.Node{branch(ret(ref), ret(obj("s")))}, wfOut(map[string]any{"s": "${input.s}"}), ReturnValueEnvelope},
 		// A lone `{value: <ref>}` object-literal Return with a `{value: <string>}`
 		// resource cannot be the YAML envelope (YAML unwraps a non-map `value` to a
-		// non-object Return), so it is the document even unmarked — a `.agent`
-		// `return {value: x}` pinned before DocumentReturn existed (review #578).
+		// non-object Return), so it is the document — a `.agent`
+		// `return {value: x}` (review #578).
 		{"object literal with only a value key", []execir.Node{ret(obj("value"))}, wfOut(map[string]any{"value": "${input.value}"}), ReturnDocument},
 		// The YAML envelope around a map: the Return mirrors X.
 		{"yaml value around a map", []execir.Node{ret(obj("a"))}, wfOut(map[string]any{"value": map[string]any{"a": "${input.a}"}}), ReturnValueEnvelope},
-		// An unmarked `.agent` `return {value: {a: x}}` (pinned before the bit): its
-		// resource is `{value: {a: …}}` too, but the Return is one level deeper
-		// than X, so it does not mirror X and is the document.
-		{"unmarked value around an object literal", []execir.Node{ret(execir.Object{Fields: []execir.Field{{Key: "value", Val: obj("a")}}})}, wfOut(map[string]any{"value": map[string]any{"a": "${input.a}"}}), ReturnDocument},
+		// A `.agent` `return {value: {a: x}}`: its resource is `{value: {a: …}}`
+		// too, but the Return is one level deeper than X, so it does not mirror X
+		// and is the document.
+		{"value around an object literal", []execir.Node{ret(execir.Object{Fields: []execir.Field{{Key: "value", Val: obj("a")}}})}, wfOut(map[string]any{"value": map[string]any{"a": "${input.a}"}}), ReturnDocument},
 		// Same for `return {value: {value: x}}` against `{value: {value: …}}`, and
 		// the YAML `output.value: {value: {value: …}}` it must not be confused with.
-		{"unmarked value around a value object", []execir.Node{ret(execir.Object{Fields: []execir.Field{{Key: "value", Val: obj("value")}}})}, wfOut(map[string]any{"value": map[string]any{"value": "${input.value}"}}), ReturnDocument},
+		{"value around a value object", []execir.Node{ret(execir.Object{Fields: []execir.Field{{Key: "value", Val: obj("value")}}})}, wfOut(map[string]any{"value": map[string]any{"value": "${input.value}"}}), ReturnDocument},
 		{"yaml value around a value map", []execir.Node{ret(obj("value"))}, wfOut(map[string]any{"value": map[string]any{"value": "${input.value}"}}), ReturnValueEnvelope},
 		// Key sets must match exactly.
 		{"object not mirroring the map", []execir.Node{ret(obj("b"))}, wfOut(map[string]any{"value": map[string]any{"a": "${input.a}"}}), ReturnDocument},
@@ -65,16 +65,6 @@ func TestWorkflowReturnShape(t *testing.T) {
 		if got := WorkflowReturnShape(&execir.Program{Body: tc.body}, tc.wf); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
-	}
-	// DocumentReturn skips the YAML-envelope exception and nothing else: a
-	// non-object Return is still the envelope.
-	marked := &execir.Program{DocumentReturn: true, Body: []execir.Node{ret(obj("a"))}}
-	if got := WorkflowReturnShape(marked, wfOut(map[string]any{"value": map[string]any{"a": "${input.a}"}})); got != ReturnDocument {
-		t.Errorf("marked lone object literal: got %v, want ReturnDocument", got)
-	}
-	marked.Body = []execir.Node{ret(ref)}
-	if got := WorkflowReturnShape(marked, wfOut(valueOut)); got != ReturnValueEnvelope {
-		t.Errorf("marked scalar return: got %v, want ReturnValueEnvelope", got)
 	}
 }
 

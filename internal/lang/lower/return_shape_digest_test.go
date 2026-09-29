@@ -3,7 +3,6 @@ package lower
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 	"testing"
 
 	"github.com/Terfyn/terfyn/internal/execir"
@@ -12,9 +11,10 @@ import (
 )
 
 // returnShapeFixture is one representative program, lowered by the real YAML or
-// `.agent` lowering, with the digest and wire-form hash it had BEFORE
-// [execir.Program.DocumentReturn] existed: pinned on main at 8741333 (the
-// released baseline; identical at this PR's 2333a68).
+// `.agent` lowering, with the digest and wire-form hash main compiled it to
+// (pinned at 8741333, the released baseline; identical at 2114079). The output
+// shape is not part of a program's identity, so every one of them must keep
+// those bytes.
 type returnShapeFixture struct {
 	name       string
 	agent      string         // `.agent` source (first decl is the workflow), or ""
@@ -97,8 +97,8 @@ workflow W(input: Anything) -> Anything {
 		wireSHA256: "74848a41043aa0494ab810dde4c3483d59c2087bdcb3f72a5498b4bac0e4278b",
 		shape:      ReturnDocument,
 	},
-	// A lone `{value: x}` literal whose x is not an object literal is the document
-	// unmarked (review #578), so it keeps main's digest and wire bytes.
+	// A lone `{value: x}` literal is the document (review #578) and keeps main's
+	// digest and wire bytes.
 	{name: "agent lone value literal (V1)", agent: `
 workflow W(input: Anything) -> Anything {
     return { value: input.b }
@@ -123,6 +123,34 @@ workflow W(input: Anything) -> Anything {
 }`,
 		digest:     "7ea304afc83e05c406f6b8cd524870c13f07e6a8178869fc2c7c07a925a6c65c",
 		wireSHA256: "a043195a15ee3473bba4736e8363ae8f2e45f6055be5d8c3bb5cb918f3907436",
+		shape:      ReturnDocument,
+	},
+	// `return {value: <object literal>}`: its resource `output.value` is
+	// `{value: <map>}`, the shape of the YAML envelope around a map, but the
+	// Return is one level deeper than that map, so it does not mirror it: it is
+	// the document and keeps main's digest and wire bytes.
+	{name: "agent value around an object (PMap)", agent: `
+workflow W(input: Anything) -> Anything {
+    return { value: { x: input.b } }
+}`,
+		digest:     "5c4f1c9d3e1e355600d2798a5a7c27e59eeab0fe743fb4f06a296eaa389e2d33",
+		wireSHA256: "583548b1d3d4dffc7338cc1bc4baf8b8e97597d0be58a5cfaabc1f9ac357f4a8",
+		shape:      ReturnDocument,
+	},
+	{name: "agent value around a value object (PVV)", agent: `
+workflow W(input: Anything) -> Anything {
+    return { value: { value: input.b } }
+}`,
+		digest:     "0736125cd8b55ce8bb6d4e8319755d2f8748393f7b5b8a82c5172dc17c99ee91",
+		wireSHA256: "0dcc1fda55ed3f2c9a4cf29e7d60d93e743c6e222fbb2d4f6119dc8ab6835d48",
+		shape:      ReturnDocument,
+	},
+	{name: "agent value around a literal object (FreeMap)", agent: `
+workflow W(input: Anything) -> Anything {
+    return { value: { x: "y" } }
+}`,
+		digest:     "3747c525fba6d9842a27de97721fb75b57b0732ec5c7d700e58971b6931466bc",
+		wireSHA256: "92d0b0eecd663275fda246f90e7952b08bd9b851517350b87e17ce54c561c605",
 		shape:      ReturnDocument,
 	},
 	{name: "agent two value arms", agent: `
@@ -194,84 +222,38 @@ func wireSHA(t *testing.T, prog *execir.Program) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestDocumentReturn_existingProgramsUnchanged pins the digest and wire bytes of
-// representative YAML and ordinary `.agent` programs, as compiled on main: none
-// of them is marked, so none of their plans goes stale and every program pinned
-// on main round-trips to the same bytes and is classified as a fresh compile is.
-func TestDocumentReturn_existingProgramsUnchanged(t *testing.T) {
+// TestReturnShape_programsKeepMainDigestAndWire pins the digest and wire bytes
+// of representative YAML and `.agent` programs, including every lone
+// `return {value: …}` form, to what main compiled: the output shape is computed
+// from the Return nodes and resource, never recorded in the program, so no plan
+// goes stale, every program pinned on main round-trips to the same bytes, and
+// it is classified as a fresh compile is.
+func TestReturnShape_programsKeepMainDigestAndWire(t *testing.T) {
 	t.Parallel()
 	for _, fx := range returnShapeFixtures {
 		prog, wf := fx.lower(t)
-		if prog.DocumentReturn {
-			t.Errorf("%s: DocumentReturn set on a program that does not need it", fx.name)
-		}
 		if got := prog.Digest(); got != fx.digest {
 			t.Errorf("%s: digest changed: %s, want %s", fx.name, got, fx.digest)
-		}
-		if got := wireSHA(t, prog); got != fx.wireSHA256 {
-			t.Errorf("%s: wire bytes changed: sha256 %s, want %s", fx.name, got, fx.wireSHA256)
-		}
-		if got := WorkflowReturnShape(prog, wf); got != fx.shape {
-			t.Errorf("%s: shape %v, want %v", fx.name, got, fx.shape)
-		}
-	}
-}
-
-// TestDocumentReturn_loneValueObjectLiteralReturn: a `.agent` program whose one
-// Return is `{value: <object literal>}` is the one form whose resource meets the
-// map condition of the YAML-envelope exception, so LowerExec marks it and its
-// output is the returned object. The mark is identity: the digest and wire form
-// differ from the unmarked program compiled on main (8741333), and round-trip.
-// That unmarked program (a snapshot pinned on main) is the document too: its
-// Return is one level deeper than the resource's `value` map, so it does not
-// mirror the YAML envelope.
-func TestDocumentReturn_loneValueObjectLiteralReturn(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name, src, mainDigest string
-	}{
-		{"value around an object", `
-workflow W(input: Anything) -> Anything {
-    return { value: { x: input.b } }
-}`, "5c4f1c9d3e1e355600d2798a5a7c27e59eeab0fe743fb4f06a296eaa389e2d33"},
-		{"value around a value object", `
-workflow W(input: Anything) -> Anything {
-    return { value: { value: input.b } }
-}`, "0736125cd8b55ce8bb6d4e8319755d2f8748393f7b5b8a82c5172dc17c99ee91"},
-	} {
-		prog, wf := lowerAgentBoth(t, tc.src)
-		if !prog.DocumentReturn {
-			t.Fatalf("%s: DocumentReturn not set", tc.name)
-		}
-		if got := WorkflowReturnShape(prog, wf); got != ReturnDocument {
-			t.Errorf("%s: shape %v, want ReturnDocument", tc.name, got)
-		}
-		d := prog.Digest()
-		if d == tc.mainDigest {
-			t.Errorf("%s: marked program kept the unmarked digest %s", tc.name, d)
 		}
 		b, err := execir.MarshalPrograms(map[string]*execir.Program{"w": prog})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(b), `"documentReturn":true`) {
-			t.Errorf("%s: wire form lacks the bit: %s", tc.name, b)
+		if got := wireSHA(t, prog); got != fx.wireSHA256 {
+			t.Errorf("%s: wire bytes changed: sha256 %s, want %s (%s)", fx.name, got, fx.wireSHA256, b)
+		}
+		if got := WorkflowReturnShape(prog, wf); got != fx.shape {
+			t.Errorf("%s: shape %v, want %v", fx.name, got, fx.shape)
 		}
 		back, err := execir.UnmarshalPrograms(b)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !back["w"].DocumentReturn || back["w"].Digest() != d {
-			t.Errorf("%s: round trip lost the bit or changed the digest", tc.name)
+		if got := back["w"].Digest(); got != fx.digest {
+			t.Errorf("%s: round trip changed the digest: %s", fx.name, got)
 		}
-
-		old := *prog
-		old.DocumentReturn = false
-		if got := old.Digest(); got != tc.mainDigest {
-			t.Errorf("%s: unmarked digest %s, want the main pin %s", tc.name, got, tc.mainDigest)
-		}
-		if got := WorkflowReturnShape(&old, wf); got != ReturnDocument {
-			t.Errorf("%s: main-pinned unmarked program shape %v, want ReturnDocument", tc.name, got)
+		if got := WorkflowReturnShape(back["w"], wf); got != fx.shape {
+			t.Errorf("%s: round-tripped shape %v, want %v", fx.name, got, fx.shape)
 		}
 	}
 }
