@@ -611,7 +611,11 @@ func (wc *wfChecker) checkTemplate(s string, pos lang.Pos) (typeRef, lang.Diagno
 
 // checkTemplateToken resolves one ${…} token's inner binding path. The path is
 // split the way the execution IR splits it (interpPath: dot-separated, trimmed,
-// empty segments dropped); an empty path is left to lowering's diagnostic.
+// empty segments dropped). An empty path (`${}`, `${ . }`) names nothing, so it is
+// reported as an unresolved "" reference in every value position — the execution
+// IR would otherwise lower it to an empty Ref that fails only at run time. The
+// message and position match the resource projection's interpolateArg diagnostic,
+// so dedupDiags collapses the two for a call argument.
 func (wc *wfChecker) checkTemplateToken(inner string, pos lang.Pos) (typeRef, lang.Diagnostics) {
 	var parts []*lang.Ident
 	for _, p := range strings.Split(inner, ".") {
@@ -620,10 +624,14 @@ func (wc *wfChecker) checkTemplateToken(inner string, pos lang.Pos) (typeRef, la
 		}
 	}
 	if len(parts) == 0 {
-		return typeRef{}, nil
+		return typeRef{}, lang.Diagnostics{{Pos: pos, Msg: fmt.Sprintf(unresolvedInterpFmt, "")}}
 	}
-	return wc.resolveRef(&lang.RefExpr{Pos: pos, Parts: parts}, "unresolved reference %q in interpolation")
+	return wc.resolveRef(&lang.RefExpr{Pos: pos, Parts: parts}, unresolvedInterpFmt)
 }
+
+// unresolvedInterpFmt is the unresolved-token diagnostic, worded exactly as the
+// resource projection's (internal/lang/lower resolveTemplatePath) so the two dedup.
+const unresolvedInterpFmt = "unresolved reference %q in interpolation"
 
 // checkCall type-checks a call's arguments against its callee's declared
 // parameter/input types (when the callee is declared in this compilation
