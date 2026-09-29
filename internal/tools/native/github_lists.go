@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/Terfyn/terfyn/internal/spec"
+	"github.com/Terfyn/terfyn/internal/tools/toolctx"
 )
 
 // GitHub list (read) operations. Each is a GET returning a JSON array, decoded to a
@@ -25,13 +27,14 @@ import (
 // (githubGETURL takes a githubVettedURL), including the first page.
 //
 // List results are bounded by what the consumer can receive, not only by page
-// count: every tool output passes the engine's tool-output limit
-// (spec.DefaultMaxToolOutputBytes, truncate policy by default), and 100 real issue or
-// PR objects already exceed it. The walk therefore stops once the next whole item
-// would push the encoded items past githubListMaxOutputBytes, or once the caller's
-// optional `limit` is reached, and reports truncated=true when anything was left
-// unreturned. Items are never cut: the result is always a prefix of GitHub's order,
-// made of whole objects.
+// count: every tool output passes the tool-output limit its caller enforces (the
+// resolved project/workflow/tool maxToolOutputBytes, 256 KiB and truncate policy by
+// default), and 100 real issue or PR objects already exceed the default. The walk
+// therefore stops once the next whole item would push the encoded items past the
+// byte budget (githubListOutputBudget: three quarters of that resolved limit), or
+// once the caller's optional `limit` is reached, and reports truncated=true when
+// anything was left unreturned. Items are never cut: the result is always a prefix
+// of GitHub's order, made of whole objects.
 
 const (
 	githubListPerPage  = 100
@@ -39,13 +42,33 @@ const (
 	// githubListMaxLimit is the largest `limit` a list op accepts: what the page cap
 	// can ever return.
 	githubListMaxLimit = githubListPerPage * githubListMaxPages
-	// githubListMaxOutputBytes bounds the JSON-encoded size of the items one list call
-	// returns. It sits a quarter below the default tool-output limit so the whole
-	// result (items, the result key, and the truncated flag) passes the engine's limit
-	// untouched, with headroom for the envelope. The op cannot see a tool's resolved
-	// maxToolOutputBytes; a caller whose tool is configured lower uses `limit`.
-	githubListMaxOutputBytes = spec.DefaultMaxToolOutputBytes * 3 / 4
+	// githubListDefaultMaxOutputBytes is the item byte budget when the call context
+	// carries no resolved tool-output limit (a direct Registry.Call or Dispatch): three
+	// quarters of the default limit. See githubListOutputBudget.
+	githubListDefaultMaxOutputBytes = spec.DefaultMaxToolOutputBytes * 3 / 4
 )
+
+// githubListOutputBudget bounds the JSON-encoded size of the items one list call
+// returns. It is three quarters of the tool-output limit the caller will enforce on
+// this call (tools.OutputBudget, set by the engine's runToolStep and the MCP server's
+// PolicyDispatcher from spec.ResolveExecutionLimits), so the whole result (items, the
+// result key, and the truncated flag) passes that limit untouched with headroom for
+// the envelope, and raising maxToolOutputBytes for a GitHub tool returns more items.
+// Without a budget on the context it falls back to githubListDefaultMaxOutputBytes. A
+// non-positive budget means the caller enforces no output limit, so only `limit` and
+// the page cap bound the walk. A single item larger than the budget is still returned
+// alone (see githubGETArray); the caller's output limit then applies to it.
+func githubListOutputBudget(ctx context.Context) int {
+	n, ok := toolctx.OutputBudget(ctx)
+	switch {
+	case !ok:
+		return githubListDefaultMaxOutputBytes
+	case n <= 0:
+		return math.MaxInt
+	default:
+		return n - n/4 // 3/4 of n without overflowing n*3
+	}
+}
 
 // githubPullRequestList lists pull requests: GET /repos/{owner}/{repo}/pulls.
 // Optional filters: state (open|closed|all), head, base; optional limit.
@@ -114,7 +137,7 @@ func githubListQuery(with map[string]any, limit int, fields ...string) string {
 
 // githubGETArray walks a list endpoint and returns its items as a prefix of GitHub's
 // order: whole items only, at most limit of them, and at most
-// githubListMaxOutputBytes of JSON-encoded items (the first item is always kept, so an
+// githubListOutputBudget(ctx) bytes of JSON-encoded items (the first item is always kept, so an
 // oversized object cannot make the list look empty; the engine's generic output limit
 // then applies to it as it does to issues.get).
 //
@@ -128,6 +151,7 @@ func githubGETArray(ctx context.Context, path, op string, limit int) ([]any, boo
 		size     int
 		leftover bool
 		encErr   error
+		budget   = githubListOutputBudget(ctx)
 	)
 	more, err := githubWalkArray(ctx, path, op, func(page []any) bool {
 		for i, it := range page {
@@ -143,7 +167,7 @@ func githubGETArray(ctx context.Context, path, op string, limit int) ([]any, boo
 			n := len(b)
 			if len(items) > 0 {
 				n++ // separating comma
-				if size+n > githubListMaxOutputBytes {
+				if size+n > budget {
 					leftover = true
 					return false
 				}

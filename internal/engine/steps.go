@@ -186,6 +186,9 @@ func (e *Executor) runToolStep(ctx context.Context, runHandle *telemetry.RunHand
 	// tool blocks the run forever despite maxWallClockSeconds (#394).
 	toolCtx, cancelWC := e.wallClockDeadline(toolCtx, pol, pctx)
 	defer cancelWC()
+	// Tell the tool the output limit enforceToolOutput will apply below, so a tool that bounds its
+	// own result (the native GitHub list ops) sizes it to the resolved limit, not the default.
+	toolCtx = tools.WithOutputBudget(toolCtx, e.resolveToolLimits(wf, uses).MaxToolOutputBytes)
 	resp, err := e.Tools.Call(toolCtx, tools.ToolCallRequest{Uses: uses, With: withArgs})
 	if endTool != nil {
 		endTool(err)

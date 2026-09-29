@@ -48,12 +48,14 @@ func realisticIssuePage(page int) []any {
 	return items
 }
 
-// TestRun_githubIssuesListFitsDefaultToolOutputLimit runs the native issues.list op
-// through a real workflow step (runToolStep -> enforceToolOutput with the default
-// limits) against a repository with many realistic-size issues. The op must bound its
-// own result so the step succeeds, the engine never has to truncate it, and the
-// workflow sees truncated: true with whole items.
-func TestRun_githubIssuesListFitsDefaultToolOutputLimit(t *testing.T) {
+// runGitHubIssuesList runs the native issues.list op through a real workflow step
+// (runToolStep -> enforceToolOutput with the limits resolved for the step) against a
+// repository with many realistic-size issues, with optional project- and tool-level
+// limits. It requires that the step succeeds, that the engine never had to cut the
+// output (no tool_output limit_hit), and that the workflow sees truncated: true with
+// whole items in GitHub order; it returns the issues as downstream steps receive them.
+func runGitHubIssuesList(t *testing.T, projectLimits, toolLimits *spec.ExecutionLimits) []map[string]any {
+	t.Helper()
 	var api *httptest.Server
 	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page := 1
@@ -75,6 +77,8 @@ func TestRun_githubIssuesListFitsDefaultToolOutputLimit(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	graph := demoWorkflowGraph(t)
+	graph.Spec.Limits = projectLimits
+	graph.Tools["helper"].Spec.Limits = toolLimits
 	graph.Workflows["demo"].Spec.Steps = []spec.WorkflowStep{{
 		ID:   "list",
 		Uses: "tool.helper.issues.list",
@@ -83,12 +87,6 @@ func TestRun_githubIssuesListFitsDefaultToolOutputLimit(t *testing.T) {
 	graph.Workflows["demo"].Spec.Output = &spec.WorkflowOutput{Value: map[string]any{
 		"truncated": "${steps.list.output.truncated}",
 	}}
-
-	// Guard against a vacuous test: one raw page of these issues must exceed the default
-	// limit (the engine would have to cut bodies or fail the step), as in the bug report.
-	if n, err := trace.JSONByteLen(map[string]any{"issues": realisticIssuePage(1)}); err != nil || n <= spec.DefaultMaxToolOutputBytes {
-		t.Fatalf("a raw 100-issue page is %d bytes (err %v), within the default tool-output limit; fixture is not realistic enough", n, err)
-	}
 
 	runID := "run-gh-list"
 	started := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
@@ -157,5 +155,56 @@ func TestRun_githubIssuesListFitsDefaultToolOutputLimit(t *testing.T) {
 		if is["number"] != float64(i+1) || is["body"] != want["body"] {
 			t.Fatalf("issue %d is not whole and in order (number %v, body %d bytes)", i+1, is["number"], len(fmt.Sprint(is["body"])))
 		}
+	}
+	return out.Issues
+}
+
+// TestRun_githubIssuesListFitsDefaultToolOutputLimit: with the default limits the op
+// bounds its own result so the step succeeds without engine truncation.
+func TestRun_githubIssuesListFitsDefaultToolOutputLimit(t *testing.T) {
+	// Guard against a vacuous test: one raw page of these issues must exceed the default
+	// limit (the engine would have to cut bodies or fail the step), as in the bug report.
+	if n, err := trace.JSONByteLen(map[string]any{"issues": realisticIssuePage(1)}); err != nil || n <= spec.DefaultMaxToolOutputBytes {
+		t.Fatalf("a raw 100-issue page is %d bytes (err %v), within the default tool-output limit; fixture is not realistic enough", n, err)
+	}
+	runGitHubIssuesList(t, nil, nil)
+}
+
+// TestRun_githubIssuesListFitsLoweredToolOutputLimit: a project maxToolOutputBytes
+// below the default, with the fail policy (any engine-side overflow would fail the
+// step), still yields whole items that pass the resolved limit untouched, and fewer of
+// them than at the default.
+func TestRun_githubIssuesListFitsLoweredToolOutputLimit(t *testing.T) {
+	const lowered = 128 << 10
+	if n, err := trace.JSONByteLen(map[string]any{"issues": realisticIssuePage(1)[:30]}); err != nil || n <= lowered {
+		t.Fatalf("30 raw issues are %d bytes (err %v), within %d; fixture would not exercise the lowered limit", n, err, lowered)
+	}
+	def := len(runGitHubIssuesList(t, nil, nil))
+	got := runGitHubIssuesList(t, &spec.ExecutionLimits{
+		MaxToolOutputBytes:     lowered,
+		ToolOutputExceedPolicy: spec.LimitExceedFail,
+	}, nil)
+	if len(got) >= def {
+		t.Fatalf("lowered limit returned %d issues, default returned %d; want fewer at the lower limit", len(got), def)
+	}
+	if n, err := trace.JSONByteLen(map[string]any{"issues": got, "truncated": true}); err != nil || n > lowered {
+		t.Fatalf("result is %d bytes (err %v), over the resolved limit %d", n, err, lowered)
+	}
+}
+
+// TestRun_githubIssuesListUsesRaisedToolOutputLimit: raising maxToolOutputBytes on the
+// GitHub tool (per-tool override, top precedence over the project) returns more
+// items than the default, instead of pinning the list to the default budget.
+func TestRun_githubIssuesListUsesRaisedToolOutputLimit(t *testing.T) {
+	const raised = 1 << 20
+	def := len(runGitHubIssuesList(t, nil, nil))
+	got := runGitHubIssuesList(t,
+		&spec.ExecutionLimits{MaxToolOutputBytes: 64 << 10}, // lower project baseline the tool override must beat
+		&spec.ExecutionLimits{MaxToolOutputBytes: raised, ToolOutputExceedPolicy: spec.LimitExceedFail})
+	if len(got) <= def {
+		t.Fatalf("raised limit returned %d issues, default returned %d; want more at the raised limit", len(got), def)
+	}
+	if n, err := trace.JSONByteLen(map[string]any{"issues": got, "truncated": true}); err != nil || n > raised || n <= spec.DefaultMaxToolOutputBytes {
+		t.Fatalf("result is %d bytes (err %v), want above the default limit and within the raised limit %d", n, err, raised)
 	}
 }

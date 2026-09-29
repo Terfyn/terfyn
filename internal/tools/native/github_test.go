@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/Terfyn/terfyn/internal/spec"
+	"github.com/Terfyn/terfyn/internal/tools/toolctx"
 )
 
 func TestGithubPullRequestGet_happyPath(t *testing.T) {
@@ -1034,8 +1036,8 @@ func TestIssuesListStopsAtByteBudgetWithRealisticItems(t *testing.T) {
 	}
 	// The budget is filled: the next whole item would not have fit.
 	nextB, _ := json.Marshal(fakeGitHubIssue(len(issues)+1, fakeIssueBodyLen(len(issues)+1)))
-	if itemsBytes+len(nextB) <= githubListMaxOutputBytes {
-		t.Fatalf("stopped at %d bytes although the next %d-byte item fit in %d", itemsBytes, len(nextB), githubListMaxOutputBytes)
+	if itemsBytes+len(nextB) <= githubListDefaultMaxOutputBytes {
+		t.Fatalf("stopped at %d bytes although the next %d-byte item fit in %d", itemsBytes, len(nextB), githubListDefaultMaxOutputBytes)
 	}
 	total, _ := json.Marshal(out)
 	if len(total) > spec.DefaultMaxToolOutputBytes {
@@ -1047,7 +1049,7 @@ func TestIssuesListKeepsOversizedFirstItem(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]any{
-			fakeGitHubIssue(1, githubListMaxOutputBytes+1),
+			fakeGitHubIssue(1, githubListDefaultMaxOutputBytes+1),
 			fakeGitHubIssue(2, 100),
 		})
 	}))
@@ -1060,6 +1062,87 @@ func TestIssuesListKeepsOversizedFirstItem(t *testing.T) {
 	}
 	if len(arr) != 1 || !truncated {
 		t.Fatalf("got %d items truncated=%v, want the oversized first item alone and truncated", len(arr), truncated)
+	}
+}
+
+func TestGithubListOutputBudget(t *testing.T) {
+	bg := context.Background()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want int
+	}{
+		{"no budget on context", bg, githubListDefaultMaxOutputBytes},
+		{"default limit", toolctx.WithOutputBudget(bg, spec.DefaultMaxToolOutputBytes), githubListDefaultMaxOutputBytes},
+		{"lowered limit", toolctx.WithOutputBudget(bg, 128<<10), 96 << 10},
+		{"raised limit", toolctx.WithOutputBudget(bg, 1<<20), 768 << 10},
+		{"no limit (0)", toolctx.WithOutputBudget(bg, 0), math.MaxInt},
+		{"no limit (negative)", toolctx.WithOutputBudget(bg, -1), math.MaxInt},
+		{"huge limit does not overflow", toolctx.WithOutputBudget(bg, math.MaxInt), math.MaxInt - math.MaxInt/4},
+	}
+	for _, tc := range tests {
+		if got := githubListOutputBudget(tc.ctx); got != tc.want {
+			t.Errorf("%s: budget = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestIssuesListFollowsContextOutputBudget checks that the byte bound tracks the
+// resolved tool-output limit carried on the call context: a lowered limit returns
+// fewer whole items, a raised one more, and "no limit" returns up to the page cap's
+// worth of what was asked for (limit), always as a prefix of whole items.
+func TestIssuesListFollowsContextOutputBudget(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var api *httptest.Server
+	api = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			_, _ = fmt.Sscan(p, &page)
+		}
+		items := make([]any, 0, githubListPerPage)
+		for i := 0; i < githubListPerPage; i++ {
+			n := (page-1)*githubListPerPage + i + 1
+			items = append(items, fakeGitHubIssue(n, fakeIssueBodyLen(n)))
+		}
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/o/r/issues?per_page=100&page=%d>; rel="next"`, api.URL, page+1))
+		_ = json.NewEncoder(w).Encode(items)
+	}))
+	t.Cleanup(api.Close)
+	t.Setenv("GITHUB_API_URL", api.URL)
+
+	count := func(ctx context.Context, limit int) (int, int, bool) {
+		t.Helper()
+		arr, truncated, err := githubGETArray(ctx, "/repos/o/r/issues", "issues.list", limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		size := 0
+		for i, it := range arr {
+			m := it.(map[string]any)
+			if int(m["number"].(float64)) != i+1 || len(m["body"].(string)) != fakeIssueBodyLen(i+1) {
+				t.Fatalf("item %d is not whole and in order", i)
+			}
+			b, _ := json.Marshal(it)
+			size += len(b) + 1
+		}
+		return len(arr), size, truncated
+	}
+	bg := context.Background()
+	def, _, defTrunc := count(bg, githubListMaxLimit)
+	low, lowSize, lowTrunc := count(toolctx.WithOutputBudget(bg, 128<<10), githubListMaxLimit)
+	high, highSize, highTrunc := count(toolctx.WithOutputBudget(bg, 1<<20), githubListMaxLimit)
+	if !defTrunc || !lowTrunc || !highTrunc {
+		t.Fatalf("truncated default=%v low=%v high=%v, want all true", defTrunc, lowTrunc, highTrunc)
+	}
+	if !(low < def && def < high) {
+		t.Fatalf("item counts low=%d default=%d high=%d, want low < default < high", low, def, high)
+	}
+	if lowSize > 96<<10 || highSize > 768<<10 {
+		t.Fatalf("items exceed 3/4 of the limit: low %d bytes, high %d bytes", lowSize, highSize)
+	}
+	unl, _, unlTrunc := count(toolctx.WithOutputBudget(bg, 0), 250)
+	if unl != 250 || !unlTrunc {
+		t.Fatalf("no output limit: got %d items truncated=%v, want the 250 asked for and truncated", unl, unlTrunc)
 	}
 }
 
