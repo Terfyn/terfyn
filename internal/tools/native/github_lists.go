@@ -57,12 +57,14 @@ const (
 // headroom for the envelope. The MCP server's PolicyDispatcher advertises the resolved
 // maxToolOutputBytes. The engine's runToolStep advertises the smaller of that and half
 // the run's maxCheckpointBytes, because a workflow step's output must also fit the
-// checkpoint, where a suspension stores it twice (engine toolOutputBudget). So raising
-// maxToolOutputBytes for a GitHub tool returns more items only up to that clamp; past
-// it, raise maxCheckpointBytes as well. The clamp is per call: every list step in a
-// workflow shares one checkpoint, and keeping their sum (and every other step's
-// output) within maxCheckpointBytes is the operator's responsibility; a run that
-// exceeds it fails at the checkpoint, not at the list.
+// checkpoint, where a suspension stores it at least twice (engine toolOutputBudget). So
+// raising maxToolOutputBytes for a GitHub tool returns more items only up to that clamp;
+// past it, raise maxCheckpointBytes as well. The clamp is per call and covers only those
+// two copies: every list step in a workflow shares one checkpoint, an approval whose
+// `with` carries the list stores another copy, and a list inside a loop leaves one memo
+// copy per iteration. Keeping that sum (and every other step's output) within
+// maxCheckpointBytes is the operator's responsibility; a run that exceeds it fails at
+// the checkpoint, not at the list.
 // Without a budget on the context it falls back to githubListDefaultMaxOutputBytes. A
 // non-positive budget means the caller enforces no output limit, so only `limit` and
 // the page cap bound the walk. A single item larger than the budget is still returned

@@ -189,8 +189,8 @@ func (e *Executor) runToolStep(ctx context.Context, runHandle *telemetry.RunHand
 	defer cancelWC()
 	// Tell the tool how large an output this step can actually keep, so a tool that bounds its own
 	// result (the native GitHub list ops) sizes it to the resolved limits, not the default: the
-	// tool-output limit enforceToolOutput applies below, clamped to what the run's checkpoint can
-	// hold (see toolOutputBudget).
+	// tool-output limit enforceToolOutput applies below, clamped to half the run's checkpoint limit
+	// (see toolOutputBudget for what that clamp does and does not cover).
 	toolCtx = tools.WithOutputBudget(toolCtx, e.toolOutputBudget(wf, uses))
 	resp, err := e.Tools.Call(toolCtx, tools.ToolCallRequest{Uses: uses, With: withArgs})
 	if endTool != nil {

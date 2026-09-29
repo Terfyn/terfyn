@@ -332,10 +332,11 @@ func TestRun_githubIssuesListClampedToCheckpointLimit(t *testing.T) {
 }
 
 // TestRun_githubListThenApprovalGateSuspends: a suspension checkpoint stores a completed
-// step's output twice (steps + the execir memo), which is why the clamp is half the
-// checkpoint limit. With a 2 MiB tool limit, a list followed by an approval gate must
-// suspend cleanly (a clamp at the full checkpoint limit would put ~1.5 MiB of list
-// output in that checkpoint and fail the run instead of interrupting it).
+// step's output at least twice (steps + the execir memo), which is why the clamp is half
+// the checkpoint limit. With a 2 MiB tool limit, a list followed by an approval gate that
+// does not carry the list must suspend cleanly (a clamp at the full checkpoint limit
+// would put ~1.5 MiB of list output in that checkpoint and fail the run instead of
+// interrupting it). A gate that carries the list is the next test.
 func TestRun_githubListThenApprovalGateSuspends(t *testing.T) {
 	r := runGitHubListWorkflow(t, nil,
 		&spec.ExecutionLimits{MaxToolOutputBytes: 2 << 20, ToolOutputExceedPolicy: spec.LimitExceedFail},
@@ -356,6 +357,33 @@ func TestRun_githubListThenApprovalGateSuspends(t *testing.T) {
 	}
 	if o := outs["list"]; !o.Truncated || len(o.Issues) == 0 {
 		t.Fatalf("list output in the suspension checkpoint: truncated=%v, %d issues", o.Truncated, len(o.Issues))
+	}
+}
+
+// TestRun_githubListCarriedByApprovalGateExceedsCheckpoint documents the limit of the
+// half-checkpoint clamp: two copies is a floor, not the count. An approval whose `with`
+// shows the list stores a third copy (the pending gate) next to steps and the execir
+// memo, so with a 2 MiB tool limit one clamped list (about 384 KiB) no longer fits the
+// default 1 MiB suspension checkpoint and the run fails at the checkpoint instead of
+// suspending. Sizing that is the operator's responsibility (raise maxCheckpointBytes, or
+// lower the tool's maxToolOutputBytes); the clamp deliberately does not assume it.
+func TestRun_githubListCarriedByApprovalGateExceedsCheckpoint(t *testing.T) {
+	r := runGitHubListWorkflow(t, nil,
+		&spec.ExecutionLimits{MaxToolOutputBytes: 2 << 20, ToolOutputExceedPolicy: spec.LimitExceedFail},
+		[]spec.WorkflowStep{
+			githubListStep("list", "issues.list"),
+			{ID: "gate", Approval: &spec.WorkflowApprovalValue{Enabled: true}, With: map[string]any{"issues": "${steps.list.output.issues}"}},
+		},
+		map[string]any{"truncated": "${steps.list.output.truncated}"}, HitlRunOptions{})
+	if errors.Is(r.runErr, ErrInterrupted) {
+		t.Fatal("run suspended; want it to fail at the checkpoint (three copies of a half-checkpoint list)")
+	}
+	got, err := r.st.GetRun(context.Background(), r.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "failed" || !strings.Contains(got.ErrorText, "checkpoint context exceeds") {
+		t.Fatalf("status %q err=%q (run err %v), want failed on the checkpoint limit", got.Status, got.ErrorText, r.runErr)
 	}
 }
 

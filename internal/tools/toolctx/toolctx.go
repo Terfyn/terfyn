@@ -12,8 +12,10 @@ type outputBudgetKey struct{}
 // WithOutputBudget returns ctx carrying the largest output, in JSON bytes, that the caller can keep
 // from this call: at most the resolved tool-output limit it will enforce
 // (spec.ResolvedExecutionLimits.MaxToolOutputBytes), and less when the output must also fit another
-// limit (the engine clamps it to half the run's maxCheckpointBytes, because a step output is
-// checkpointed). n <= 0 is stored as-is and means "no limit", matching how the engine and the MCP
+// limit (the engine clamps it to half the run's maxCheckpointBytes, because a suspension checkpoint
+// stores a step output at least twice). It bounds this one output; it does not guarantee the run can
+// keep it: other outputs, an approval that carries it, or a loop that repeats it share the same
+// checkpoint, and sizing that sum is the operator's job. n <= 0 is stored as-is and means "no limit", matching how the engine and the MCP
 // server treat a non-positive maxBytes.
 func WithOutputBudget(ctx context.Context, n int) context.Context {
 	return context.WithValue(ctx, outputBudgetKey{}, n)
