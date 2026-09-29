@@ -1,11 +1,13 @@
 package check
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/lang"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
 
@@ -350,5 +352,73 @@ workflow demo(input: String) -> String {
 				}
 			})
 		}
+	}
+}
+
+// TestCheck_MultiTokenArgumentReportedOnce: in a call argument both the checker
+// and the resource lowering report each bad ${…} token at the string's position,
+// in token order, so a two-token string yields checker [t1, t2] then lowering
+// [t1, t2]. The duplicates are interleaved, not adjacent; each message must still
+// be reported exactly once.
+func TestCheck_MultiTokenArgumentReportedOnce(t *testing.T) {
+	t.Parallel()
+	const tmpl = `unresolved reference %q in interpolation`
+	cases := map[string][]string{
+		`"${}${zz}"`:   {"", "zz"},
+		`"${yy}${zz}"`: {"yy", "zz"},
+	}
+	for arg, names := range cases {
+		t.Run(arg, func(t *testing.T) {
+			t.Parallel()
+			src := `
+agent echo {
+    model mock/default
+    instructions "echo"
+    input String
+    output String
+}
+
+workflow demo(input: String) -> String {
+    r = echo(` + arg + `)
+    return input
+}
+`
+			_, diags := Check(parseOrFatal(t, src), Options{SchemaDir: "testdata"})
+			if !diags.HasErrors() {
+				t.Fatalf("expected errors, got %v", diagMessages(diags))
+			}
+			msgs := diagMessages(diags)
+			for _, name := range names {
+				want := fmt.Sprintf(tmpl, name)
+				n := 0
+				for _, m := range msgs {
+					if m == want {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Fatalf("%q must be reported exactly once, got %d in %v", want, n, msgs)
+				}
+			}
+		})
+	}
+}
+
+// TestDedupDiags_NonAdjacent: dedupDiags drops every exact (Pos, Msg, Severity)
+// duplicate, not only adjacent ones, keeping first-occurrence order; entries that
+// differ in any one of the three survive.
+func TestDedupDiags_NonAdjacent(t *testing.T) {
+	t.Parallel()
+	p := lang.Pos{File: "a.agent", Line: 3, Column: 5}
+	q := lang.Pos{File: "a.agent", Line: 3, Column: 6}
+	t1 := lang.Diagnostic{Pos: p, Msg: "t1"}
+	t2 := lang.Diagnostic{Pos: p, Msg: "t2"}
+	t1Warn := lang.Diagnostic{Pos: p, Msg: "t1", Severity: lang.SeverityWarning}
+	t1Q := lang.Diagnostic{Pos: q, Msg: "t1"}
+	in := lang.Diagnostics{t1, t2, t1, t2, t1Warn, t1Q, t1, t1Warn}
+	got := dedupDiags(in.Sorted())
+	want := lang.Diagnostics{t1, t2, t1Warn, t1Q}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("dedupDiags = %v, want %v", got, want)
 	}
 }
