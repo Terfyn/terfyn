@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/models"
 	"github.com/Terfyn/terfyn/internal/schema"
 	"github.com/Terfyn/terfyn/internal/spec"
@@ -117,7 +118,7 @@ func parseToolCallArgs(raw json.RawMessage) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := jsonnum.Unmarshal(raw, &v); err != nil {
 		return nil, fmt.Errorf("engine: tool call arguments are not JSON: %w", err)
 	}
 	if v == nil {

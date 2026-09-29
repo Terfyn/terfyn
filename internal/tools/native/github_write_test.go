@@ -53,7 +53,7 @@ func TestGithubIssuesCreate_happyPath(t *testing.T) {
 		t.Fatalf("payload %#v", stub.body)
 	}
 	// Result is the curated subset — number/id/html_url/state, not the whole object.
-	if out["number"] != float64(42) || out["state"] != "open" {
+	if out["number"] != int64(42) || out["state"] != "open" {
 		t.Fatalf("out %#v", out)
 	}
 	if _, leaked := out["extra"]; leaked {
@@ -79,7 +79,7 @@ func TestGithubIssuesComment_happyPath(t *testing.T) {
 	if stub.path != "/repos/acme/api/issues/42/comments" || stub.body["body"] != "hi" {
 		t.Fatalf("request %s payload %#v", stub.path, stub.body)
 	}
-	if out["id"] != float64(7) {
+	if out["id"] != int64(7) {
 		t.Fatalf("out %#v", out)
 	}
 }
@@ -187,7 +187,7 @@ func TestGithubIssuesUpdate_bodyHandling(t *testing.T) {
 		if !strings.Contains(stub.rawBody, `"body":""`) {
 			t.Fatalf("expected exact `\"body\":\"\"` in raw json, got %s", stub.rawBody)
 		}
-		if out["number"] != float64(42) {
+		if out["number"] != int64(42) {
 			t.Fatalf("out %#v", out)
 		}
 	})
@@ -313,7 +313,7 @@ func TestGithubPullRequestUpdate_bodyHandling(t *testing.T) {
 		if !strings.Contains(stub.rawBody, `"body":""`) {
 			t.Fatalf("expected exact `\"body\":\"\"` in raw json, got %s", stub.rawBody)
 		}
-		if out["number"] != float64(101) {
+		if out["number"] != int64(101) {
 			t.Fatalf("out %#v", out)
 		}
 	})

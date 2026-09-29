@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 const (
@@ -50,7 +52,7 @@ func githubPullRequestGet(ctx context.Context, with map[string]any) (map[string]
 		return nil, err
 	}
 	var pr map[string]any
-	if err := json.Unmarshal(b, &pr); err != nil {
+	if err := jsonnum.Unmarshal(b, &pr); err != nil {
 		return nil, fmt.Errorf("native: pull_request.get decode: %w", err)
 	}
 	return map[string]any{"pull_request": pr}, nil
@@ -72,7 +74,7 @@ func githubIssuesGet(ctx context.Context, with map[string]any) (map[string]any, 
 		return nil, err
 	}
 	var issue map[string]any
-	if err := json.Unmarshal(b, &issue); err != nil {
+	if err := jsonnum.Unmarshal(b, &issue); err != nil {
 		return nil, fmt.Errorf("native: issues.get decode: %w", err)
 	}
 	return map[string]any{"issue": issue}, nil
@@ -159,7 +161,7 @@ func githubCheckRunsList(ctx context.Context, with map[string]any) (map[string]a
 		return nil, err
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(b, &payload); err != nil {
+	if err := jsonnum.Unmarshal(b, &payload); err != nil {
 		return nil, fmt.Errorf("native: check_runs.list decode: %w", err)
 	}
 	return payload, nil

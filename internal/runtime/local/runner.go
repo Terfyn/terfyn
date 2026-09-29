@@ -11,6 +11,7 @@ import (
 
 	"github.com/Terfyn/terfyn/internal/config"
 	"github.com/Terfyn/terfyn/internal/engine"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/models"
 	"github.com/Terfyn/terfyn/internal/plan"
 	"github.com/Terfyn/terfyn/internal/runtime"
@@ -44,7 +45,7 @@ func (r *Runtime) Invoke(ctx context.Context, cfg *config.ResolvedConfig, opts r
 	if len(opts.InputJSON) == 0 {
 		input = map[string]any{}
 	} else {
-		if err := json.Unmarshal(opts.InputJSON, &input); err != nil {
+		if err := jsonnum.Unmarshal(opts.InputJSON, &input); err != nil {
 			return runtime.RunResult{}, fmt.Errorf("local: invalid input JSON: %w", err)
 		}
 	}
@@ -196,7 +197,7 @@ func (r *Runtime) Resume(ctx context.Context, cfg *config.ResolvedConfig, opts r
 	}
 
 	var input map[string]any
-	if err := json.Unmarshal([]byte(run.InputJSON), &input); err != nil {
+	if err := jsonnum.Unmarshal([]byte(run.InputJSON), &input); err != nil {
 		return runtime.RunResult{RunID: runID}, fmt.Errorf("local: invalid stored input JSON: %w", err)
 	}
 	if input == nil {

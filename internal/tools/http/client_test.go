@@ -30,7 +30,7 @@ func TestExecute_httptest_GET_success(t *testing.T) {
 	if meta.DurationMs < 0 {
 		t.Fatalf("meta %+v", meta)
 	}
-	if out["ok"] != true || out["n"] != float64(1) {
+	if out["ok"] != true || out["n"] != int64(1) {
 		t.Fatalf("output %+v", out)
 	}
 }
@@ -183,5 +183,15 @@ func TestExecute_GET_rejectsNestedWith(t *testing.T) {
 		map[string]any{"filter": map[string]any{"role": "admin"}}, srv.Client())
 	if err == nil {
 		t.Fatal("expected error for nested query value, got nil")
+	}
+}
+
+func TestDecodeResponseBody_IntegersAbove2p53AreExact(t *testing.T) {
+	out, err := decodeResponseBody([]byte(`{"id":9007199254740993,"x":1.5}`), "application/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["id"] != int64(9007199254740993) || out["x"] != 1.5 {
+		t.Fatalf("decoded %#v", out)
 	}
 }

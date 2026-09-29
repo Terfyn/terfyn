@@ -56,6 +56,11 @@ func TestOperationInputSchema(t *testing.T) {
 	if _, ok := OperationInputSchema("run_tests"); !ok {
 		t.Errorf("run_tests should have a (no-arg) schema")
 	}
+	for _, op := range []string{"diff", "status"} {
+		if _, ok := OperationInputSchema(op); !ok {
+			t.Errorf("%s should have a (no-required-arg) schema", op)
+		}
+	}
 	// An unknown op has no schema (caller advertises the permissive default).
 	if _, ok := OperationInputSchema("definitely_not_an_op"); ok {
 		t.Errorf("unknown op should return ok=false")

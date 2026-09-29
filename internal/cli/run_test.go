@@ -754,3 +754,31 @@ func TestClassifyRunError_maxCostDeniedExit5(t *testing.T) {
 		t.Fatalf("ExitCodeOf=%d want %d", ExitCodeOf(NewExitError(classifyRunError(wrapped), wrapped)), ExitPolicyDenied)
 	}
 }
+
+// TestBuildRunInputJSON_PreservesIntegersAbove2p53 pins the CLI ingress (S7): an --input-file
+// integer past 2^53 must reach the stored run input exactly, not rounded through float64.
+func TestBuildRunInputJSON_PreservesIntegersAbove2p53(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "in.json")
+	if err := os.WriteFile(f, []byte(`{"a":9007199254740992,"b":9007199254740993,"f":1.5}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := buildRunInputJSON(f, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), `{"a":9007199254740992,"b":9007199254740993,"f":1.5}`; got != want {
+		t.Fatalf("stored input = %s, want %s", got, want)
+	}
+}
+
+// TestParseHitlDecisionOptions_EditPreservesLargeIntegers: an operator edit is decoded on the same
+// canonical number model as the checkpointed args it is validated against.
+func TestParseHitlDecisionOptions_EditPreservesLargeIntegers(t *testing.T) {
+	hd, err := parseHitlDecisionOptions("edit", `{"id":9007199254740993}`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hd.EditedWith["id"] != int64(9007199254740993) {
+		t.Fatalf("edit id = %#v", hd.EditedWith["id"])
+	}
+}

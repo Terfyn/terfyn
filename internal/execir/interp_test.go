@@ -498,6 +498,42 @@ func TestBranch_TakesThenAndElse(t *testing.T) {
 	}
 }
 
+func TestBranch_LargeIntegersStayDistinct(t *testing.T) {
+	t.Parallel()
+	const a int64 = 9007199254740992
+	const b int64 = 9007199254740993
+	eqProg := &Program{
+		Workflow: "W", Params: []string{"input"},
+		Body: []Node{
+			&Branch{
+				Cond: BinOp{Op: "==", X: Leaf{V: Ref{Path: []string{"input", "a"}}}, Y: Leaf{V: Ref{Path: []string{"input", "b"}}}},
+				Then: []Node{&InvokeTool{Uses: "tool.t.equal"}},
+				Else: []Node{&InvokeTool{Uses: "tool.t.notequal"}},
+			},
+		},
+	}
+	ltProg := &Program{
+		Workflow: "W", Params: []string{"input"},
+		Body: []Node{
+			&Branch{
+				Cond: BinOp{Op: "<", X: Leaf{V: Ref{Path: []string{"input", "a"}}}, Y: Leaf{V: Ref{Path: []string{"input", "b"}}}},
+				Then: []Node{&InvokeTool{Uses: "tool.t.less"}},
+				Else: []Node{&InvokeTool{Uses: "tool.t.notless"}},
+			},
+		},
+	}
+	eqRec := &recorder{}
+	runProg(t, &Interp{Invoker: eqRec}, eqProg, map[string]any{"a": a, "b": b})
+	if got := eqRec.names(); len(got) != 1 || got[0] != "tool.t.notequal" {
+		t.Fatalf("%d == %d should take else-branch, got %v", a, b, got)
+	}
+	ltRec := &recorder{}
+	runProg(t, &Interp{Invoker: ltRec}, ltProg, map[string]any{"a": a, "b": b})
+	if got := ltRec.names(); len(got) != 1 || got[0] != "tool.t.less" {
+		t.Fatalf("%d < %d should take then-branch, got %v", a, b, got)
+	}
+}
+
 func TestBranch_BooleanLeafAndLogical(t *testing.T) {
 	t.Parallel()
 	prog := &Program{
@@ -728,6 +764,10 @@ func TestBranch_EqualityOverObjectsAndArrays(t *testing.T) {
 	}
 	if got := run([]any{int64(1), int64(2)}, []any{int64(1), float64(2)}); got != "tool.t.equal" {
 		t.Fatalf("arrays [1,2] and [1,2.0] should be == (numeric normalization), got %s", got)
+	}
+	const two53p1 int64 = (1 << 53) + 1
+	if got := run(two53p1, two53p1-1); got != "tool.t.notequal" {
+		t.Fatalf("integers above 2^53 must stay distinct, got %s", got)
 	}
 	if got := run([]any{int64(1)}, []any{int64(1), int64(2)}); got != "tool.t.notequal" {
 		t.Fatalf("arrays of different length should be !=, got %s", got)

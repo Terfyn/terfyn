@@ -12,6 +12,7 @@ import (
 	"github.com/Terfyn/terfyn/internal/config"
 	"github.com/Terfyn/terfyn/internal/engine"
 	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/runtime"
 	"github.com/Terfyn/terfyn/internal/spec"
@@ -70,7 +71,9 @@ func (a *RuntimeAdapter) Invoke(ctx context.Context, cfg *config.ResolvedConfig,
 
 	input := map[string]any{}
 	if len(opts.InputJSON) > 0 {
-		if err := json.Unmarshal(opts.InputJSON, &input); err != nil {
+		// Lossless decode (internal/jsonnum): the input is re-marshaled into the run
+		// row below, and a float64 decode would round integers past 2^53 there.
+		if err := jsonnum.Unmarshal(opts.InputJSON, &input); err != nil {
 			return runtime.RunResult{}, fmt.Errorf("agentcli: invalid input JSON: %w", err)
 		}
 	}
