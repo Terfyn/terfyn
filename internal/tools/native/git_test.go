@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // gitCfg runs git in dir with a fixed identity and no signing, failing the test on error.
@@ -982,6 +983,185 @@ func TestGitDiff_capsBytesDuringIO(t *testing.T) {
 	diff, _ := out["diff"].(string)
 	if len(diff) != maxGitDiffBytes {
 		t.Fatalf("diff bytes = %d, want exactly the I/O cap %d", len(diff), maxGitDiffBytes)
+	}
+}
+
+// TestGitDiff_keepsTailOfNormalSizeOutput is the regression for runGitCapped losing buffered tail
+// data: calling cmd.Wait before the pipe readers finished closed the read ends, so a diff well
+// under the cap (but larger than one pipe buffer, 64 KiB) could come back missing its final lines
+// with truncated=false. The last line of the file must be present.
+func TestGitDiff_keepsTailOfNormalSizeOutput(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	for _, size := range []int{70 << 10, 200 << 10, 600 << 10} {
+		var b strings.Builder
+		i := 0
+		for b.Len() < size {
+			b.WriteString(strings.Repeat("y", 48))
+			b.WriteByte('-')
+			b.WriteString(strconv.Itoa(i))
+			b.WriteByte('\n')
+			i++
+		}
+		b.WriteString("TAIL-SENTINEL-LINE\n")
+		if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for range 20 {
+			out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+			if err != nil {
+				t.Fatalf("diff: %v", err)
+			}
+			if out["truncated"] != false {
+				t.Fatalf("size %d: truncated = %v, want false (diff is far under the cap)", size, out["truncated"])
+			}
+			diff, _ := out["diff"].(string)
+			if !strings.HasSuffix(diff, "+TAIL-SENTINEL-LINE\n") {
+				t.Fatalf("size %d: diff lost its tail (len %d, last bytes %q)", size, len(diff), diff[max(0, len(diff)-60):])
+			}
+		}
+	}
+}
+
+// writeMarkerScript writes an executable shell helper that appends a line to marker and then runs
+// body, returning its path. Callers skip on Windows (no /bin/sh) before calling it.
+func writeMarkerScript(t *testing.T, dir, name, marker, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	src := "#!/bin/sh\necho ran >> '" + marker + "'\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func markerRan(marker string) bool {
+	_, err := os.Stat(marker)
+	return err == nil
+}
+
+// plainGit runs git without the read-only hardening, as a positive control that a planted helper
+// really is reachable on this git build (otherwise "not run" would prove nothing).
+func plainGit(dir string, args ...string) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	_ = cmd.Run()
+}
+
+func TestGitDiff_doesNotRunTextconv(t *testing.T) {
+	requireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a /bin/sh textconv helper")
+	}
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	helpers := t.TempDir() // outside the repo so the helper and marker are not part of the delta
+	marker := filepath.Join(helpers, "textconv.ran")
+	script := writeMarkerScript(t, helpers, "tc.sh", marker, `cat "$1"`)
+	if err := os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("*.md diff=planted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", ".gitattributes")
+	gitCfg(t, root, "commit", "-m", "attrs")
+	gitCfg(t, root, "config", "diff.planted.textconv", "'"+script+"'")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plainGit(root, "diff", "HEAD")
+	if !markerRan(marker) {
+		t.Skip("this git build did not run the planted textconv driver; cannot exercise the guard")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, with := range []map[string]any{nil, {"staged": true}, {"base": "main"}} {
+		out, _, err := NewRegistry().Dispatch(context.Background(), "diff", with)
+		if err != nil {
+			t.Fatalf("diff %v: %v", with, err)
+		}
+		if markerRan(marker) {
+			t.Fatalf("git.diff %v executed the repository's textconv driver", with)
+		}
+		if with == nil {
+			if diff, _ := out["diff"].(string); !strings.Contains(diff, "+changed") {
+				t.Fatalf("diff missing raw hunk:\n%s", diff)
+			}
+		}
+	}
+}
+
+func TestGitStatusAndDiff_doNotRunFsmonitor(t *testing.T) {
+	requireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a /bin/sh fsmonitor hook")
+	}
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	helpers := t.TempDir()
+	marker := filepath.Join(helpers, "fsmonitor.ran")
+	// The v1/v2 hook protocols read a token argument and print a NUL-separated path list.
+	script := writeMarkerScript(t, helpers, "fsm.sh", marker, `printf '/\0'`)
+	gitCfg(t, root, "config", "core.fsmonitor", "'"+script+"'")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plainGit(root, "status", "--porcelain")
+	if !markerRan(marker) {
+		t.Skip("this git build did not run the planted fsmonitor hook; cannot exercise the guard")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if markerRan(marker) {
+		t.Fatal("git.status executed the repository's core.fsmonitor helper")
+	}
+	if paths, _ := out["paths"].([]string); len(paths) != 1 || paths[0] != "README.md" {
+		t.Fatalf("status paths = %v, want [README.md]", paths)
+	}
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil); err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if markerRan(marker) {
+		t.Fatal("git.diff executed the repository's core.fsmonitor helper")
+	}
+}
+
+// TestGitStatusAndDiff_doNotRewriteIndex: plain `git status`/`git diff` opportunistically refresh
+// stat data and rewrite .git/index; the workspace.read ops must leave it byte-for-byte alone.
+func TestGitStatusAndDiff_doNotRewriteIndex(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	readme := filepath.Join(root, "README.md")
+	// Same content, newer mtime: the index entry is stat-dirty, so a refresh would rewrite it.
+	if err := os.Chtimes(readme, time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(root, ".git", "index")
+	before, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []string{"status", "diff"} {
+		if _, _, err := NewRegistry().Dispatch(context.Background(), op, nil); err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		after, err := os.ReadFile(indexPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatalf("git.%s rewrote .git/index", op)
+		}
 	}
 }
 

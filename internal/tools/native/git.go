@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -107,45 +106,120 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// runGitCapped runs git in the workspace root, draining stdout through a byte-capped writer and
-// stderr through a separate bounded buffer. The cap applies during I/O so a huge working-tree
-// delta cannot be allocated before truncation (unlike CombinedOutput). truncated is true when
-// stdout exceeded stdoutMax. A non-zero exit is an error carrying a truncated tail of stderr
-// (falling back to the capped stdout).
+// readOnlyGitArgs prefixes args with the flags that keep an inspection command from executing
+// repository-configured helpers or writing to .git. It is applied to every runGitCapped call
+// (git.diff and git.status), not only to the subcommands' own flags:
+//   - --no-pager: never spawn core.pager / pager.<cmd>.
+//   - -c core.fsmonitor=false, -c core.useBuiltinFSMonitor=false: status/diff consult the
+//     fsmonitor hook (an arbitrary command from .git/config) to decide which files to stat.
+//   - --no-optional-locks: status opportunistically refreshes and rewrites .git/index; skip it.
+//     git diff does not honor this (git 2.34 still rewrites the index from refresh_index_quietly),
+//     which is why runGitCapped also points GIT_INDEX_FILE at a throwaway copy of the index.
+//
+// Per-subcommand flags (--no-ext-diff, --no-textconv) are added by the caller. Residual: a
+// repository-configured clean filter (filter.<name>.clean/process, e.g. git-lfs) selected by
+// .gitattributes still runs when git hashes a stat-dirty worktree file; git offers no flag to
+// disable it, and overriding it would make the reported delta wrong for those repositories.
+func readOnlyGitArgs(args []string) []string {
+	pre := []string{
+		"--no-pager",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.useBuiltinFSMonitor=false",
+		"--no-optional-locks",
+	}
+	return append(pre, args...)
+}
+
+// readOnlyGitEnv is the process environment for a read-only git run: the ambient environment
+// minus variables that name helpers to execute (GIT_EXTERNAL_DIFF, GIT_PAGER), plus
+// GIT_OPTIONAL_LOCKS=0 (belt and braces with --no-optional-locks, and it also covers any git
+// child process the command spawns, e.g. submodule status).
+func readOnlyGitEnv() []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		switch {
+		case strings.HasPrefix(kv, "GIT_EXTERNAL_DIFF="),
+			strings.HasPrefix(kv, "GIT_PAGER="),
+			strings.HasPrefix(kv, "GIT_OPTIONAL_LOCKS="):
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "GIT_OPTIONAL_LOCKS=0")
+}
+
+// isolatedIndex copies the repository's index to a throwaway file and returns the
+// GIT_INDEX_FILE assignment that points git at it, so any stat-cache refresh git decides to write
+// lands in the copy and never in .git/index. cleanup removes the copy. When the repository has no
+// index yet there is nothing to isolate and env is empty. Failure is an error (fail closed): a
+// read-only op must not fall back to running against the live index.
+func isolatedIndex(ctx context.Context, root string) (env string, cleanup func(), err error) {
+	noop := func() {}
+	out, err := runGit(ctx, root, "rev-parse", "--path-format=absolute", "--git-path", "index")
+	if err != nil {
+		// --path-format needs git 2.31+; fall back to a cwd-relative path.
+		if out, err = runGit(ctx, root, "rev-parse", "--git-path", "index"); err != nil {
+			return "", noop, err
+		}
+	}
+	src := strings.TrimSpace(out)
+	if !filepath.IsAbs(src) {
+		src = filepath.Join(root, src)
+	}
+	data, err := os.ReadFile(src)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", noop, nil
+	}
+	if err != nil {
+		return "", noop, fmt.Errorf("native: git: read index: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "terfyn-git-index-")
+	if err != nil {
+		return "", noop, fmt.Errorf("native: git: index copy: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	dst := filepath.Join(dir, "index")
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		cleanup()
+		return "", noop, fmt.Errorf("native: git: index copy: %w", err)
+	}
+	return "GIT_INDEX_FILE=" + dst, cleanup, nil
+}
+
+// gitWaitDelay bounds how long Run waits for the output copiers after git exits or the context is
+// cancelled, so a grandchild that inherited the pipe cannot wedge the call.
+const gitWaitDelay = 5 * time.Second
+
+// runGitCapped runs a read-only git command (see readOnlyGitArgs, isolatedIndex) in the workspace root. stdout
+// goes through a byte-capped writer and stderr through a separate bounded one, both assigned to
+// cmd.Stdout/cmd.Stderr so os/exec owns the pipes and Run does not return until every byte git
+// wrote has been copied (calling Wait before draining StdoutPipe can lose buffered tail data).
+// The cap applies during I/O so a huge working-tree delta cannot be allocated before truncation
+// (unlike CombinedOutput). truncated is true when stdout exceeded stdoutMax. A non-zero exit is an
+// error carrying a truncated tail of stderr (falling back to the capped stdout).
 func runGitCapped(ctx context.Context, root string, stdoutMax int, args ...string) (stdout string, truncated bool, err error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", readOnlyGitArgs(args)...)
 	cmd.Dir = root
-	stdoutPipe, err := cmd.StdoutPipe()
+	cmd.Env = readOnlyGitEnv()
+	indexEnv, cleanup, err := isolatedIndex(ctx, root)
 	if err != nil {
-		return "", false, fmt.Errorf("native: git %s: stdout pipe: %w", strings.Join(args, " "), err)
+		return "", false, err
 	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", false, fmt.Errorf("native: git %s: stderr pipe: %w", strings.Join(args, " "), err)
+	defer cleanup()
+	if indexEnv != "" {
+		cmd.Env = append(cmd.Env, indexEnv)
 	}
-	if err := cmd.Start(); err != nil {
-		return "", false, fmt.Errorf("native: git %s: %w", strings.Join(args, " "), err)
-	}
-	outCap := capBuffer{max: stdoutMax}
-	errCap := capBuffer{max: maxGitStderrBytes}
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(&outCap, stdoutPipe)
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(&errCap, stderrPipe)
-	}()
-	waitErr := cmd.Wait()
-	wg.Wait()
-	if waitErr != nil {
+	cmd.WaitDelay = gitWaitDelay
+	outCap := &capBuffer{max: stdoutMax}
+	errCap := &capBuffer{max: maxGitStderrBytes}
+	cmd.Stdout = outCap
+	cmd.Stderr = errCap
+	if runErr := cmd.Run(); runErr != nil {
 		msg := strings.TrimSpace(string(errCap.buf))
 		if msg == "" {
 			msg = strings.TrimSpace(string(outCap.buf))
 		}
-		return string(outCap.buf), outCap.truncated, fmt.Errorf("native: git %s: %w: %s", strings.Join(args, " "), waitErr, truncateRunes(msg, 512))
+		return string(outCap.buf), outCap.truncated, fmt.Errorf("native: git %s: %w: %s", strings.Join(args, " "), runErr, truncateRunes(msg, 512))
 	}
 	return string(outCap.buf), outCap.truncated, nil
 }
@@ -498,7 +572,7 @@ func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
 		}
 	}
 
-	args := []string{"diff", "--no-color", "--no-ext-diff"}
+	args := []string{"diff", "--no-color", "--no-ext-diff", "--no-textconv"}
 	if staged {
 		args = append(args, "--cached")
 	}

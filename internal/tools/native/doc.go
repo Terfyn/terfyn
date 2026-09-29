@@ -39,7 +39,11 @@
 // working-tree delta. diff is a unified diff (working tree vs HEAD by default; optional base ref,
 // staged, paths); status lists changed/added/deleted/untracked paths. Both are workspace.read
 // effects declared on the Tool resource's operations manifest, grantable to a read-only Reviewer
-// exactly like read_file. Deliberately narrow — no push to the default branch, no --force, no
+// exactly like read_file. Both run git with the pager, fsmonitor, textconv, and external-diff
+// helpers disabled and against a throwaway copy of the index, so they neither execute those
+// repository-configured commands nor rewrite .git/index; the one residual is a clean filter
+// (filter.<name>.clean, e.g. git-lfs) that .gitattributes selects, which git still runs when it
+// hashes a modified worktree file. Deliberately narrow — no push to the default branch, no --force, no
 // delete, no arbitrary git; branch names are validated so they cannot be read as a flag or a
 // delete refspec. commit stages all working-tree changes (git add -A) or an explicit paths list,
 // and reports "nothing to commit" as a graceful {committed:false} result rather than failing.
