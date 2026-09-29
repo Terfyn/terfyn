@@ -283,7 +283,7 @@ type WorkflowStep struct {
 	NeedsDeclared bool `yaml:"-" json:"needsDeclared,omitempty"`
 	// WholeDocument is the explicit call shape of an agent step lowered from a single
 	// UNNAMED argument, `Reviewer(value)` (issue #550): With then holds exactly one entry,
-	// keyed by the lowering placeholder "arg0", and that value is the agent's whole input
+	// keyed by the lowering placeholder [WholeDocumentArgKey], and that value is the agent's whole input
 	// document rather than a field of an input object. A named call — including one whose
 	// field is literally called arg0 — and a multi-argument positional call leave it false
 	// and With is the input object. Validation ([ValidateProjectGraph]) and execution
@@ -292,8 +292,20 @@ type WorkflowStep struct {
 	// changes what the step executes, so it must survive the deployment snapshot and be
 	// part of the resource hash, mirroring [NeedsDeclared]. Not author-settable in YAML
 	// (`yaml:"-"`); only `.agent` lowering (and snapshot hydration) sets it. Agent steps only.
+	// YAML export still shows it: [WorkflowStep.MarshalYAML] emits `wholeDocument: true`,
+	// a key the strict YAML decoder rejects, so the exported call shape is visible and
+	// a re-read of that stream fails loudly instead of loading it as a named-arg0 call.
 	WholeDocument bool `yaml:"-" json:"wholeDocument,omitempty"`
 }
+
+// WholeDocumentArgKey is the with:/argument key a whole-document agent argument is
+// stored under ([WorkflowStep.WholeDocument], execir.InvokeAgent.WholeDocument):
+// lowering has no symbol table to name the agent's single positional argument, so
+// it uses the positional placeholder. The invariant is "WholeDocument implies the
+// arguments are exactly {WholeDocumentArgKey: document}"; lowering, validation,
+// raise and the engine all use this one definition. The key alone never implies
+// the shape — a named call may use the same field name.
+const WholeDocumentArgKey = "arg0"
 
 type WorkflowOutput struct {
 	Value map[string]any `yaml:"value,omitempty" json:"value,omitempty"`

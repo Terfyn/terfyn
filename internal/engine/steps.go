@@ -267,10 +267,10 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 
 // agentInputDocument returns the value the model receives as the agent's input.
 // The call shape is the explicit step.WholeDocument bit set by lowering (#550): a
-// whole-document call (`Reviewer(value)`) passes the single "arg0" value itself;
-// every other call passes the with: map as the input object — including a named
-// call whose field is literally arg0. The shape is never inferred from a key
-// name. A step carrying the bit without exactly the one placeholder argument
+// whole-document call (`Reviewer(value)`) passes the single
+// [spec.WholeDocumentArgKey] value itself; every other call passes the with: map
+// as the input object — including a named call whose field is literally arg0.
+// The shape is never inferred from a key name. A step carrying the bit without exactly the one placeholder argument
 // violates the representation invariant ([spec.WorkflowStep.WholeDocument]) and
 // is refused rather than silently sent as an object.
 func agentInputDocument(step spec.WorkflowStep, with map[string]any) (any, error) {
@@ -280,16 +280,12 @@ func agentInputDocument(step spec.WorkflowStep, with map[string]any) (any, error
 		}
 		return with, nil
 	}
-	v, ok := with[wholeDocumentArgKey]
+	v, ok := with[spec.WholeDocumentArgKey]
 	if !ok || len(with) != 1 {
 		return nil, fmt.Errorf("engine: agent step %q is a whole-document call but has %d arguments (want exactly one positional argument)", step.ID, len(with))
 	}
 	return v, nil
 }
-
-// wholeDocumentArgKey is the placeholder key lowering stores a whole-document
-// agent argument under; meaningful only alongside spec.WorkflowStep.WholeDocument.
-const wholeDocumentArgKey = "arg0"
 
 // maxTokensStopError is the actionable run error when a completion stops at its output-token cap
 // (issue #514). Today it fails the step (a truncated write_file would be a corrupted partial file, so

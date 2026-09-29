@@ -173,7 +173,7 @@ func (el *execLowerer) lowerStmt(st lang.Stmt) []execir.Node {
 		val := el.lowerValue(s.Value, &pre)
 		return append(pre, &execir.Return{Pos: s.Pos, Value: val})
 	case *lang.ApprovalStmt:
-		node := &execir.Approval{Pos: s.Pos, Bind: identName(s.Bind), Args: el.lowerArgs(s.With, &pre)}
+		node := &execir.Approval{Pos: s.Pos, Bind: identName(s.Bind), Args: el.lowerArgs(s.With, false, &pre)}
 		if s.Description != nil {
 			node.Description = s.Description.Value
 		}
@@ -216,8 +216,10 @@ func (el *execLowerer) lowerFork(s *lang.ParallelStmt) *execir.Fork {
 // lowerCallNode lowers a call to an Invoke node, hoisting any nested-call
 // arguments into pre first. bind is the result binding, or "" for effect-only.
 func (el *execLowerer) lowerCallNode(bind string, c *lang.CallExpr, pre *[]execir.Node) execir.Node {
-	args := el.lowerArgs(c.Args, pre)
 	callee := c.Callee
+	// Only an agent callee (one-part, not a workflow) has a whole-document shape.
+	wholeDocument := callee != nil && len(callee.Parts) == 1 && !el.workflows[callee.Parts[0].Name] && isWholeDocumentCall(c.Args)
+	args := el.lowerArgs(c.Args, wholeDocument, pre)
 	if callee == nil || len(callee.Parts) == 0 {
 		el.diag(c.Pos, "call has no callee")
 		return &execir.InvokeAgent{Pos: c.Pos, Bind: bind}
@@ -229,7 +231,7 @@ func (el *execLowerer) lowerCallNode(bind string, c *lang.CallExpr, pre *[]execi
 	if el.workflows[name] {
 		return &execir.InvokeWorkflow{Pos: c.Pos, Bind: bind, Workflow: name, Args: args}
 	}
-	return &execir.InvokeAgent{Pos: c.Pos, Bind: bind, Agent: name, Args: args, WholeDocument: isWholeDocumentCall(c.Args)}
+	return &execir.InvokeAgent{Pos: c.Pos, Bind: bind, Agent: name, Args: args, WholeDocument: wholeDocument}
 }
 
 // isWholeDocumentCall reports the explicit call shape a single positional agent
@@ -242,17 +244,28 @@ func isWholeDocumentCall(args []*lang.Arg) bool {
 	return len(args) == 1 && args[0] != nil && (args[0].Name == nil || args[0].Name.Name == "")
 }
 
-func (el *execLowerer) lowerArgs(args []*lang.Arg, pre *[]execir.Node) map[string]execir.Value {
+// callArgKey is the with:/Args key call argument i lowers under: the single
+// [spec.WholeDocumentArgKey] placeholder for a whole-document agent call (the
+// invariant WholeDocument ⇒ exactly {WholeDocumentArgKey: v}), otherwise the
+// argument's name, or the positional placeholder argN (arguments have no symbol
+// table here; the checker rebinds workflow positional keys).
+func callArgKey(i int, arg *lang.Arg, wholeDocument bool) string {
+	if wholeDocument {
+		return spec.WholeDocumentArgKey
+	}
+	if arg != nil && arg.Name != nil && arg.Name.Name != "" {
+		return arg.Name.Name
+	}
+	return "arg" + strconv.Itoa(i)
+}
+
+func (el *execLowerer) lowerArgs(args []*lang.Arg, wholeDocument bool, pre *[]execir.Node) map[string]execir.Value {
 	if len(args) == 0 {
 		return nil
 	}
 	out := make(map[string]execir.Value, len(args))
 	for i, arg := range args {
-		key := "arg" + strconv.Itoa(i)
-		if arg.Name != nil && arg.Name.Name != "" {
-			key = arg.Name.Name
-		}
-		out[key] = el.lowerValue(arg.Value, pre)
+		out[callArgKey(i, arg, wholeDocument)] = el.lowerValue(arg.Value, pre)
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/Terfyn/terfyn/internal/lang"
 	"github.com/Terfyn/terfyn/internal/lang/lower"
@@ -681,8 +682,7 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 		diags = append(diags, d...)
 	}
 	if len(c.Args) == 1 && c.Args[0].Name == nil {
-		argType, _ := wc.checkExpr(c.Args[0].Value)
-		diags = append(diags, wc.checkCompatible(c.Args[0].Position(), argType, typeRef{doc: ai.Input},
+		diags = append(diags, wc.checkValueAgainst(c.Args[0].Value, c.Args[0].Position(), typeRef{doc: ai.Input},
 			fmt.Sprintf("input of %s", name))...)
 		return diags
 	}
@@ -703,6 +703,39 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 			len(c.Args), name, name),
 		Severity: lang.SeverityWarning,
 	})
+	return diags
+}
+
+// checkValueAgainst checks the value expression e against want. An object literal
+// is checked field by field against want's property types (recursively): its own
+// type is untyped, so checking it as one value would pass anything, while graph
+// validation types each interpolated field against the input location it fills
+// (#550) — the two must not disagree. A field the declared type forbids
+// (additionalProperties: false, or a field of a non-object) is an error, the same
+// "not declared" graph validation reports. Anything else is checked as one value.
+// Reference well-formedness diagnostics are the caller's (checkExpr), not repeated.
+func (wc *wfChecker) checkValueAgainst(e lang.Expr, pos lang.Pos, want typeRef, what string) lang.Diagnostics {
+	obj, ok := e.(*lang.ObjectExpr)
+	if !ok || want.doc == nil {
+		got, _ := wc.checkExpr(e)
+		return wc.checkCompatible(pos, got, want, what)
+	}
+	var diags lang.Diagnostics
+	for _, f := range obj.Fields {
+		if f == nil || f.Key == nil || f.Value == nil {
+			continue
+		}
+		path := append(append([]string(nil), want.path...), f.Key.Name)
+		field := fmt.Sprintf("%s field %q", what, strings.Join(path, "."))
+		if want.doc.Lookup(path).Missing {
+			diags = append(diags, lang.Diagnostic{
+				Pos: f.Position(),
+				Msg: fmt.Sprintf("%s is not declared by the declared type", field),
+			})
+			continue
+		}
+		diags = append(diags, wc.checkValueAgainst(f.Value, f.Value.Position(), typeRef{doc: want.doc, path: path}, field)...)
+	}
 	return diags
 }
 
