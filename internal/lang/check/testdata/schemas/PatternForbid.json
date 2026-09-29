@@ -1,0 +1,6 @@
+{
+  "type": "object",
+  "patternProperties": {
+    "^body$": false
+  }
+}

@@ -316,6 +316,80 @@ func TestLookup_booleanSubschemas(t *testing.T) {
 	}
 }
 
+// TestLookup_patternProperties covers Draft 2020-12 §10.3.2.2–§10.3.2.3 (issue #549 review):
+// every matching patternProperties subschema applies to a key alongside its properties entry, and
+// additionalProperties applies only to a key neither properties nor any pattern matched.
+func TestLookup_patternProperties(t *testing.T) {
+	type want struct {
+		missing, known bool
+		types          string
+	}
+	unconstrained := want{types: "any"}
+	forbidden := want{missing: true, types: "any"}
+	str := want{known: true, types: "string"}
+	integer := want{known: true, types: "integer"}
+	cases := []struct {
+		name   string
+		schema string
+		path   []string
+		want   want
+	}{
+		{"true pattern escapes additionalProperties false", `{"type":"object","patternProperties":{"^body$":true},"additionalProperties":false}`, []string{"body"}, unconstrained},
+		{"unmatched key still hits additionalProperties false", `{"type":"object","patternProperties":{"^body$":true},"additionalProperties":false}`, []string{"other"}, forbidden},
+		{"false pattern forbids key", `{"type":"object","patternProperties":{"^body$":false}}`, []string{"body"}, forbidden},
+		{"false pattern forbids descent", `{"type":"object","patternProperties":{"^body$":false}}`, []string{"body", "x"}, forbidden},
+		{"typed pattern", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}}}`, []string{"n_count"}, integer},
+		{"pattern is unanchored", `{"type":"object","patternProperties":{"_id":{"type":"string"}},"additionalProperties":false}`, []string{"user_id_x"}, str},
+		{"pattern does not shadow additionalProperties for other keys", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}},"additionalProperties":{"type":"string"}}`, []string{"s"}, str},
+		{"matched key skips additionalProperties", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}},"additionalProperties":{"type":"string"}}`, []string{"n_x"}, integer},
+		{"properties and true pattern", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":true}}`, []string{"body"}, str},
+		{"properties and false pattern", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":false}}`, []string{"body"}, forbidden},
+		{"true property and false pattern", `{"type":"object","properties":{"body":true},"patternProperties":{"^b":false}}`, []string{"body"}, forbidden},
+		{"two typed conjuncts are gradual", `{"type":"object","properties":{"body":{"type":"string"}},"patternProperties":{"^b":{"type":"integer"}}}`, []string{"body"}, unconstrained},
+		{"ref false pattern forbids key", `{"type":"object","patternProperties":{"^body$":{"$ref":"#/$defs/n"}},"$defs":{"n":false}}`, []string{"body"}, forbidden},
+		{"pattern ignored for array-only type", `{"type":"array","patternProperties":{"^0$":false},"items":{"type":"string"}}`, []string{"0"}, str},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "s.json")
+			if err := os.WriteFile(p, []byte(tc.schema), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			doc, err := LoadDocument(p)
+			if err != nil {
+				t.Fatalf("schema must compile: %v", err)
+			}
+			got := doc.Lookup(tc.path)
+			gotW := want{missing: got.Missing, known: got.Known, types: got.Types.String()}
+			if gotW != tc.want || got.Impossible {
+				t.Fatalf("Lookup(%v) = %+v (impossible=%v), want %+v", tc.path, gotW, got.Impossible, tc.want)
+			}
+		})
+	}
+}
+
+// TestLookup_patternPropertiesUncompilable: a pattern Go's regexp cannot compile (ECMA-262-only
+// lookahead) makes its match unknown. LoadDocument rejects such a schema (the runtime compiler uses
+// the same engine), so this builds the Document directly: the key must look up as unconstrained —
+// never a false "not declared" from additionalProperties — unless a definite conjunct forbids it.
+func TestLookup_patternPropertiesUncompilable(t *testing.T) {
+	doc := &Document{Raw: map[string]any{
+		"type":                 "object",
+		"patternProperties":    map[string]any{"^(?=b)": false, "^x$": false},
+		"properties":           map[string]any{"s": map[string]any{"type": "string"}},
+		"additionalProperties": false,
+	}}
+	if got := doc.Lookup([]string{"body"}); got.Missing || got.Known || got.Impossible {
+		t.Fatalf("unknown pattern match must be gradual, got %+v", got)
+	}
+	if got := doc.Lookup([]string{"x"}); !got.Missing {
+		t.Fatalf("a definite false pattern still forbids the key, got %+v", got)
+	}
+	if got := doc.Lookup([]string{"s"}); !got.Known || !got.Types.Has(TypeString) {
+		t.Fatalf("a definite properties conjunct still types the key, got %+v", got)
+	}
+}
+
 func TestLookupResult_String(t *testing.T) {
 	if got := (LookupResult{Impossible: true}).String(); got != "never" {
 		t.Fatalf("impossible = %q", got)

@@ -369,6 +369,77 @@ workflow Undeclared(input: Count) -> StringOnly
 				}
 			},
 		},
+		{
+			// Draft 2020-12 §10.3.2.3: additionalProperties applies only to names matched by neither
+			// properties nor patternProperties.
+			name: "patternProperties match is declared under additionalProperties false",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output PatternOpen
+}
+
+workflow W(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.body
+}
+
+workflow Typed(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.n_count
+}
+
+workflow Undeclared(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.other
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if hasSeverity(diags, lang.SeverityError, `"body" is not declared`) {
+					t.Fatalf("a true patternProperties match must not be forbidden, got %v", diagMessages(diags))
+				}
+				if !hasSeverity(diags, lang.SeverityError, "type integer is not compatible with declared type string") {
+					t.Fatalf("a typed patternProperties match must carry its type, got %v", diagMessages(diags))
+				}
+				if !hasSeverity(diags, lang.SeverityError, `"other" is not declared`) {
+					t.Fatalf("a key no pattern matches must still be forbidden, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "false patternProperties match forbids the key",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output PatternForbid
+}
+
+workflow W(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.body
+}
+
+workflow Other(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.other
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if !hasSeverity(diags, lang.SeverityError, `"body" is not declared`) {
+					t.Fatalf("expected body to be forbidden, got %v", diagMessages(diags))
+				}
+				if hasSeverity(diags, lang.SeverityError, `"other" is not declared`) {
+					t.Fatalf("a key no pattern matches falls to open additionalProperties, got %v", diagMessages(diags))
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {

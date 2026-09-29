@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // JSONType is a JSON Schema instance type (draft 2020-12).
@@ -93,19 +95,23 @@ func (d *Document) Schema() (raw any, ok bool) {
 
 // LookupResult is the static type of a JSON Schema path.
 //
-// Boolean schemas (Draft 2020-12 §4.3.2) are decoded wherever a subschema may appear — the root,
-// properties values, prefixItems/items, additionalProperties, and local "$ref" targets such as
-// "$defs" entries. A true subschema is unconstrained (the zero LookupResult). A false subschema
-// becomes Impossible when it is the schema of the whole value being looked up, and Missing when it
-// is reached by descending a key or index: {"properties":{"x":false}} is how Draft 2020-12 forbids
-// a key, so the enclosing instance can exist and x must simply be absent — the same state as an
-// undeclared key under additionalProperties: false.
+// Boolean schemas (Draft 2020-12 §4.3.2) are decoded in every subschema position Lookup descends
+// through — the root, properties and patternProperties values, prefixItems/items,
+// additionalProperties, and local "$ref" targets such as "$defs" entries. Applicators Lookup does
+// not interpret (allOf/anyOf/oneOf/not, if/then/else, dependentSchemas, unevaluated*, …) are not
+// consulted at all, boolean or not. A true subschema is unconstrained (the zero LookupResult). A
+// false subschema becomes Impossible when it is the schema of the whole value being looked up, and
+// Missing when it is reached by descending a key or index: {"properties":{"x":false}} is how
+// Draft 2020-12 forbids a key, so the enclosing instance can exist and x must simply be absent —
+// the same state as an undeclared key under additionalProperties: false. See
+// [lookupNamedProperty] for how properties, patternProperties and additionalProperties combine.
 type LookupResult struct {
 	Types TypeSet
 	// Known is true when the schema names at least one instance type at this path.
 	Known bool
 	// Missing is true when the path is forbidden: an undeclared property with
-	// additionalProperties: false, a property/item whose subschema is (or $refs to) boolean false,
+	// additionalProperties: false, a property/item whose subschema (under properties,
+	// patternProperties, prefixItems/items or additionalProperties) is (or $refs to) boolean false,
 	// or a descent through a non-object/array.
 	Missing bool
 	// Impossible is true when no value can exist at this path: the root schema is boolean false
@@ -189,11 +195,20 @@ func Compatible(producer, consumer TypeSet) bool {
 // one flow rule shared by the .agent checker and YAML step wiring.
 //
 // never (Impossible) is the bottom type. As a producer it is compatible with every consumer: a
-// never-producing step cannot complete (its output fails validation against false), so the
-// downstream flow is dead and there is no value that could violate the consumer — the same answer
-// true / an untyped consumer gives, which Draft 2020-12 defines as accepting everything. As a
-// consumer it accepts only another never: a false consumer is never gradual, so neither a typed nor
-// an untyped producer may flow into it. Everything else is [Compatible].
+// never-producing source cannot yield a value (an agent's output is always validated against its
+// schema, so a false-output step cannot complete; a single-parameter workflow's input is validated
+// at run start, so a false-typed parameter refuses the run), the downstream flow is dead, and there
+// is no value that could violate the consumer — the same answer true / an untyped consumer gives,
+// which Draft 2020-12 defines as accepting everything. As a consumer it accepts only another
+// never: a false consumer is never gradual, so neither a typed nor an untyped producer may flow
+// into it. Everything else is [Compatible].
+//
+// The producer half is sound only where the producer's schema is enforced at its source; this rule
+// assumes that and does not check it. Known gap (pre-existing, not specific to never): a
+// .agent workflow with more than one parameter gets no runtime input schema
+// (check.wireWorkflowSchemas wires one only for a single parameter, mirroring lower.newEnv), so
+// a multi-parameter workflow's parameter typed Never can in fact carry a value at run time, and
+// this rule — like every other static flow check on such a parameter — does not stop it.
 func CompatibleLookup(producer, consumer LookupResult) bool {
 	if producer.Impossible {
 		return true
@@ -245,10 +260,8 @@ func lookupObject(d *Document, node map[string]any, path []string, depth int) Lo
 	}
 	key := path[0]
 
-	if props, ok := asObject(node["properties"]); ok {
-		if sub, ok := props[key]; ok {
-			return lookupDescent(d, sub, path[1:], depth)
-		}
+	if res, ok := lookupNamedProperty(d, node, types, key, path[1:], depth); ok {
+		return res
 	}
 	if (len(types) == 0 || types.Has(TypeArray)) && isJSONIndex(key) {
 		idx, _ := strconv.Atoi(key)
@@ -266,6 +279,92 @@ func lookupObject(d *Document, node map[string]any, path []string, depth int) Lo
 		return LookupResult{}
 	}
 	return LookupResult{Missing: true}
+}
+
+// lookupNamedProperty resolves key against the keywords that govern a named property before the
+// additionalProperties fallback (Draft 2020-12 §10.3.2): the "properties" entry for key, and every
+// "patternProperties" entry whose regular expression matches key. All of them apply to the value
+// at key at once (they are conjuncts), and additionalProperties applies only when none of them
+// matched (§10.3.2.3). ok is false when no properties/patternProperties entry governs key, so the
+// caller falls through to items / additionalProperties.
+//
+// The conjuncts are combined conservatively, since a LookupResult cannot represent an
+// intersection of two constrained subschemas:
+//   - any conjunct that forbids key (a false subschema, or a Missing deeper path) makes the key
+//     Missing — anything and false is false, the same as properties: {x: false};
+//   - conjuncts that are unconstrained (true, {}) add nothing and are dropped;
+//   - one remaining constrained conjunct is the result;
+//   - two or more constrained conjuncts look up as unconstrained (gradual), never as a guess at
+//     their intersection.
+//
+// Patterns are compiled with Go's regexp (RE2) and matched unanchored, as Draft 2020-12 requires.
+// JSON Schema specifies ECMA-262 regular expressions; the runtime validator
+// (santhosh-tekuri/jsonschema's default engine) also compiles them with Go's regexp and rejects a
+// pattern RE2 cannot compile at load time, so for a document from [LoadDocument] both sides agree
+// on which keys match. A pattern that still fails to compile here (e.g. a hand-built Document, or
+// ECMA-only syntax such as lookahead) makes its match unknown, and is not an error: the definite
+// conjuncts above still apply, and when there are none the key looks up as unconstrained without
+// consulting additionalProperties, so an unknown match never produces a false "not declared".
+func lookupNamedProperty(d *Document, node map[string]any, types TypeSet, key string, rest []string, depth int) (LookupResult, bool) {
+	var conjuncts []LookupResult
+	unknown := false
+	if props, ok := asObject(node["properties"]); ok {
+		if sub, ok := props[key]; ok {
+			conjuncts = append(conjuncts, lookupDescent(d, sub, rest, depth))
+		}
+	}
+	if pats, ok := asObject(node["patternProperties"]); ok && (len(types) == 0 || types.Has(TypeObject)) {
+		// Sorted so the combination is deterministic regardless of map order.
+		names := make([]string, 0, len(pats))
+		for p := range pats {
+			names = append(names, p)
+		}
+		sort.Strings(names)
+		for _, p := range names {
+			re, err := compilePattern(p)
+			if err != nil {
+				unknown = true
+				continue
+			}
+			if re.MatchString(key) {
+				conjuncts = append(conjuncts, lookupDescent(d, pats[p], rest, depth))
+			}
+		}
+	}
+	if len(conjuncts) == 0 && !unknown {
+		return LookupResult{}, false
+	}
+	var constrained []LookupResult
+	for _, c := range conjuncts {
+		if c.Missing {
+			return LookupResult{Missing: true}, true
+		}
+		if c.Known || len(c.Types) > 0 {
+			constrained = append(constrained, c)
+		}
+	}
+	if len(constrained) != 1 {
+		return LookupResult{}, true
+	}
+	return constrained[0], true
+}
+
+// patternCache memoizes compiled patternProperties expressions (and compile failures) by source.
+var patternCache sync.Map // string -> patternEntry
+
+type patternEntry struct {
+	re  *regexp.Regexp
+	err error
+}
+
+func compilePattern(p string) (*regexp.Regexp, error) {
+	if v, ok := patternCache.Load(p); ok {
+		e := v.(patternEntry)
+		return e.re, e.err
+	}
+	re, err := regexp.Compile(p)
+	patternCache.Store(p, patternEntry{re: re, err: err})
+	return re, err
 }
 
 // lookupDescent looks up rest in sub, the subschema governing one key or index of the current

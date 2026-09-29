@@ -530,15 +530,35 @@ not schema identity — passing a `Review` where a differently-named-but-also-`o
 the YAML path. Nominal/structural schema equality is a separate, larger piece of work, not
 part of this pass.
 
-Both paths decide every flow with the single rule `schema.CompatibleLookup`. Draft 2020-12
-**boolean schemas** are honoured wherever a subschema may appear (root, `properties`,
-`prefixItems`/`items`, `additionalProperties`, local `$ref` targets such as `$defs`): `true` is
-unconstrained (`any`), a `false` property/item forbids that key (the same "not declared" error
-as `additionalProperties: false`), and a `false` whole value — a root `false` or a root `$ref` to
-one — is **`never`, the bottom type**. `never` flows into every consumer (a step whose output must
-satisfy `false` cannot complete, so nothing downstream ever receives a value), while a `never`
-consumer accepts only `never` — it is the one place an untyped producer is *not* gradually
-compatible.
+Both paths decide every flow with the single rule `schema.CompatibleLookup`. A literal is an
+**untyped producer** on both: a `.agent` literal argument (`C("hi")`, an object literal) and a YAML
+`with:` value containing no `${…}` token (string, number, bool, null, or an object/array built
+only from those) are checked like any other flow, which is gradual against every consumer except
+`never`. A missing argument is rejected into a `never` consumer on both — `C()` and a YAML agent
+step with no `with:` (for a typed, non-`never` input the `.agent` zero-argument rule is stricter:
+YAML treats an absent `with:` as an empty input object). Agent input is not validated at run time,
+so this static check is what keeps a `false`-input agent from running.
+
+Draft 2020-12 **boolean schemas** are honoured in every subschema position `Lookup` descends
+through — the root, `properties` and `patternProperties` values, `prefixItems`/`items`,
+`additionalProperties`, and local `$ref` targets such as `$defs` (applicators `Lookup` does not
+interpret, such as `allOf`/`anyOf`/`not`, are not consulted at all): `true` is unconstrained
+(`any`), a `false` property/item forbids that key (the same "not declared" error as
+`additionalProperties: false`), and a `false` whole value — a root `false` or a root `$ref` to one
+— is **`never`, the bottom type**. `patternProperties` follows §10.3.2.3: a key matched by
+`properties` or by any pattern (Go RE2 syntax, matched unanchored — the runtime validator compiles
+patterns with the same engine) is not subject to `additionalProperties`; when several of them
+match, any `false` forbids the key and two or more constrained matches look up as `any` rather
+than a guessed intersection.
+
+`never` flows into every consumer, because a `never` producer cannot yield a value where its schema
+is enforced at the source: an agent's output is always validated (a step whose output must satisfy
+`false` cannot complete), and a single-parameter workflow's input is validated at run start. A
+`never` consumer accepts only `never` — it is the one place an untyped producer is *not* gradually
+compatible. **Known gap:** a workflow with **more than one parameter** gets no runtime input schema
+(only a single parameter is wired as the whole runtime input), so none of its parameter types —
+`Never` included — is enforced at run time; the static accept of a flow from such a parameter
+rests on an enforcement that does not exist there.
 
 **A `TypeRef` name resolves to `<SchemaDir>/schemas/<Name>.json`** (`SchemaDir` defaults to
 the directory of the `.agent` file being checked). This is a new naming convention

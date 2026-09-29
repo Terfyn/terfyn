@@ -2,6 +2,7 @@ package spec
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/Terfyn/terfyn/internal/schema"
@@ -10,9 +11,25 @@ import (
 // interpTokenRE matches ${...} placeholders (design doc §13.1). Same shape as engine/interpolation.go.
 var interpTokenRE = regexp.MustCompile(`\$\{([^}]*)\}`)
 
-// validateStepWiring checks ${steps.*.output...} (and ${input...}) interpolations against
-// declared schemas on the graph (issue #193). Absent schemas are gradual; every flow goes through
-// schema.CompatibleLookup, the same rule the .agent checker applies.
+// validateStepWiring checks each agent step's `with` against the consumer agent's declared input
+// schema on the graph (issue #193). Every with-key is a flow into the consumer at that key, and every
+// flow goes through schema.CompatibleLookup, the same rule the .agent checker applies:
+//
+//   - a ${steps.*.output...} / ${input...} interpolation is typed by the producer's schema at that
+//     path (an embedded token renders into a string);
+//   - a with-key whose value contains no token at all — a string, number, bool, null, or an
+//     object/array built only from those — is an untyped producer (schema.LookupResult{}), exactly
+//     as the .agent checker types a literal argument (LitExpr / ObjectExpr are untyped). That is
+//     gradual against every typed or untyped consumer, but still subject to the key being declared
+//     and rejected by a never (false) consumer. A value that mixes literals and typed tokens is
+//     checked through those tokens against the same consumer slot; a value whose only tokens this
+//     pass does not type (${steps.<id>.status}, an unknown step, ...) is an untyped producer too,
+//     so no with-key is left unchecked;
+//   - a step with no `with` at all into a consumer whose whole input is never is rejected, matching
+//     the .agent checker's zero-argument error — agent input is not validated at run time, so this
+//     static check is what stops a false-input agent from running.
+//
+// Absent schemas are gradual.
 func validateStepWiring(g *ProjectGraph) []error {
 	if g == nil {
 		return nil
@@ -58,15 +75,42 @@ func checkStepWithWiring(g *ProjectGraph, wfName string, st WorkflowStep, byID m
 	if st.Synthetic {
 		return nil
 	}
+	consumer := consumerInputDoc(g, st)
 	if len(st.With) == 0 {
+		if consumer != nil && consumer.Lookup(nil).Impossible {
+			return []error{st.Pos.Errorf(
+				"workflow %s step %q: %s input schema is never (false) but the step supplies no with",
+				wfName, strings.TrimSpace(st.ID), consumerSchemaName(st),
+			)}
+		}
 		return nil
 	}
-	consumer := consumerInputDoc(g, st)
 	var errs []error
-	for key, val := range st.With {
-		walkWiringValue(val, func(s string) {
-			errs = append(errs, checkWiringString(g, wfName, st, key, s, byID, inputDoc, consumer)...)
+	// Sorted so diagnostics are deterministic regardless of map order.
+	keys := make([]string, 0, len(st.With))
+	for k := range st.With {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		// covered: some token in the value was typed and checked against the consumer slot.
+		hasToken, covered := false, false
+		walkWiringValue(st.With[key], func(s string) {
+			tokErrs, tokCovered, tokFound := checkWiringString(g, wfName, st, key, s, byID, inputDoc, consumer)
+			errs = append(errs, tokErrs...)
+			covered = covered || tokCovered
+			hasToken = hasToken || tokFound
 		})
+		if covered {
+			continue
+		}
+		// No typed flow reached the consumer: a literal, or only tokens this pass does not type
+		// (e.g. ${steps.<id>.status}, an unknown step). Either way the value is an untyped producer.
+		what := "literal value"
+		if hasToken {
+			what = "untyped value"
+		}
+		errs = append(errs, checkConsumerType(wfName, st, key, what, schema.LookupResult{}, consumer, true)...)
 	}
 	return errs
 }
@@ -94,16 +138,17 @@ func checkWiringString(
 	byID map[string]WorkflowStep,
 	inputDoc *schema.Document,
 	consumer *schema.Document,
-) []error {
+) (errs []error, covered, found bool) {
 	tokens, whole := interpTokens(s)
 	if len(tokens) == 0 {
-		return nil
+		return nil, false, false
 	}
-	var errs []error
 	for _, inner := range tokens {
-		errs = append(errs, checkInterpPath(g, wfName, st, withKey, inner, byID, inputDoc, consumer, whole && len(tokens) == 1)...)
+		e, c := checkInterpPath(g, wfName, st, withKey, inner, byID, inputDoc, consumer, whole && len(tokens) == 1)
+		errs = append(errs, e...)
+		covered = covered || c
 	}
-	return errs
+	return errs, covered, true
 }
 
 func interpTokens(s string) (inners []string, wholeField bool) {
@@ -128,24 +173,24 @@ func checkInterpPath(
 	inputDoc *schema.Document,
 	consumer *schema.Document,
 	wholeField bool,
-) []error {
+) (errs []error, covered bool) {
 	if inner == "" {
-		return nil
+		return nil, false
 	}
 	parts := splitDotPath(inner)
 	if len(parts) < 2 {
-		return nil
+		return nil, false
 	}
 	switch parts[0] {
 	case "input":
-		return checkInputPath(wfName, st, withKey, inner, parts[1:], inputDoc, consumer, wholeField)
+		return checkInputPath(wfName, st, withKey, inner, parts[1:], inputDoc, consumer, wholeField), true
 	case "steps":
 		if len(parts) < 3 {
-			return nil
+			return nil, false
 		}
 		return checkStepsOutputPath(g, wfName, st, withKey, inner, parts, byID, consumer, wholeField)
 	default:
-		return nil
+		return nil, false
 	}
 }
 
@@ -159,7 +204,7 @@ func checkInputPath(
 	wholeField bool,
 ) []error {
 	if inputDoc == nil {
-		return checkConsumerType(wfName, st, withKey, inner, schema.LookupResult{}, consumer, wholeField)
+		return checkConsumerType(wfName, st, withKey, "${"+inner+"}", schema.LookupResult{}, consumer, wholeField)
 	}
 	got := inputDoc.Lookup(tail)
 	if got.Missing {
@@ -168,7 +213,7 @@ func checkInputPath(
 			wfName, strings.TrimSpace(st.ID), inner,
 		)}
 	}
-	return checkConsumerType(wfName, st, withKey, inner, got, consumer, wholeField)
+	return checkConsumerType(wfName, st, withKey, "${"+inner+"}", got, consumer, wholeField)
 }
 
 func checkStepsOutputPath(
@@ -180,15 +225,15 @@ func checkStepsOutputPath(
 	byID map[string]WorkflowStep,
 	consumer *schema.Document,
 	wholeField bool,
-) []error {
+) (errs []error, covered bool) {
 	prodID := parts[1]
 	slot := parts[2]
 	if slot != "output" {
-		return nil
+		return nil, false
 	}
 	prod, ok := byID[prodID]
 	if !ok {
-		return nil
+		return nil, false
 	}
 	doc := producerOutputDoc(g, prod)
 	tail := parts[3:]
@@ -200,16 +245,19 @@ func checkStepsOutputPath(
 			return []error{st.Pos.Errorf(
 				"workflow %s step %q: ${%s} is not declared in %s output schema",
 				wfName, strings.TrimSpace(st.ID), inner, src,
-			)}
+			)}, true
 		}
 	}
-	return checkConsumerType(wfName, st, withKey, inner, prodLookup, consumer, wholeField)
+	return checkConsumerType(wfName, st, withKey, "${"+inner+"}", prodLookup, consumer, wholeField), true
 }
 
+// checkConsumerType checks one producer flowing into the consumer's input at withKey. what names
+// the producer in diagnostics: "${<path>}" for an interpolation token, "literal value" for a
+// token-free with value.
 func checkConsumerType(
 	wfName string,
 	st WorkflowStep,
-	withKey, inner string,
+	withKey, what string,
 	prod schema.LookupResult,
 	consumer *schema.Document,
 	wholeField bool,
@@ -234,8 +282,8 @@ func checkConsumerType(
 		return nil
 	}
 	return []error{st.Pos.Errorf(
-		"workflow %s step %q: ${%s} (%s) does not match %s input %q (%s)",
-		wfName, strings.TrimSpace(st.ID), inner, src, consumerSchemaName(st), withKey, cons,
+		"workflow %s step %q: %s (%s) does not match %s input %q (%s)",
+		wfName, strings.TrimSpace(st.ID), what, src, consumerSchemaName(st), withKey, cons,
 	)}
 }
 

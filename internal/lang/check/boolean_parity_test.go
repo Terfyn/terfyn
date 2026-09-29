@@ -17,6 +17,14 @@ import (
 // `with: {body: ${steps.r.output}}` — R's output against C's input at "body". So the YAML consumer
 // document wraps the slot type in {"properties":{"body": ...}}, except for an impossible consumer,
 // whose root is itself false (every with-key of a false document is never).
+//
+// Two further shapes carry no typed producer and run over every consumer:
+//   - literal: `C("hi")` vs `with: {body: hello}` — an untyped producer on both paths (LitExpr /
+//     a token-free with value), so gradual everywhere except into never;
+//   - no argument: `C()` vs a step with no `with:` — rejected into never on both paths. For a typed
+//     non-never consumer the .agent arity rule ("declares an input type but was called with no
+//     arguments") is deliberately stricter than YAML, where an absent `with` is an empty input
+//     object; parity is asserted only where the flow rule decides, i.e. never and untyped consumers.
 func TestBooleanSchemaFlowParity(t *testing.T) {
 	t.Parallel()
 	const neverRef = `{"$ref":"#/$defs/n","$defs":{"n":false}}`
@@ -50,17 +58,20 @@ func TestBooleanSchemaFlowParity(t *testing.T) {
 		return !(p.name == "integer" && c.name == "string")
 	}
 
+	yamlConsumerFor := func(c side) string {
+		if c.schema != "" && !c.never {
+			return `{"type":"object","properties":{"body":` + c.schema + `}}`
+		}
+		return c.schema
+	}
+
 	for _, p := range producers {
 		for _, c := range consumers {
 			p, c := p, c
 			t.Run(p.name+"->"+c.name, func(t *testing.T) {
 				t.Parallel()
 				agentOK := agentFlowAccepted(t, p.schema, c.schema)
-				yamlConsumer := c.schema
-				if c.schema != "" && !c.never {
-					yamlConsumer = `{"type":"object","properties":{"body":` + c.schema + `}}`
-				}
-				yamlOK := yamlFlowAccepted(t, p.schema, yamlConsumer)
+				yamlOK := yamlFlowAccepted(t, p.schema, yamlConsumerFor(c))
 				if agentOK != yamlOK {
 					t.Fatalf(".agent checker accepted=%v but YAML wiring accepted=%v", agentOK, yamlOK)
 				}
@@ -69,6 +80,39 @@ func TestBooleanSchemaFlowParity(t *testing.T) {
 				}
 			})
 		}
+	}
+
+	for _, c := range consumers {
+		c := c
+		t.Run("literal->"+c.name, func(t *testing.T) {
+			t.Parallel()
+			agentOK := agentCallAccepted(t, c.schema, `C("hi")`)
+			yamlOK := yamlWithAccepted(t, yamlConsumerFor(c), "      with:\n        body: hello\n")
+			if agentOK != yamlOK {
+				t.Fatalf(".agent checker accepted=%v but YAML wiring accepted=%v", agentOK, yamlOK)
+			}
+			if w := !c.never; agentOK != w {
+				t.Fatalf("accepted=%v, want %v", agentOK, w)
+			}
+		})
+		t.Run("no-argument->"+c.name, func(t *testing.T) {
+			t.Parallel()
+			agentOK := agentCallAccepted(t, c.schema, `C()`)
+			yamlOK := yamlWithAccepted(t, yamlConsumerFor(c), "")
+			if w := !c.never; yamlOK != w {
+				t.Fatalf("YAML accepted=%v, want %v", yamlOK, w)
+			}
+			if !c.never && c.schema != "" {
+				// Typed non-never consumer: the .agent arity rule is stricter by design (see above).
+				if agentOK {
+					t.Fatalf(".agent zero-argument call to a typed agent must be an error")
+				}
+				return
+			}
+			if agentOK != yamlOK {
+				t.Fatalf(".agent checker accepted=%v but YAML wiring accepted=%v", agentOK, yamlOK)
+			}
+		})
 	}
 }
 
@@ -114,7 +158,41 @@ workflow W(input: Seed)
 	return !diags.HasErrors()
 }
 
+// agentCallAccepted checks `workflow W(input: Seed) { <call> }` where call invokes agent C, whose
+// input is consumer — a flow with no typed producer (a literal argument or no argument).
+func agentCallAccepted(t *testing.T, consumer, call string) bool {
+	t.Helper()
+	root := t.TempDir()
+	writeParitySchema(t, root, "Consumed.json", consumer)
+	f := parseOrFatal(t, `
+agent C {
+    model mock/default
+    instructions "consume"
+    input Consumed
+}
+
+workflow W(input: Seed)
+{
+    `+call+`
+}
+`)
+	_, diags := Check(f, Options{SchemaDir: root})
+	return !diags.HasErrors()
+}
+
 func yamlFlowAccepted(t *testing.T, producer, consumer string) bool {
+	t.Helper()
+	return yamlStepAccepted(t, producer, consumer, "      with:\n        body: ${steps.r.output}\n")
+}
+
+// yamlWithAccepted runs a consumer step whose with block (YAML lines, "" for none) carries no
+// token, after a reporter step with an untyped output.
+func yamlWithAccepted(t *testing.T, consumer, with string) bool {
+	t.Helper()
+	return yamlStepAccepted(t, "", consumer, with)
+}
+
+func yamlStepAccepted(t *testing.T, producer, consumer, with string) bool {
 	t.Helper()
 	root := t.TempDir()
 	writeParitySchema(t, root, "out.json", producer)
@@ -129,9 +207,7 @@ spec:
       agent: reporter
     - id: c
       agent: consumer
-      with:
-        body: ${steps.r.output}
-`), "workflow.yaml")
+`+with), "workflow.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

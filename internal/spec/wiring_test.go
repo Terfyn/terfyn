@@ -313,6 +313,10 @@ func TestValidateProjectGraph_booleanSchemas(t *testing.T) {
 		{"true producer property is declared", `{"type":"object","properties":{"body":true},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.body}`, ""},
 		{"items false forbids index", `{"type":"array","items":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.0}`, `${steps.r.output.0} is not declared in Agent/reporter output schema`},
 		{"prefixItems before items false", `{"type":"array","prefixItems":[{"type":"integer"}],"items":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.0}`, `(integer) does not match Agent/consumer input "body" (string)`},
+		{"true consumer pattern is declared", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","patternProperties":{"^body$":true},"additionalProperties":false}`, `${steps.r.output.s}`, ""},
+		{"false consumer pattern forbids key", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","patternProperties":{"^body$":false}}`, `${steps.r.output.s}`, `with "body" is not declared in Agent/consumer input schema`},
+		{"typed producer pattern", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.n_x}`, `(integer) does not match Agent/consumer input "body" (string)`},
+		{"producer key no pattern matches", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.other}`, `${steps.r.output.other} is not declared in Agent/reporter output schema`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -332,6 +336,82 @@ spec:
       with:
         body: "` + tc.with + `"
 `
+			dec, err := ParseResourceFromBytes([]byte(wfYAML), "workflow.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ValidateProjectGraph(wiringGraph(dec.Resource.(*WorkflowResource)), root)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestValidateProjectGraph_literalAndMissingWith covers the with shapes that carry no typed token
+// (issue #549 review): a token-free with value is an untyped producer, exactly like a .agent
+// literal argument, so it is gradual against typed consumers but rejected by a never (false)
+// consumer and by a forbidden key; a step with no with into a never consumer is rejected like a
+// .agent zero-argument call to a typed agent.
+func TestValidateProjectGraph_literalAndMissingWith(t *testing.T) {
+	const (
+		neverIn  = `false`
+		refNever = `{"$ref":"#/$defs/n","$defs":{"n":false}}`
+		strBody  = `{"type":"object","properties":{"body":{"type":"string"}}}`
+		closed   = `{"type":"object","properties":{"body":{"type":"string"}},"additionalProperties":false}`
+		forbid   = `{"type":"object","properties":{"body":false}}`
+	)
+	cases := []struct {
+		name    string
+		in      string
+		with    string // YAML lines under `with:`, or "" for a step with no with
+		wantErr string // "" = accepted
+	}{
+		{"string literal into never", neverIn, "body: hello", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"number literal into never", neverIn, "body: 42", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"bool literal into never", neverIn, "body: true", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"null literal into never", neverIn, "body: null", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"object literal into never", neverIn, "body: {a: 1, b: [x]}", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"literal into ref-false", refNever, "body: hello", `does not match Agent/consumer input "body" (never)`},
+		{"no with into never", neverIn, "", `Agent/consumer input schema is never (false) but the step supplies no with`},
+		{"no with into ref-false", refNever, "", `input schema is never (false) but the step supplies no with`},
+		{"untyped token into never", neverIn, "body: ${steps.r.status}", `untyped value (any) does not match Agent/consumer input "body" (never)`},
+		{"literal into forbidden key", forbid, "body: hello", `with "body" is not declared in Agent/consumer input schema`},
+		{"literal into undeclared key of closed object", closed, "other: hello", `with "other" is not declared in Agent/consumer input schema`},
+		{"string literal into string (gradual)", strBody, "body: hello", ""},
+		{"number literal into string (gradual, like .agent)", strBody, "body: 42", ""},
+		{"object literal into string (gradual, like .agent)", strBody, "body: {a: 1}", ""},
+		{"no with into typed object", strBody, "", ""},
+		{"literal into true consumer", `true`, "body: hello", ""},
+		{"no with into true consumer", `true`, "", ""},
+		{"never producer beside a literal into never", neverIn, `body: {a: "${steps.r.output}", b: lit}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSchema(t, root, "schemas/out.json", `false`)
+			writeSchema(t, root, "schemas/in.json", tc.in)
+			with := ""
+			if tc.with != "" {
+				with = "      with:\n        " + tc.with + "\n"
+			}
+			wfYAML := `apiVersion: agentic.dev/v0
+kind: Workflow
+metadata:
+  name: demo
+spec:
+  steps:
+    - id: r
+      agent: reporter
+    - id: c
+      agent: consumer
+` + with
 			dec, err := ParseResourceFromBytes([]byte(wfYAML), "workflow.yaml")
 			if err != nil {
 				t.Fatal(err)
