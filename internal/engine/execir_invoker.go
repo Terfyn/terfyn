@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Terfyn/terfyn/internal/execir"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/lang/lower"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/render"
@@ -273,6 +274,14 @@ func (a *engineInvoker) InvokeTool(ctx context.Context, site execir.CallSite, us
 		return a.dispatchTool(ctx, site, resolvedUses, resolvedWith, resolvedUses)
 	}
 
+	// The arguments may be persisted as the pending gate's With and dispatched from
+	// the decoded checkpoint on resume, so they are canonicalized here: the tool then
+	// receives the same value ungated, auto-approved, and approved-after-resume (S7).
+	args, err := canonicalArgs(site, args)
+	if err != nil {
+		return nil, err
+	}
+
 	// A gated uses: call suspends (or, under auto-approve, records and proceeds) —
 	// whether on a fresh run or as a not-yet-resolved gate reached on resume. The
 	// one gate anchored by the checkpoint is resolved above (claimPending), and a
@@ -329,6 +338,14 @@ func (a *engineInvoker) InvokeApproval(ctx context.Context, site execir.CallSite
 			resolved = map[string]any{}
 		}
 		return a.run(ctx, step, resolved, "", func(policy.RunContext) (map[string]any, float64, error) { return resolved, 0, nil })
+	}
+
+	// The payload is persisted as the pending gate's With and becomes the node's
+	// output after an approve resume, so it must be the canonical fixed point that
+	// auto-approve publishes (S7).
+	args, err := canonicalArgs(site, args)
+	if err != nil {
+		return nil, err
 	}
 
 	// An unclaimed approval node always needs a decision (there is no dispatch
@@ -435,6 +452,15 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	depth := a.in.WorkflowDepth + 1
 	if depth > maxDepth {
 		return nil, fmt.Errorf("engine: step %q: workflow nesting depth %d exceeds maxWorkflowNesting %d", site.Bind, depth, maxDepth)
+	}
+	// Canonicalize at the frame boundary (S7): args become the child's
+	// interpolation input, its interpreter input, and — if the child suspends — the
+	// persisted NestedRunState.Input that a resume feeds back as its input. Only
+	// the canonical fixed point is the same Go value in all three; a raw float
+	// literal past 2^53 would be exact live and respelled after resume. An argument
+	// with no JSON encoding (or nested past jsonnum.MaxDepth) fails the call.
+	if args, err = jsonnum.CanonicalMap(args); err != nil {
+		return nil, fmt.Errorf("engine: step %q subworkflow %q input: %w", site.Bind, workflow, err)
 	}
 	if err := a.e.validateWorkflowInputSchema(callee, args); err != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q input: %w", site.Bind, workflow, err)
@@ -566,6 +592,11 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	}
 
 	out, oerr := buildWorkflowOutput(callee, childInv.snapshotIctx())
+	if oerr == nil {
+		// The output (which may carry output.value literals) is checkpointed in the
+		// parent's Steps, so it must be canonical like every other step output.
+		out, oerr = jsonnum.CanonicalMap(out)
+	}
 	if oerr != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q output: %w", site.Bind, workflow, oerr)
 	}
@@ -622,6 +653,16 @@ func (a *engineInvoker) run(ctx context.Context, step spec.WorkflowStep, args ma
 		a.failStepRow(ctx, qid, inJSON, err, stepCost)
 		return nil, err
 	}
+	// One canonical number representation for step output (int64 for a whole
+	// number, else float64; internal/jsonnum) so ${steps.*} interpolation and the
+	// interpreter's memo see the same value live as after a checkpoint resume (S7).
+	// A step output with no JSON encoding (or nested past jsonnum.MaxDepth) could
+	// not be checkpointed; fail it.
+	if out, err = jsonnum.CanonicalMap(out); err != nil {
+		err = fmt.Errorf("engine: step %q output: %w", step.ID, err)
+		a.failStepRow(ctx, qid, inJSON, err, stepCost)
+		return nil, err
+	}
 
 	// Commit cost, then re-check the run budget so two in-flight branches cannot
 	// jointly exceed maxTotalCostUsd (mirrors commitDAGStepSuccess).
@@ -645,7 +686,8 @@ func (a *engineInvoker) run(ctx context.Context, step spec.WorkflowStep, args ma
 	if step.ID != "" {
 		a.ictx.Steps[step.ID] = StepResult{
 			Output: out,
-			Meta:   map[string]any{"costUsd": stepCost, "durationMs": finished.Sub(started).Milliseconds()},
+			// Canonical like Output: a whole costUsd is int64, as a resume decodes it.
+			Meta: map[string]any{"costUsd": canonicalNumber(stepCost), "durationMs": finished.Sub(started).Milliseconds()},
 		}
 	}
 	a.mu.Unlock()
@@ -672,7 +714,7 @@ func (a *engineInvoker) redactStepJSON(v any) []byte {
 // redactPayloadJSON marshals a DISPLAY payload (a run_steps input/output, or the run's final output) with
 // the trace recorder's redaction, so a sensitive key (token/password/authorization/…) is masked instead
 // of stored in clear and served verbatim by inspect / state show (issue #408). These are display
-// surfaces, NOT the replay source — the checkpoint keeps raw args to dispatch on resume — so redacting
+// surfaces, NOT the replay source — the checkpoint keeps unredacted args to dispatch on resume — so redacting
 // at the write layer is safe. A map payload runs through trace.PrepareEventData; a scalar (no keys to
 // mask) is marshaled as is. Falls back to default redaction when no recorder is set, so it never
 // persists raw.
@@ -838,14 +880,41 @@ func (e *Executor) loadExecResumeState(ctx context.Context, in RunInput, wf *spe
 	if err != nil {
 		return Context{}, 0, nil, nil, err
 	}
+	// Same canonical lossless decode as unmarshalCheckpointPayload: ExecMemo holds the
+	// completed leaves' outputs, and an int64 past 2^53 must come back as the same
+	// int64 (S7), not a float64 rounding.
 	var payload checkpointPayload
-	if err := json.Unmarshal([]byte(cp.ContextJSON), &payload); err != nil {
+	if err := jsonnum.Unmarshal([]byte(cp.ContextJSON), &payload); err != nil {
 		return Context{}, 0, nil, nil, fmt.Errorf("engine: unmarshal execir checkpoint: %w", err)
 	}
 	if !payload.ExecIR {
 		return Context{}, 0, nil, nil, fmt.Errorf("engine: resume routed to execir but checkpoint is not an execir checkpoint")
 	}
 	return ictx, totalCost, &execir.RunState{Memo: payload.ExecMemo, Control: payload.ExecControl}, payload.Nested, nil
+}
+
+// canonicalArgs canonicalizes a leaf's evaluated arguments (jsonnum.CanonicalMap)
+// where they can reach a checkpoint (a pending gate's With, a subworkflow frame's
+// Input): the persisted value must be a round-trip fixed point so the resumed run
+// sees the value the live run did (S7). Program literals reach args raw (a float
+// literal such as 1152921504606846976.0 is float64), so this is where they are
+// canonicalized.
+func canonicalArgs(site execir.CallSite, args map[string]any) (map[string]any, error) {
+	c, err := jsonnum.CanonicalMap(args)
+	if err != nil {
+		return nil, fmt.Errorf("engine: step %q arguments: %w", site.Bind, err)
+	}
+	return c, nil
+}
+
+// canonicalNumber returns f in the canonical number form (int64 when whole and in
+// range, else float64). A non-finite f has no canonical form and is returned as is
+// (it cannot be checkpointed either way).
+func canonicalNumber(f float64) any {
+	if c, err := jsonnum.Canonical(f); err == nil {
+		return c
+	}
+	return f
 }
 
 var _ execir.Invoker = (*engineInvoker)(nil)

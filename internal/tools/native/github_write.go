@@ -2,10 +2,11 @@ package native
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // Broader GitHub write operations (issues / reviews / statuses) built on the same REST client as
@@ -300,7 +301,7 @@ func githubOwnerRepo(with map[string]any, op string) (owner, repo string, err er
 
 func decodeGitHubObject(b []byte, op string) (map[string]any, error) {
 	var obj map[string]any
-	if err := json.Unmarshal(b, &obj); err != nil {
+	if err := jsonnum.Unmarshal(b, &obj); err != nil {
 		return nil, fmt.Errorf("native: %s decode: %w", op, err)
 	}
 	return obj, nil

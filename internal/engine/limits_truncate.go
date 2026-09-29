@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/render"
 	"github.com/Terfyn/terfyn/internal/trace"
 )
@@ -87,7 +88,7 @@ func cloneMapAny(v map[string]any) map[string]any {
 		return cp
 	}
 	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := jsonnum.Unmarshal(raw, &out); err != nil {
 		cp := make(map[string]any, len(v))
 		for k, val := range v {
 			cp[k] = val

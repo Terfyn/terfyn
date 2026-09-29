@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // Slack adapter: post and edit messages via the Slack Web API, config from the environment
@@ -78,7 +80,7 @@ func slackCall(ctx context.Context, method string, payload map[string]any) (map[
 		return nil, fmt.Errorf("native: slack HTTP %s: %s", resp.Status, truncateRunes(string(b), 512))
 	}
 	var out map[string]any
-	if err := json.Unmarshal(b, &out); err != nil {
+	if err := jsonnum.Unmarshal(b, &out); err != nil {
 		return nil, fmt.Errorf("native: slack %s decode: %w", method, err)
 	}
 	if ok, _ := out["ok"].(bool); !ok {
