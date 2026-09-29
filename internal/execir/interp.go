@@ -160,14 +160,18 @@ func (in *Interp) RunResumable(ctx context.Context, prog *Program, input map[str
 	}
 	// Runtime values (the input here, leaf results in invoke) enter the
 	// interpreter in ONE canonical form — jsonnum.Canonical: int64 for a whole
-	// number in range, else float64, never changing a number's value;
-	// map[string]any/[]any containers — and that form is a checkpoint round-trip
-	// fixed point, so a value compares, renders and re-encodes identically on a
-	// fresh run and after a checkpoint resume (S7 replay determinism), whatever
-	// Go types the caller supplied. Program literals are not canonicalized (a
-	// float literal such as 1152921504606846976.0 stays float64): they are fixed
-	// by the pinned program, not by a checkpoint, and the comparator is exact
-	// across int64/float64.
+	// number in range, else float64; map[string]any/[]any containers; the value
+	// of an int/int64/float64 reached directly is preserved, other Go types take
+	// their round trip — and that form is a checkpoint round-trip fixed point, so
+	// a value compares, renders and re-encodes identically on a fresh run and
+	// after a checkpoint resume (S7 replay determinism), whatever Go types the
+	// caller supplied. Program literals are not canonicalized here (a float
+	// literal such as 1152921504606846976.0 stays float64 in scope, and the
+	// comparator is exact across int64/float64): a literal that stays inside the
+	// interpreter is re-evaluated identically from the pinned program on replay,
+	// and one that reaches durable state as a leaf argument (a subworkflow's
+	// input, a gated call's or approval's With) is canonicalized by the engine
+	// Invoker before it is persisted.
 	cinput, err := jsonnum.CanonicalMap(input)
 	if err != nil {
 		return nil, nil, fmt.Errorf("execir: input: %w", err)

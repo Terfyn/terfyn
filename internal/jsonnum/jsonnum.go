@@ -21,9 +21,11 @@
 // decimal spelling: a whole float64 strictly inside (-2^63, 2^63) is exactly
 // int64(f) ("7.0", "7e0" and float64(7) are int64(7); float64(2^60) is
 // int64(1152921504606846976)), and every other float64 (fractions, ±2^63 and
-// beyond) stays float64. Canonicalization therefore never changes a number's
-// value, so the exact comparator in internal/execir sees the integer the input
-// spelled.
+// beyond) stays float64. A decoded literal and a number [Canonical] reaches
+// directly (an int, int64 or float64 held in map[string]any/[]any) therefore
+// keep their value, so the exact comparator in internal/execir sees the integer
+// the input spelled. Numbers inside other Go types take their checkpoint round
+// trip instead, which can respell a float ([Canonical]).
 //
 // The S7 invariant is that canonical values are checkpoint round-trip FIXED
 // POINTS: for every v that [Canonical] accepts,
@@ -33,9 +35,17 @@
 // and Canonical(Canonical(v)) deep-equals Canonical(v). encoding/json writes an
 // int64 as its exact digits, which decode back to that int64, and every float64
 // Canonical leaves as float64 is either non-whole or outside int64, so it decodes
-// back to the same float64. The runtime canonicalizes every value before it is
-// checkpointed (the interpreter's input and memo, the engine's step outputs), so
-// the live value and the value a resume decodes are the same Go value.
+// back to the same float64. A fixed point only helps if the checkpointed value IS
+// the canonical one, so the runtime canonicalizes each value at the point it
+// enters durable state: the run input (engine.Executor.Run), the interpreter's
+// input and every leaf result it memoizes (internal/execir), each step output
+// and its meta (the engine's Steps), a subworkflow's arguments at the frame
+// boundary (the persisted NestedRunState.Input) and its output, and the
+// arguments of a uses: call or approval node (the persisted PendingHitl.With).
+// The live value and the value a resume decodes are then the same Go value.
+// Program literals are the one raw source: they are canonicalized where they
+// cross into one of those points, and otherwise are re-evaluated identically
+// from the pinned program on replay.
 //
 // Canonical(v) is NOT in general Unmarshal(json.Marshal(v)) of the RAW value,
 // because encoding/json spells a float64 with its shortest round-tripping digits,
@@ -151,8 +161,10 @@ const (
 )
 
 // Canonical returns v in the canonical form (package doc): numbers become
-// int64/float64 without changing their value, and every container becomes
-// map[string]any / []any. The result is a checkpoint round-trip fixed point
+// int64/float64 and every container becomes map[string]any / []any. It
+// preserves the value of every number it reaches directly (an int, int64 or
+// float64, bare or inside map[string]any/[]any); every other type becomes its
+// checkpoint round trip, which can respell a float (below). The result is a checkpoint round-trip fixed point
 // (json.Marshal, then [Unmarshal] into `any`, returns it unchanged), so a value
 // that is canonicalized before it is checkpointed is the same Go value live and
 // after resume (S7).
