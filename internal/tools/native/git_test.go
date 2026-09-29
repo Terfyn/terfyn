@@ -1251,3 +1251,361 @@ func TestGitStatus_realRenameKeepsBothPaths(t *testing.T) {
 		t.Fatalf("rename %#v, want from=README.md path=%s", rename, dst)
 	}
 }
+
+// TestGitStatusAndDiff_doNotRunPostIndexChangeHook: git diff (2.34) writes a refreshed index even
+// with --no-optional-locks, and every index write runs post-index-change. The write lands in the
+// throwaway index copy, but the hook — from .git/hooks or from core.hooksPath — must not run.
+func TestGitStatusAndDiff_doNotRunPostIndexChangeHook(t *testing.T) {
+	requireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a /bin/sh hook")
+	}
+	for _, tc := range []struct {
+		name     string
+		hooksDir func(t *testing.T, root string) string
+	}{
+		{"dot-git-hooks", func(t *testing.T, root string) string {
+			return filepath.Join(root, ".git", "hooks")
+		}},
+		{"core.hooksPath", func(t *testing.T, root string) string {
+			dir := t.TempDir() // outside the repo, like a shared hooks directory
+			gitCfg(t, root, "config", "core.hooksPath", dir)
+			return dir
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := initRepoWithCommit(t)
+			t.Setenv(envWorkspaceRoot, root)
+			hooks := tc.hooksDir(t, root)
+			if err := os.MkdirAll(hooks, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "post-index-change.ran")
+			writeMarkerScript(t, hooks, "post-index-change", marker, "true")
+			readme := filepath.Join(root, "README.md")
+			// Same content, newer mtime: the index entry is stat-dirty, so git refreshes and writes it.
+			bump := func(d time.Duration) {
+				t.Helper()
+				ts := time.Now().Add(d)
+				if err := os.Chtimes(readme, ts, ts); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			bump(time.Hour)
+			plainGit(root, "diff", "HEAD")
+			if !markerRan(marker) {
+				t.Skip("this git build did not run the planted post-index-change hook; cannot exercise the guard")
+			}
+			if err := os.Remove(marker); err != nil {
+				t.Fatal(err)
+			}
+
+			for i, op := range []string{"status", "diff"} {
+				bump(time.Duration(i+2) * time.Hour) // the control refreshed the real index; dirty it again
+				out, _, err := NewRegistry().Dispatch(context.Background(), op, nil)
+				if err != nil {
+					t.Fatalf("%s: %v", op, err)
+				}
+				if markerRan(marker) {
+					t.Fatalf("git.%s executed the repository's post-index-change hook", op)
+				}
+				if op == "diff" {
+					if diff, _ := out["diff"].(string); diff != "" {
+						t.Fatalf("stat-only change should diff empty, got:\n%s", diff)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestGitDiff_doesNotRunSubmoduleHelpers: diff.submodule=diff makes git diff spawn a nested diff
+// inside each submodule that does not inherit --no-textconv/--no-ext-diff; --submodule=short must
+// keep the submodule's textconv driver and diff.external from running.
+func TestGitDiff_doesNotRunSubmoduleHelpers(t *testing.T) {
+	requireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("needs /bin/sh helpers")
+	}
+	sub := initRepoWithCommit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	gitCfg(t, root, "-c", "protocol.file.allow=always", "submodule", "add", sub, "sub")
+	gitCfg(t, root, "commit", "-m", "add submodule")
+	helpers := t.TempDir()
+	marker := filepath.Join(helpers, "submodule-helper.ran")
+	tc := writeMarkerScript(t, helpers, "tc.sh", marker, `cat "$1"`)
+	ext := writeMarkerScript(t, helpers, "ext.sh", marker, "true")
+	subDir := filepath.Join(root, "sub")
+	if err := os.WriteFile(filepath.Join(subDir, ".gitattributes"), []byte("* diff=planted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "README.md"), []byte("seed\nchanged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, subDir, "config", "diff.planted.textconv", "'"+tc+"'")
+	gitCfg(t, root, "config", "diff.submodule", "diff")
+
+	for _, helper := range []string{"textconv", "diff.external"} {
+		if helper == "diff.external" {
+			gitCfg(t, subDir, "config", "--unset", "diff.planted.textconv")
+			gitCfg(t, subDir, "config", "diff.external", "'"+ext+"'")
+		}
+		plainGit(root, "diff", "--no-textconv", "--no-ext-diff", "HEAD")
+		if !markerRan(marker) {
+			t.Skipf("this git build did not run the submodule %s via diff.submodule=diff; cannot exercise the guard", helper)
+		}
+		if err := os.Remove(marker); err != nil {
+			t.Fatal(err)
+		}
+		out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+		if err != nil {
+			t.Fatalf("diff: %v", err)
+		}
+		if markerRan(marker) {
+			t.Fatalf("git.diff executed the submodule's %s", helper)
+		}
+		if diff, _ := out["diff"].(string); !strings.Contains(diff, "Subproject commit") || !strings.Contains(diff, "-dirty") {
+			t.Fatalf("diff should report the dirty submodule in short form:\n%s", diff)
+		}
+	}
+}
+
+// TestGitDiff_basePathIsNotPathspec: a base that names an existing directory or file (and not a
+// ref) must be a clean error, not silently become `git diff <path>` (worktree vs index, scoped).
+func TestGitDiff_basePathIsNotPathspec(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "a.md"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "docs")
+	gitCfg(t, root, "commit", "-m", "docs")
+	if err := os.WriteFile(filepath.Join(root, "docs", "a.md"), []byte("a\nstaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "docs")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, base := range []string{"docs", "README.md", "docs/a.md"} {
+		for _, staged := range []bool{false, true} {
+			out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": base, "staged": staged})
+			if err == nil {
+				t.Fatalf("base %q staged=%v: want an error, got %#v", base, staged, out)
+			}
+			if !strings.Contains(err.Error(), "is not a commit") {
+				t.Fatalf("base %q staged=%v: error %q should say base is not a commit", base, staged, err)
+			}
+		}
+	}
+}
+
+// TestGitDiff_baseUsesMergeBase: base is PR-style — the diff is against the merge base, so a
+// commit main gains after the branch forked must not show up (as a deletion) in "the change".
+func TestGitDiff_baseUsesMergeBase(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	fork := gitCfg(t, root, "rev-parse", "HEAD")
+	gitCfg(t, root, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(root, "feature.txt"), []byte("feat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "feature.txt")
+	gitCfg(t, root, "commit", "-m", "feature")
+	// main moves on after the fork.
+	gitCfg(t, root, "switch", "main")
+	if err := os.WriteFile(filepath.Join(root, "main-only.txt"), []byte("main work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "main-only.txt")
+	gitCfg(t, root, "commit", "-m", "main work")
+	gitCfg(t, root, "switch", "feature")
+	// An uncommitted edit on the branch is part of the change too.
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("seed\nwip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main"})
+	if err != nil {
+		t.Fatalf("diff base: %v", err)
+	}
+	diff, _ := out["diff"].(string)
+	if strings.Contains(diff, "main-only.txt") || strings.Contains(diff, "main work") {
+		t.Fatalf("merge-base diff leaked main's post-fork commit:\n%s", diff)
+	}
+	if !strings.Contains(diff, "+feat") || !strings.Contains(diff, "+wip") {
+		t.Fatalf("merge-base diff missing the branch's committed and uncommitted changes:\n%s", diff)
+	}
+	if out["merge_base"] != fork {
+		t.Fatalf("merge_base = %v, want fork point %s", out["merge_base"], fork)
+	}
+	if out["base"] != "main" {
+		t.Fatalf("base = %v, want main", out["base"])
+	}
+
+	// staged + base: the index vs the same merge base (the wip edit is unstaged, so absent).
+	out, _, err = NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main", "staged": true})
+	if err != nil {
+		t.Fatalf("diff base staged: %v", err)
+	}
+	diff, _ = out["diff"].(string)
+	if strings.Contains(diff, "main-only.txt") || strings.Contains(diff, "+wip") || !strings.Contains(diff, "+feat") {
+		t.Fatalf("staged merge-base diff wrong:\n%s", diff)
+	}
+}
+
+func TestGitDiff_baseWithoutCommonAncestor(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	gitCfg(t, root, "switch", "--orphan", "island")
+	if err := os.WriteFile(filepath.Join(root, "island.txt"), []byte("i\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCfg(t, root, "add", "island.txt")
+	gitCfg(t, root, "commit", "-m", "island")
+	_, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main"})
+	if err == nil || !strings.Contains(err.Error(), "no merge base") {
+		t.Fatalf("err = %v, want a no-merge-base error", err)
+	}
+}
+
+// TestGitDiff_unbornBranch: in a repository with no commits the default diff is against the
+// empty tree (computed in the repository's own hash, so SHA-256 repositories work too).
+func TestGitDiff_unbornBranch(t *testing.T) {
+	requireGit(t)
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			root := t.TempDir()
+			cmd := exec.Command("git", "init", "--object-format="+format, root)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				if format == "sha256" {
+					t.Skipf("git cannot create a sha256 repository: %v\n%s", err, out)
+				}
+				t.Fatalf("git init: %v\n%s", err, out)
+			}
+			gitCfg(t, root, "config", "core.autocrlf", "false")
+			t.Setenv(envWorkspaceRoot, root)
+			if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("staged\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCfg(t, root, "add", "README.md")
+			if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("staged\nunstaged\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			out, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+			if err != nil {
+				t.Fatalf("diff: %v", err)
+			}
+			diff, _ := out["diff"].(string)
+			if !strings.Contains(diff, "new file mode") || !strings.Contains(diff, "+staged") || !strings.Contains(diff, "+unstaged") {
+				t.Fatalf("unborn diff should add the whole working-tree file:\n%s", diff)
+			}
+			if out["unborn"] != true {
+				t.Fatalf("unborn = %v, want true", out["unborn"])
+			}
+
+			out, _, err = NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"staged": true})
+			if err != nil {
+				t.Fatalf("diff staged: %v", err)
+			}
+			diff, _ = out["diff"].(string)
+			if !strings.Contains(diff, "+staged") || strings.Contains(diff, "+unstaged") {
+				t.Fatalf("unborn staged diff wrong:\n%s", diff)
+			}
+
+			_, _, err = NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main"})
+			if err == nil || !strings.Contains(err.Error(), "no commits yet") {
+				t.Fatalf("unborn base err = %v, want a clear no-commits error", err)
+			}
+		})
+	}
+}
+
+func TestParseGitStatusPorcelainZ_unmerged(t *testing.T) {
+	var out strings.Builder
+	pairs := []string{"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+	for _, xy := range pairs {
+		out.WriteString(xy + " f-" + xy + "\x00")
+	}
+	// Non-conflict neighbours keep their ordinary labels.
+	out.WriteString("A  added.txt\x00 D gone.txt\x00MM both.txt\x00")
+	files := parseGitStatusPorcelainZ(out.String())
+	byPath := map[string]any{}
+	for _, f := range files {
+		byPath[f["path"].(string)] = f["status"]
+	}
+	for _, xy := range pairs {
+		if got := byPath["f-"+xy]; got != "unmerged" {
+			t.Errorf("%s status = %v, want unmerged", xy, got)
+		}
+	}
+	for p, want := range map[string]string{"added.txt": "added", "gone.txt": "deleted", "both.txt": "modified"} {
+		if byPath[p] != want {
+			t.Errorf("%s status = %v, want %s", p, byPath[p], want)
+		}
+	}
+}
+
+func TestGitStatus_realMergeConflict(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	gitCfg(t, root, "switch", "-c", "other")
+	for name, body := range map[string]string{"README.md": "other\n", "new.txt": "other new\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCfg(t, root, "add", "-A")
+	gitCfg(t, root, "commit", "-m", "other")
+	gitCfg(t, root, "switch", "main")
+	for name, body := range map[string]string{"README.md": "mine\n", "new.txt": "my new\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCfg(t, root, "add", "-A")
+	gitCfg(t, root, "commit", "-m", "mine")
+	merge := exec.Command("git", "-c", "user.email=t@example.com", "-c", "user.name=Test", "merge", "other")
+	merge.Dir = root
+	if out, err := merge.CombinedOutput(); err == nil {
+		t.Fatalf("expected a merge conflict, merge succeeded:\n%s", out)
+	}
+
+	out, _, err := NewRegistry().Dispatch(context.Background(), "status", nil)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	files, _ := out["files"].([]map[string]any)
+	byPath := map[string]map[string]any{}
+	for _, f := range files {
+		byPath[f["path"].(string)] = f
+	}
+	want := map[string]string{"README.md": "UU", "new.txt": "AA"}
+	for p, xy := range want {
+		f := byPath[p]
+		if f == nil {
+			t.Fatalf("missing %s in %#v", p, files)
+		}
+		if f["status"] != "unmerged" || f["index"].(string)+f["worktree"].(string) != xy {
+			t.Fatalf("%s = %#v, want status unmerged with XY %s", p, f, xy)
+		}
+	}
+	// diff still works mid-merge and shows the conflict markers against HEAD.
+	dout, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil)
+	if err != nil {
+		t.Fatalf("diff during conflict: %v", err)
+	}
+	if diff, _ := dout["diff"].(string); !strings.Contains(diff, "+<<<<<<<") {
+		t.Fatalf("diff during conflict should show markers:\n%s", diff)
+	}
+}

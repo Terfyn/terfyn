@@ -36,14 +36,23 @@
 // ambient git credentials): create_branch (git switch -c), commit (stage + git commit; local
 // repository.write, like create_branch), push_branch (push the branch to the remote), and the
 // read-only inspection ops diff and status (issue #534) so a Reviewer can grade the actual
-// working-tree delta. diff is a unified diff (working tree vs HEAD by default; optional base ref,
-// staged, paths); status lists changed/added/deleted/untracked paths. Both are workspace.read
-// effects declared on the Tool resource's operations manifest, grantable to a read-only Reviewer
-// exactly like read_file. Both run git with the pager, fsmonitor, textconv, and external-diff
-// helpers disabled and against a throwaway copy of the index, so they neither execute those
-// repository-configured commands nor rewrite .git/index; the one residual is a clean filter
-// (filter.<name>.clean, e.g. git-lfs) that .gitattributes selects, which git still runs when it
-// hashes a modified worktree file. Deliberately narrow — no push to the default branch, no --force, no
+// working-tree delta. diff is a unified diff: working tree vs HEAD by default (vs the empty tree on
+// a branch with no commits yet); staged:true compares the index instead; base "main" compares
+// against the merge base of base and HEAD (git merge-base, echoed as merge_base) — what this branch
+// changed since it forked, like a pull request, so commits base gained later do not appear. base
+// must resolve to a commit and the revision list always ends in "--", so a base naming a file is an
+// error, never a pathspec. status lists changed/added/deleted/renamed/unmerged/untracked paths.
+// Both are workspace.read effects declared on the Tool resource's operations manifest, grantable
+// to a read-only Reviewer exactly like read_file. Both run git with the pager, fsmonitor, hooks
+// (core.hooksPath points at an empty directory, so post-index-change cannot run), textconv,
+// external-diff, and nested submodule diff (--submodule=short) disabled, and against a throwaway
+// copy of the index, so they do not execute those repository-configured commands and do not
+// rewrite .git/index. Residuals, which git offers no way to disable without misreporting the
+// delta: (1) a clean filter (filter.<name>.clean/process, e.g. git-lfs) that .gitattributes
+// selects still runs when git hashes a stat-dirty worktree file; (2) in a partial clone, a blob
+// missing locally is lazily fetched from the promisor remote, running that remote's configured
+// transport (e.g. core.sshCommand) — GIT_NO_LAZY_FETCH=1 is set, which prevents this only on
+// git >= 2.44. Deliberately narrow — no push to the default branch, no --force, no
 // delete, no arbitrary git; branch names are validated so they cannot be read as a flag or a
 // delete refspec. commit stages all working-tree changes (git add -A) or an explicit paths list,
 // and reports "nothing to commit" as a graceful {committed:false} result rather than failing.

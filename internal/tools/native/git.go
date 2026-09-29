@@ -107,24 +107,36 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 }
 
 // readOnlyGitArgs prefixes args with the flags that keep an inspection command from executing
-// repository-configured helpers or writing to .git. It is applied to every runGitCapped call
-// (git.diff and git.status), not only to the subcommands' own flags:
+// repository-configured helpers or writing to .git. It is applied to every command a readOnlyGit
+// session runs (git.diff and git.status, and the rev-parse / merge-base / hash-object lookups
+// they make), not only to the subcommands' own flags. -c settings are passed to any child git
+// process (e.g. a submodule's status) through GIT_CONFIG_PARAMETERS, so they cover submodules too:
 //   - --no-pager: never spawn core.pager / pager.<cmd>.
 //   - -c core.fsmonitor=false, -c core.useBuiltinFSMonitor=false: status/diff consult the
 //     fsmonitor hook (an arbitrary command from .git/config) to decide which files to stat.
+//   - -c core.hooksPath=<empty dir>: git diff (2.34) refreshes and writes the index even with
+//     --no-optional-locks, and every index write runs the post-index-change hook from .git/hooks
+//     or the repository's core.hooksPath. The write lands in the throwaway index copy, but the
+//     hook would still run; pointing hooksPath at an empty directory we own means no hook exists.
+//     (A directory rather than os.DevNull so the lookup behaves the same on Windows.)
 //   - --no-optional-locks: status opportunistically refreshes and rewrites .git/index; skip it.
-//     git diff does not honor this (git 2.34 still rewrites the index from refresh_index_quietly),
-//     which is why runGitCapped also points GIT_INDEX_FILE at a throwaway copy of the index.
+//     git diff does not honor this, which is why the session also points GIT_INDEX_FILE at a
+//     throwaway copy of the index.
 //
-// Per-subcommand flags (--no-ext-diff, --no-textconv) are added by the caller. Residual: a
-// repository-configured clean filter (filter.<name>.clean/process, e.g. git-lfs) selected by
-// .gitattributes still runs when git hashes a stat-dirty worktree file; git offers no flag to
-// disable it, and overriding it would make the reported delta wrong for those repositories.
-func readOnlyGitArgs(args []string) []string {
+// Per-subcommand flags (--no-ext-diff, --no-textconv, --submodule=short) are added by the caller.
+// Residuals (no git flag disables them; see doc.go):
+//   - a repository-configured clean filter (filter.<name>.clean/process, e.g. git-lfs) selected by
+//     .gitattributes still runs when git hashes a stat-dirty worktree file; overriding it would
+//     make the reported delta wrong for those repositories.
+//   - in a partial clone, a blob missing locally makes git lazily fetch it from the promisor
+//     remote, which runs that remote's configured transport (e.g. core.sshCommand).
+//     GIT_NO_LAZY_FETCH=1 (readOnlyGitEnv) disables this on git >= 2.44 only.
+func readOnlyGitArgs(hooksDir string, args []string) []string {
 	pre := []string{
 		"--no-pager",
 		"-c", "core.fsmonitor=false",
 		"-c", "core.useBuiltinFSMonitor=false",
+		"-c", "core.hooksPath=" + hooksDir,
 		"--no-optional-locks",
 	}
 	return append(pre, args...)
@@ -133,33 +145,53 @@ func readOnlyGitArgs(args []string) []string {
 // readOnlyGitEnv is the process environment for a read-only git run: the ambient environment
 // minus variables that name helpers to execute (GIT_EXTERNAL_DIFF, GIT_PAGER), plus
 // GIT_OPTIONAL_LOCKS=0 (belt and braces with --no-optional-locks, and it also covers any git
-// child process the command spawns, e.g. submodule status).
+// child process the command spawns, e.g. submodule status) and GIT_NO_LAZY_FETCH=1 (git >= 2.44:
+// a partial clone fails on a missing blob instead of fetching it over the network).
 func readOnlyGitEnv() []string {
-	env := make([]string, 0, len(os.Environ())+1)
+	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
 		switch {
 		case strings.HasPrefix(kv, "GIT_EXTERNAL_DIFF="),
 			strings.HasPrefix(kv, "GIT_PAGER="),
-			strings.HasPrefix(kv, "GIT_OPTIONAL_LOCKS="):
+			strings.HasPrefix(kv, "GIT_OPTIONAL_LOCKS="),
+			strings.HasPrefix(kv, "GIT_NO_LAZY_FETCH="):
 			continue
 		}
 		env = append(env, kv)
 	}
-	return append(env, "GIT_OPTIONAL_LOCKS=0")
+	return append(env, "GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1")
 }
 
-// isolatedIndex copies the repository's index to a throwaway file and returns the
-// GIT_INDEX_FILE assignment that points git at it, so any stat-cache refresh git decides to write
-// lands in the copy and never in .git/index. cleanup removes the copy. When the repository has no
-// index yet there is nothing to isolate and env is empty. Failure is an error (fail closed): a
-// read-only op must not fall back to running against the live index.
-func isolatedIndex(ctx context.Context, root string) (env string, cleanup func(), err error) {
-	noop := func() {}
-	out, err := runGit(ctx, root, "rev-parse", "--path-format=absolute", "--git-path", "index")
+// readOnlyGit is one hardened inspection session over the workspace repository: a private temp
+// directory holding an empty hooks directory (core.hooksPath, so no hook can run) and a throwaway
+// copy of the index (GIT_INDEX_FILE, so a stat-cache refresh git decides to write never lands in
+// .git/index). Every command goes through readOnlyGitArgs/readOnlyGitEnv. Call close when done.
+type readOnlyGit struct {
+	root     string
+	hooksDir string
+	env      []string
+	tmp      string
+}
+
+// newReadOnlyGit prepares a session. Failure is an error (fail closed): a read-only op must not fall
+// back to running with the repository's hooks or against the live index. When the repository has
+// no index yet there is nothing to isolate and GIT_INDEX_FILE is left unset.
+func newReadOnlyGit(ctx context.Context, root string) (*readOnlyGit, error) {
+	tmp, err := os.MkdirTemp("", "terfyn-git-ro-")
+	if err != nil {
+		return nil, fmt.Errorf("native: git: temp dir: %w", err)
+	}
+	g := &readOnlyGit{root: root, hooksDir: filepath.Join(tmp, "hooks"), env: readOnlyGitEnv(), tmp: tmp}
+	if err := os.Mkdir(g.hooksDir, 0o700); err != nil {
+		g.close()
+		return nil, fmt.Errorf("native: git: hooks dir: %w", err)
+	}
+	out, _, err := g.run(ctx, 4096, "rev-parse", "--path-format=absolute", "--git-path", "index")
 	if err != nil {
 		// --path-format needs git 2.31+; fall back to a cwd-relative path.
-		if out, err = runGit(ctx, root, "rev-parse", "--git-path", "index"); err != nil {
-			return "", noop, err
+		if out, _, err = g.run(ctx, 4096, "rev-parse", "--git-path", "index"); err != nil {
+			g.close()
+			return nil, err
 		}
 	}
 	src := strings.TrimSpace(out)
@@ -168,47 +200,38 @@ func isolatedIndex(ctx context.Context, root string) (env string, cleanup func()
 	}
 	data, err := os.ReadFile(src)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", noop, nil
+		return g, nil
 	}
 	if err != nil {
-		return "", noop, fmt.Errorf("native: git: read index: %w", err)
+		g.close()
+		return nil, fmt.Errorf("native: git: read index: %w", err)
 	}
-	dir, err := os.MkdirTemp("", "terfyn-git-index-")
-	if err != nil {
-		return "", noop, fmt.Errorf("native: git: index copy: %w", err)
-	}
-	cleanup = func() { _ = os.RemoveAll(dir) }
-	dst := filepath.Join(dir, "index")
+	dst := filepath.Join(tmp, "index")
 	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		cleanup()
-		return "", noop, fmt.Errorf("native: git: index copy: %w", err)
+		g.close()
+		return nil, fmt.Errorf("native: git: index copy: %w", err)
 	}
-	return "GIT_INDEX_FILE=" + dst, cleanup, nil
+	g.env = append(g.env, "GIT_INDEX_FILE="+dst)
+	return g, nil
 }
+
+func (g *readOnlyGit) close() { _ = os.RemoveAll(g.tmp) }
 
 // gitWaitDelay bounds how long Run waits for the output copiers after git exits or the context is
 // cancelled, so a grandchild that inherited the pipe cannot wedge the call.
 const gitWaitDelay = 5 * time.Second
 
-// runGitCapped runs a read-only git command (see readOnlyGitArgs, isolatedIndex) in the workspace root. stdout
-// goes through a byte-capped writer and stderr through a separate bounded one, both assigned to
-// cmd.Stdout/cmd.Stderr so os/exec owns the pipes and Run does not return until every byte git
-// wrote has been copied (calling Wait before draining StdoutPipe can lose buffered tail data).
-// The cap applies during I/O so a huge working-tree delta cannot be allocated before truncation
-// (unlike CombinedOutput). truncated is true when stdout exceeded stdoutMax. A non-zero exit is an
-// error carrying a truncated tail of stderr (falling back to the capped stdout).
-func runGitCapped(ctx context.Context, root string, stdoutMax int, args ...string) (stdout string, truncated bool, err error) {
-	cmd := exec.CommandContext(ctx, "git", readOnlyGitArgs(args)...)
-	cmd.Dir = root
-	cmd.Env = readOnlyGitEnv()
-	indexEnv, cleanup, err := isolatedIndex(ctx, root)
-	if err != nil {
-		return "", false, err
-	}
-	defer cleanup()
-	if indexEnv != "" {
-		cmd.Env = append(cmd.Env, indexEnv)
-	}
+// run executes a read-only git command in the workspace root. stdout goes through a byte-capped
+// writer and stderr through a separate bounded one, both assigned to cmd.Stdout/cmd.Stderr so
+// os/exec owns the pipes and Run does not return until every byte git wrote has been copied
+// (calling Wait before draining StdoutPipe can lose buffered tail data). The cap applies during
+// I/O so a huge working-tree delta cannot be allocated before truncation (unlike CombinedOutput).
+// truncated is true when stdout exceeded stdoutMax. stdin is empty. A non-zero exit is an error
+// carrying a truncated tail of stderr (falling back to the capped stdout).
+func (g *readOnlyGit) run(ctx context.Context, stdoutMax int, args ...string) (stdout string, truncated bool, err error) {
+	cmd := exec.CommandContext(ctx, "git", readOnlyGitArgs(g.hooksDir, args)...)
+	cmd.Dir = g.root
+	cmd.Env = g.env
 	cmd.WaitDelay = gitWaitDelay
 	outCap := &capBuffer{max: stdoutMax}
 	errCap := &capBuffer{max: maxGitStderrBytes}
@@ -222,6 +245,44 @@ func runGitCapped(ctx context.Context, root string, stdoutMax int, args ...strin
 		return string(outCap.buf), outCap.truncated, fmt.Errorf("native: git %s: %w: %s", strings.Join(args, " "), runErr, truncateRunes(msg, 512))
 	}
 	return string(outCap.buf), outCap.truncated, nil
+}
+
+// maxGitOIDOutput bounds the stdout of an object-name lookup (rev-parse, merge-base, hash-object).
+const maxGitOIDOutput = 4096
+
+// commitOID resolves rev to a commit object name, or ok=false when it does not name a commit.
+func (g *readOnlyGit) commitOID(ctx context.Context, rev string) (string, bool) {
+	out, _, err := g.run(ctx, maxGitOIDOutput, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		return "", false
+	}
+	oid := strings.TrimSpace(out)
+	return oid, oid != ""
+}
+
+// headIsUnborn reports whether HEAD is a symbolic ref to a branch that has no commits yet (a
+// fresh repository). A HEAD that is broken in any other way is not "unborn".
+func (g *readOnlyGit) headIsUnborn(ctx context.Context) bool {
+	if _, _, err := g.run(ctx, maxGitOIDOutput, "symbolic-ref", "--quiet", "HEAD"); err != nil {
+		return false
+	}
+	_, _, err := g.run(ctx, maxGitOIDOutput, "rev-parse", "--verify", "--quiet", "HEAD")
+	return err != nil
+}
+
+// emptyTreeOID computes the empty tree's object name in this repository's hash (SHA-1 or
+// SHA-256) rather than hard-coding the SHA-1 value. hash-object without -w writes nothing, and
+// --stdin without --path applies no filters.
+func (g *readOnlyGit) emptyTreeOID(ctx context.Context) (string, error) {
+	out, _, err := g.run(ctx, maxGitOIDOutput, "hash-object", "-t", "tree", "--stdin")
+	if err != nil {
+		return "", err
+	}
+	oid := strings.TrimSpace(out)
+	if oid == "" {
+		return "", fmt.Errorf("native: git: empty tree: no object name")
+	}
+	return oid, nil
 }
 
 func gitCreateBranch(ctx context.Context, with map[string]any) (map[string]any, error) {
@@ -543,11 +604,20 @@ const (
 	maxGitStatusEntries = 1000
 )
 
-// gitDiff returns a unified diff of the workspace repository (issue #534). Default is working
-// tree vs HEAD (staged + unstaged tracked changes). staged:true diffs the index vs HEAD (or vs
-// base). base names a ref to diff against (e.g. "main"). paths optionally scopes the pathspec.
-// Untracked files do not appear in the diff — git.status lists those. The result is truncated
-// like grep rather than unbounded.
+// gitDiff returns a unified diff of the workspace repository (issue #534). Every form compares
+// against one explicitly resolved object, never a bare user string, and always ends the revision
+// list with "--" so git cannot reinterpret anything as a pathspec:
+//   - default: working tree vs HEAD (staged + unstaged tracked changes);
+//   - staged:true: the index vs HEAD (git diff --cached);
+//   - base: vs the merge base of base and HEAD (git merge-base base HEAD), i.e. what this branch
+//     changed since it forked from base, as a pull request shows it — commits base gained after the
+//     fork do not appear. base must resolve to a commit (checked like create_branch does) and the
+//     merge base is echoed as merge_base. Combined with staged, it is the index vs that merge base.
+//   - unborn branch (no commits yet): HEAD is replaced by the empty tree so every tracked file
+//     shows as added (unborn:true in the result); base is an error there (nothing to fork from).
+//
+// paths optionally scopes the pathspec. Untracked files do not appear in the diff — git.status
+// lists those. The result is truncated like grep rather than unbounded.
 func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
 	root, err := workspaceRoot(ctx)
 	if err != nil {
@@ -572,30 +642,63 @@ func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
 		}
 	}
 
-	args := []string{"diff", "--no-color", "--no-ext-diff", "--no-textconv"}
-	if staged {
-		args = append(args, "--cached")
-	}
-	switch {
-	case base != "":
-		args = append(args, base)
-	case !staged:
-		// Working tree vs HEAD so staged and unstaged tracked edits both show; untracked files
-		// stay on git.status (git diff never includes them).
-		args = append(args, "HEAD")
-	}
-	if len(paths) > 0 {
-		args = append(args, "--")
-		args = append(args, paths...)
-	}
-	diff, truncated, err := runGitCapped(ctx, root, maxGitDiffBytes, args...)
+	g, err := newReadOnlyGit(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	result := map[string]any{"diff": diff, "truncated": truncated}
-	if base != "" {
-		result["base"] = base
+	defer g.close()
+
+	result := map[string]any{}
+	// from is the single object the working tree (or index) is compared against.
+	var from string
+	head, headOK := g.commitOID(ctx, "HEAD")
+	if !headOK {
+		if !g.headIsUnborn(ctx) {
+			return nil, fmt.Errorf("native: diff: HEAD does not resolve to a commit")
+		}
+		if base != "" {
+			return nil, fmt.Errorf("native: diff: base %q needs a commit on HEAD to find a merge base, but the current branch has no commits yet; omit base to diff against the empty tree", base)
+		}
+		if from, err = g.emptyTreeOID(ctx); err != nil {
+			return nil, err
+		}
+		result["unborn"] = true
 	}
+	if base != "" {
+		baseOID, ok := g.commitOID(ctx, base)
+		if !ok {
+			return nil, fmt.Errorf("native: diff: base %q is not a commit", base)
+		}
+		out, _, err := g.run(ctx, maxGitOIDOutput, "merge-base", baseOID, head)
+		mb := strings.TrimSpace(out)
+		if err != nil || mb == "" {
+			return nil, fmt.Errorf("native: diff: base %q has no merge base with HEAD", base)
+		}
+		// Re-verify: the value handed to git diff must be a commit, not whatever merge-base printed.
+		if from, ok = g.commitOID(ctx, mb); !ok {
+			return nil, fmt.Errorf("native: diff: merge base %q of base %q is not a commit", mb, base)
+		}
+		result["base"] = base
+		result["merge_base"] = from
+	} else if headOK {
+		from = head
+	}
+
+	// --submodule=short overrides a repository's diff.submodule=diff, which would otherwise spawn a
+	// nested `git diff` inside each submodule that does not inherit --no-textconv/--no-ext-diff and
+	// so runs the submodule's textconv driver or diff.external.
+	args := []string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short"}
+	if staged {
+		args = append(args, "--cached")
+	}
+	args = append(args, from, "--")
+	args = append(args, paths...)
+	diff, truncated, err := g.run(ctx, maxGitDiffBytes, args...)
+	if err != nil {
+		return nil, err
+	}
+	result["diff"] = diff
+	result["truncated"] = truncated
 	if staged {
 		result["staged"] = true
 	}
@@ -620,7 +723,12 @@ func gitStatus(ctx context.Context, with map[string]any) (map[string]any, error)
 		args = append(args, "--")
 		args = append(args, paths...)
 	}
-	out, truncatedIO, err := runGitCapped(ctx, root, maxGitDiffBytes, args...)
+	g, err := newReadOnlyGit(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	defer g.close()
+	out, truncatedIO, err := g.run(ctx, maxGitDiffBytes, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -716,6 +824,12 @@ func porcelainStatus(index, worktree string) string {
 		return "untracked"
 	case index == "!" && worktree == "!":
 		return "ignored"
+	// Unmerged entries first: git's porcelain v1 marks a conflict with one of the XY pairs DD, AU,
+	// UD, UA, DU, AA, UU, which would otherwise read as an ordinary add/delete/change.
+	case index == "U" || worktree == "U",
+		index == "D" && worktree == "D",
+		index == "A" && worktree == "A":
+		return "unmerged"
 	case index == "A" || worktree == "A":
 		return "added"
 	case index == "D" || worktree == "D":
