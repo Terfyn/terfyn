@@ -2,10 +2,11 @@ package native
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // dispatchHandler runs a single native operation (excluding shell-command ops).
@@ -18,6 +19,7 @@ var dispatchHandlers = map[string]dispatchHandler{
 	"commit":                     dispatchGitCommit,
 	"commit_status.create":       dispatchGitHubJSON(githubCommitStatusCreate),
 	"create_branch":              dispatchGitCreateBranch,
+	"diff":                       dispatchGitDiff,
 	"echo":                       dispatchEcho,
 	"identity":                   dispatchIdentity,
 	"issues.comment":             dispatchGitHubJSON(githubIssuesComment),
@@ -36,6 +38,7 @@ var dispatchHandlers = map[string]dispatchHandler{
 	"pull_request.post_comment":  dispatchPullRequestPostComment,
 	"pull_request.update":        dispatchGitHubJSON(githubPullRequestUpdate),
 	"push_branch":                dispatchGitPushBranch,
+	"status":                     dispatchGitStatus,
 	"read_file":                  dispatchWorkspaceReadFile,
 	"write_file":                 dispatchWorkspaceWriteFile,
 	"edit":                       dispatchWorkspaceEdit,
@@ -92,7 +95,7 @@ func prObjectFromWith(with map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("native: pull_request.fetch requires JSON object or JSON string field pr")
 		}
 		var obj map[string]any
-		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		if err := jsonnum.Unmarshal([]byte(raw), &obj); err != nil {
 			return nil, fmt.Errorf("native: pull_request.fetch pr: %w", err)
 		}
 		return obj, nil

@@ -100,7 +100,7 @@ func TestGithubCheckRunsList_happyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(out["total_count"].(float64)) != 1 {
+	if out["total_count"] != int64(1) {
 		t.Fatalf("total_count %#v", out["total_count"])
 	}
 }
@@ -179,7 +179,7 @@ func TestGithubPostComment_liveCreatesIssueComment(t *testing.T) {
 	if out["simulated"] != false {
 		t.Fatalf("simulated %#v", out["simulated"])
 	}
-	if out["id"].(float64) != 42 {
+	if out["id"] != int64(42) {
 		t.Fatalf("id %#v", out["id"])
 	}
 	if out["created"] != true {
@@ -471,7 +471,7 @@ func TestGithubPullRequestCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["number"] != float64(42) || out["html_url"] == "" {
+	if out["number"] != int64(42) || out["html_url"] == "" {
 		t.Fatalf("out %#v", out)
 	}
 }
@@ -1025,7 +1025,7 @@ func TestIssuesListStopsAtByteBudgetWithRealisticItems(t *testing.T) {
 	for i, it := range issues {
 		m := it.(map[string]any)
 		n := i + 1
-		if int(m["number"].(float64)) != n {
+		if m["number"] != int64(n) {
 			t.Fatalf("item %d is issue %v, want GitHub order preserved", i, m["number"])
 		}
 		if len(m["body"].(string)) != fakeIssueBodyLen(n) {
@@ -1119,7 +1119,7 @@ func TestIssuesListFollowsContextOutputBudget(t *testing.T) {
 		size := 0
 		for i, it := range arr {
 			m := it.(map[string]any)
-			if int(m["number"].(float64)) != i+1 || len(m["body"].(string)) != fakeIssueBodyLen(i+1) {
+			if m["number"] != int64(i+1) || len(m["body"].(string)) != fakeIssueBodyLen(i+1) {
 				t.Fatalf("item %d is not whole and in order", i)
 			}
 			b, _ := json.Marshal(it)

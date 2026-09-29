@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/spec"
 	"github.com/Terfyn/terfyn/internal/tools/toolctx"
 )
@@ -215,7 +216,7 @@ func githubWalkArray(ctx context.Context, path, op string, visit func(page []any
 			return false, err
 		}
 		var arr []any
-		if err := json.Unmarshal(b, &arr); err != nil {
+		if err := jsonnum.Unmarshal(b, &arr); err != nil {
 			return false, fmt.Errorf("native: %s decode: %w", op, err)
 		}
 		next, state, reason := githubFollowNext(current.String(), hdr.Values("Link"))

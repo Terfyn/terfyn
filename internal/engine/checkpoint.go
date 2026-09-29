@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/render"
 	"github.com/Terfyn/terfyn/internal/spec"
 	"github.com/Terfyn/terfyn/internal/state"
@@ -105,7 +106,7 @@ func unmarshalCheckpointPayload(contextJSON string, g *spec.ProjectGraph, wf *sp
 		return Context{}, 0, fmt.Errorf("engine: checkpoint context exceeds %d bytes", maxCheckpointContextBytes)
 	}
 	var payload checkpointPayload
-	if err := json.Unmarshal([]byte(contextJSON), &payload); err != nil {
+	if err := jsonnum.Unmarshal([]byte(contextJSON), &payload); err != nil {
 		return Context{}, 0, fmt.Errorf("engine: unmarshal checkpoint: %w", err)
 	}
 	if payload.Version != checkpointPayloadVersion {

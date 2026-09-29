@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/models"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/spec"
@@ -23,7 +24,7 @@ func parseAgentJSONObject(content string) (map[string]any, error) {
 		return nil, fmt.Errorf("engine: empty agent response")
 	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(content), &m); err != nil {
+	if err := jsonnum.Unmarshal([]byte(content), &m); err != nil {
 		return nil, fmt.Errorf("engine: agent response is not a JSON object: %w", err)
 	}
 	if m == nil {
