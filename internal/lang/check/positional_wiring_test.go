@@ -13,7 +13,8 @@ import (
 // the consumer's whole input, never as an input field named "arg0". Every shape — a literal, the
 // workflow input, a step output — into a closed-object or scalar input must validate when well
 // typed, and the checker and the graph validator must agree on every row, including the rejects
-// into a false (never) input.
+// into a false (never) input and a literal field (top-level, nested, or beside a typed token)
+// that the consumer input does not declare.
 func TestPositionalAgentArgs_LoweredGraphValidates(t *testing.T) {
 	t.Parallel()
 	schemas := map[string]string{
@@ -21,6 +22,9 @@ func TestPositionalAgentArgs_LoweredGraphValidates(t *testing.T) {
 		"Str.json":   `{"type":"string"}`,
 		"Int.json":   `{"type":"integer"}`,
 		"Never.json": `false`,
+		"Nested.json": `{"type":"object","properties":{` +
+			`"meta":{"type":"object","properties":{"x":{"type":"string"}},"additionalProperties":false}` +
+			`},"additionalProperties":false}`,
 	}
 	const agents = `
 agent reviewer {
@@ -44,6 +48,13 @@ agent mkint {
     output Int
 }
 
+agent nested {
+    model mock/default
+    instructions "nested in"
+    input Nested
+    output Str
+}
+
 agent never {
     model mock/default
     instructions "unreachable"
@@ -65,6 +76,12 @@ agent never {
 		{name: "step output into closed object", body: `workflow W(input: PR) { a = reviewer(input)  b = reviewer(a) }`, ok: true},
 		{name: "step output into scalar", body: `workflow W(input: Str) { a = sstr(input)  b = sstr(a) }`, ok: true},
 		{name: "ill-typed step output into scalar", body: `workflow W(input: Str) { a = mkint(input)  b = sstr(a) }`, wantErr: `does not match Agent/sstr input "input"`},
+		{name: "nested literals into closed objects", body: `workflow W(input: Str) { r = nested({meta: {x: "a"}}) }`, ok: true},
+		{name: "undeclared literal field", body: `workflow W(input: Str) { r = reviewer({title: "hi", bogus: 1}) }`, wantErr: `input field "bogus" is not declared in Agent/reviewer input schema`},
+		{name: "undeclared object literal field", body: `workflow W(input: Str) { r = reviewer({title: "hi", bogus: {y: true}}) }`, wantErr: `input field "bogus" is not declared in Agent/reviewer input schema`},
+		{name: "undeclared literal field beside a typed token", body: `workflow W(input: PR) { a = reviewer(input)  b = reviewer({title: a.title, bogus: null}) }`, wantErr: `input field "bogus" is not declared in Agent/reviewer input schema`},
+		{name: "nested undeclared literal field", body: `workflow W(input: Str) { r = nested({meta: {x: "a", bogus: 1}}) }`, wantErr: `input field "meta.bogus" is not declared in Agent/nested input schema`},
+		{name: "object literal into scalar", body: `workflow W(input: Str) { r = sstr({q: "hi"}) }`, wantErr: `input field "q" is not declared in Agent/sstr input schema`},
 		{name: "string literal into never", body: `workflow W(input: Str) { never("hi") }`, wantErr: "literal value (any) does not match Agent/never input"},
 		{name: "empty object literal into never", body: `workflow W(input: Str) { never({}) }`, wantErr: "literal value (any) does not match Agent/never input"},
 		{name: "object literal into never", body: `workflow W(input: Str) { never({q: "hi"}) }`},

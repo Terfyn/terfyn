@@ -490,6 +490,11 @@ func TestValidateProjectGraph_multiPositionalAgentArgsAreNotWholeDocument(t *tes
 // arg0 (a named call, or one argument of a multi-positional call) and is checked as one.
 func TestValidateProjectGraph_wholeDocumentLiteralFallback(t *testing.T) {
 	const closed = `{"type":"object","properties":{"title":{"type":"string"}},"additionalProperties":false}`
+	const nested = `{"type":"object","properties":{` +
+		`"meta":{"type":"object","properties":{"x":{"type":"string"}},"additionalProperties":false},` +
+		`"tags":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"}},"additionalProperties":false}}` +
+		`},"additionalProperties":false}`
+	obj := func(fields map[string]any) map[string]any { return map[string]any{"arg0": fields} }
 	cases := []struct {
 		name     string
 		consumer string
@@ -508,6 +513,37 @@ func TestValidateProjectGraph_wholeDocumentLiteralFallback(t *testing.T) {
 			wantErr: `literal value (any) does not match Agent/consumer input "input" (never)`},
 		{name: "bare input into never", consumer: `false`, with: map[string]any{"arg0": "${input}"}, whole: true,
 			wantErr: `untyped value (any) does not match Agent/consumer input "input" (never)`},
+		// The literal parts of a whole-document value are held to their own nested locations
+		// (#575 review): a literal field the consumer does not declare is rejected like a token.
+		{name: "nested literals into closed objects", consumer: nested, whole: true,
+			with: obj(map[string]any{"meta": map[string]any{"x": "a"}, "tags": []any{map[string]any{"name": "a"}, map[string]any{"name": "b"}}})},
+		{name: "undeclared literal field", consumer: closed, whole: true,
+			with:    obj(map[string]any{"title": "hi", "bogus": 1}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared null literal field", consumer: closed, whole: true,
+			with:    obj(map[string]any{"bogus": nil}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared literal field beside a typed token", consumer: closed, whole: true,
+			with:    obj(map[string]any{"title": "${steps.value.output}", "bogus": true}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared field holding an untyped token", consumer: closed, whole: true,
+			with:    obj(map[string]any{"bogus": "${steps.value.status}"}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "nested undeclared literal field", consumer: nested, whole: true,
+			with:    obj(map[string]any{"meta": map[string]any{"x": "a", "bogus": 1}}),
+			wantErr: `input field "meta.bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared literal field in an array element", consumer: nested, whole: true,
+			with:    obj(map[string]any{"tags": []any{map[string]any{"name": "a", "bogus": "b"}}}),
+			wantErr: `input field "tags.0.bogus" is not declared in Agent/consumer input schema`},
+		{name: "literal array into closed object", consumer: closed, whole: true,
+			with:    map[string]any{"arg0": []any{1}},
+			wantErr: `input field "0" is not declared in Agent/consumer input schema`},
+		{name: "literal field into scalar", consumer: `{"type":"string"}`, whole: true,
+			with:    obj(map[string]any{"q": "hi"}),
+			wantErr: `input field "q" is not declared in Agent/consumer input schema`},
+		// A named key keeps its behaviour: the value is checked once, at the field.
+		{name: "named nested literal is checked at the field only", consumer: nested,
+			with: map[string]any{"meta": map[string]any{"bogus": 1}}},
 		{name: "named arg0 literal into closed object", consumer: closed, with: map[string]any{"arg0": "hi"},
 			wantErr: `with "arg0" is not declared`},
 		{name: "multi-positional literals into closed object", consumer: closed, with: map[string]any{"arg0": "a", "arg1": "b"},
@@ -527,6 +563,9 @@ func TestValidateProjectGraph_wholeDocumentLiteralFallback(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+			if n := strings.Count(err.Error(), "is not declared"); tc.whole && n > 1 {
+				t.Fatalf("want one undeclared-location diagnostic, got %d: %v", n, err)
 			}
 		})
 	}

@@ -29,7 +29,10 @@ var interpTokenRE = regexp.MustCompile(`\$\{([^}]*)\}`)
 //     and rejected by a never (false) consumer. A value that mixes literals and typed tokens is
 //     checked through those tokens; a value whose only tokens this pass does not type
 //     (${steps.<id>.status}, a bare ${input}, an unknown step, ...) is an untyped producer too,
-//     so no with-key is left unchecked;
+//     so no with-key is left unchecked. For a whole-document argument, whose root is the entire
+//     input, each literal (or untyped-token) field and element is additionally held to its own
+//     nested location, so a literal into a field the consumer forbids is "not declared" there
+//     just as a token would be (checkWholeDocumentLiterals);
 //   - a step with no `with` at all into a consumer whose whole input is never is rejected, matching
 //     the .agent checker's zero-argument error — agent input is not validated at run time, so this
 //     static check is what stops a false-input agent from running.
@@ -116,6 +119,13 @@ func checkStepWithWiring(g *ProjectGraph, wfName string, st WorkflowStep, byID m
 			covered = covered || tokCovered
 			hasToken = hasToken || tokFound
 		})
+		if root.whole {
+			// The root of a whole-document argument is the entire input, so checking the value
+			// once at root could only reject a never input. Its literal (and untyped-token) parts
+			// supply nested input locations of their own and are held to those, as each typed
+			// token above already was.
+			errs = append(errs, checkWholeDocumentLiterals(g, wfName, st, st.With[key], root, byID, inputDoc, consumer)...)
+		}
 		if covered {
 			continue
 		}
@@ -193,6 +203,68 @@ func walkWiringValue(v any, site wiringSite, fn func(wiringSite, string)) {
 			walkWiringValue(e, site.child(k, false), fn)
 		}
 	}
+}
+
+// checkWholeDocumentLiterals checks the parts of a whole-document agent argument (#550) that the
+// token path does not: every object field and array element below the input root whose value is
+// a literal — a string without a token, a number, bool, null, or an object/array of those — and
+// every string leaf none of whose tokens this pass types. Each such part is an untyped producer
+// at its own nested site, so it fails only when the consumer input forbids that location
+// (lookupConsumer reports Missing: an undeclared field under additionalProperties: false, a false
+// property, a descent through a scalar). It is then reported exactly as a token there would be
+// (`input field "<path>" is not declared`), the location the .agent checker rejects too; a
+// forbidden object/array is reported once rather than once per literal inside it. Leaves whose
+// token is typed were already checked at their site by the token path, and the root itself is
+// left to the caller's root check (which rejects a never input), so nothing is reported twice.
+func checkWholeDocumentLiterals(
+	g *ProjectGraph,
+	wfName string,
+	st WorkflowStep,
+	v any,
+	root wiringSite,
+	byID map[string]WorkflowStep,
+	inputDoc *schema.Document,
+	consumer *schema.Document,
+) []error {
+	if consumer == nil {
+		return nil
+	}
+	// visit returns the errors for v at site and whether a typed token inside v was checked.
+	var visit func(v any, site wiringSite) ([]error, bool)
+	visit = func(v any, site wiringSite) ([]error, bool) {
+		var errs []error
+		covered := false
+		switch t := v.(type) {
+		case string:
+			if _, c, _ := checkWiringString(g, wfName, st, site, t, byID, inputDoc, consumer); c {
+				return nil, true
+			}
+		case []any:
+			for i, e := range t {
+				e, c := visit(e, site.child(strconv.Itoa(i), true))
+				errs, covered = append(errs, e...), covered || c
+			}
+		case map[string]any:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				e, c := visit(t[k], site.child(k, false))
+				errs, covered = append(errs, e...), covered || c
+			}
+		}
+		if site.nested == nil || covered || !lookupConsumer(consumer, site).Missing {
+			return errs, covered
+		}
+		// A forbidden location holding no typed token: one diagnostic for the location, not one
+		// per literal inside it. (One holding a typed token keeps the per-leaf diagnostics, so the
+		// token's own report is not duplicated.)
+		return checkConsumerType(wfName, st, site, "literal value", schema.LookupResult{}, consumer, true), false
+	}
+	errs, _ := visit(v, root)
+	return errs
 }
 
 // lookupConsumer resolves the consumer input type at site. An array element is typed
