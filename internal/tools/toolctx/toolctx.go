@@ -9,15 +9,17 @@ import "context"
 
 type outputBudgetKey struct{}
 
-// WithOutputBudget returns ctx carrying the resolved tool-output byte limit
-// (spec.ResolvedExecutionLimits.MaxToolOutputBytes) that the caller will enforce on this call's
-// output. n <= 0 is stored as-is and means "no limit", matching how the engine and the MCP server
-// treat a non-positive maxBytes.
+// WithOutputBudget returns ctx carrying the largest output, in JSON bytes, that the caller can keep
+// from this call: at most the resolved tool-output limit it will enforce
+// (spec.ResolvedExecutionLimits.MaxToolOutputBytes), and less when the output must also fit another
+// limit (the engine clamps it to half the run's maxCheckpointBytes, because a step output is
+// checkpointed). n <= 0 is stored as-is and means "no limit", matching how the engine and the MCP
+// server treat a non-positive maxBytes.
 func WithOutputBudget(ctx context.Context, n int) context.Context {
 	return context.WithValue(ctx, outputBudgetKey{}, n)
 }
 
-// OutputBudget reports the tool-output byte limit set by WithOutputBudget. ok is false when the
+// OutputBudget reports the output byte budget set by WithOutputBudget. ok is false when the
 // caller did not set one (a direct Registry.Call, a test); the tool then falls back to its own
 // default. n <= 0 with ok true means the caller enforces no output limit.
 func OutputBudget(ctx context.Context) (n int, ok bool) {

@@ -6,11 +6,13 @@ import (
 	"github.com/Terfyn/terfyn/internal/tools/toolctx"
 )
 
-// WithOutputBudget returns ctx carrying the resolved tool-output byte limit the caller will enforce
-// on this call's output (spec.ResolvedExecutionLimits.MaxToolOutputBytes). Callers that enforce the
-// output limit — the engine's runToolStep and mcpserver.PolicyDispatcher — set it right before
-// ToolExecutor.Call so a tool that bounds its own result (the native GitHub list ops) sizes it to
-// the limit actually applied rather than the default. n <= 0 means no limit.
+// WithOutputBudget returns ctx carrying the largest output the caller can keep from this call: the
+// resolved tool-output byte limit it will enforce (spec.ResolvedExecutionLimits.MaxToolOutputBytes),
+// clamped by any other limit the output must fit (the engine's runToolStep clamps it to half the
+// run's maxCheckpointBytes; mcpserver.PolicyDispatcher, whose results are not checkpointed, passes
+// the tool-output limit). Both set it right before ToolExecutor.Call so a tool that bounds its own
+// result (the native GitHub list ops) sizes it to the limits actually applied rather than the
+// default. n <= 0 means no limit.
 func WithOutputBudget(ctx context.Context, n int) context.Context {
 	return toolctx.WithOutputBudget(ctx, n)
 }

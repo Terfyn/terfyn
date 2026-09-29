@@ -29,9 +29,10 @@ import (
 // List results are bounded by what the consumer can receive, not only by page
 // count: every tool output passes the tool-output limit its caller enforces (the
 // resolved project/workflow/tool maxToolOutputBytes, 256 KiB and truncate policy by
-// default), and 100 real issue or PR objects already exceed the default. The walk
-// therefore stops once the next whole item would push the encoded items past the
-// byte budget (githubListOutputBudget: three quarters of that resolved limit), or
+// default), and 100 real issue or PR objects already exceed the default; a workflow
+// step's output must also fit the run's checkpoint. The walk therefore stops once the
+// next whole item would push the encoded items past the byte budget
+// (githubListOutputBudget: three quarters of the budget the caller advertises), or
 // once the caller's optional `limit` is reached, and reports truncated=true when
 // anything was left unreturned. Items are never cut: the result is always a prefix
 // of GitHub's order, made of whole objects.
@@ -49,11 +50,18 @@ const (
 )
 
 // githubListOutputBudget bounds the JSON-encoded size of the items one list call
-// returns. It is three quarters of the tool-output limit the caller will enforce on
-// this call (tools.OutputBudget, set by the engine's runToolStep and the MCP server's
-// PolicyDispatcher from spec.ResolveExecutionLimits), so the whole result (items, the
-// result key, and the truncated flag) passes that limit untouched with headroom for
-// the envelope, and raising maxToolOutputBytes for a GitHub tool returns more items.
+// returns. It is three quarters of the output budget the caller advertises for this
+// call (tools.OutputBudget, set from spec.ResolveExecutionLimits), so the whole result
+// (items, the result key, and the truncated flag) passes that limit untouched with
+// headroom for the envelope. The MCP server's PolicyDispatcher advertises the resolved
+// maxToolOutputBytes. The engine's runToolStep advertises the smaller of that and half
+// the run's maxCheckpointBytes, because a workflow step's output must also fit the
+// checkpoint, where a suspension stores it twice (engine toolOutputBudget). So raising
+// maxToolOutputBytes for a GitHub tool returns more items only up to that clamp; past
+// it, raise maxCheckpointBytes as well. The clamp is per call: every list step in a
+// workflow shares one checkpoint, and keeping their sum (and every other step's
+// output) within maxCheckpointBytes is the operator's responsibility; a run that
+// exceeds it fails at the checkpoint, not at the list.
 // Without a budget on the context it falls back to githubListDefaultMaxOutputBytes. A
 // non-positive budget means the caller enforces no output limit, so only `limit` and
 // the page cap bound the walk. A single item larger than the budget is still returned

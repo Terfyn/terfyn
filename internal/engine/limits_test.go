@@ -366,6 +366,42 @@ func TestResolveToolLimits_toolOverrideWins(t *testing.T) {
 	}
 }
 
+// TestToolOutputBudget_clampedToCheckpoint: the budget runToolStep advertises is the resolved
+// tool-output limit, clamped to half the checkpoint limit resolved at the ROOT workflow (the one
+// saveCheckpoint enforces), so a subworkflow's own maxCheckpointBytes cannot loosen it.
+func TestToolOutputBudget_clampedToCheckpoint(t *testing.T) {
+	const uses = "tool.helper.echo"
+	cases := []struct {
+		name           string
+		project, tool  *spec.ExecutionLimits
+		wfCP, rootWFCP int // 0 = unset; rootWFCP > 0 runs as a subworkflow of a root with that limit
+		want           int
+	}{
+		{name: "defaults: tool limit is below half the checkpoint", want: spec.DefaultMaxToolOutputBytes},
+		{name: "raised tool limit clamps to half the default checkpoint", tool: &spec.ExecutionLimits{MaxToolOutputBytes: 2 << 20}, want: spec.DefaultMaxCheckpointBytes / 2},
+		{name: "tool limit exactly half the checkpoint", tool: &spec.ExecutionLimits{MaxToolOutputBytes: 512 << 10}, want: 512 << 10},
+		{name: "raised checkpoint lets the tool limit through", project: &spec.ExecutionLimits{MaxCheckpointBytes: 8 << 20}, tool: &spec.ExecutionLimits{MaxToolOutputBytes: 2 << 20}, want: 2 << 20},
+		{name: "workflow-lowered checkpoint clamps the default tool limit", wfCP: 256 << 10, want: 128 << 10},
+		{name: "subworkflow uses the root checkpoint limit", tool: &spec.ExecutionLimits{MaxToolOutputBytes: 2 << 20}, wfCP: 8 << 20, rootWFCP: 200 << 10, want: 100 << 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			graph := graphWithLimits(t, tc.project, tc.tool)
+			wf := graph.Workflows["demo"]
+			if tc.wfCP > 0 {
+				wf.Spec.Limits = &spec.ExecutionLimits{MaxCheckpointBytes: tc.wfCP}
+			}
+			ex := &Executor{Graph: graph}
+			if tc.rootWFCP > 0 {
+				ex.rootWF = &spec.WorkflowResource{Spec: spec.WorkflowSpec{Limits: &spec.ExecutionLimits{MaxCheckpointBytes: tc.rootWFCP}}}
+			}
+			if got := ex.toolOutputBudget(wf, uses); got != tc.want {
+				t.Fatalf("toolOutputBudget = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnforceMapLimit_concurrentSafety(t *testing.T) {
 	t.Parallel()
 	ex := &Executor{Trace: nil}
