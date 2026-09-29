@@ -108,21 +108,24 @@ func (d *Document) Lookup(path []string) LookupResult {
 	return lookupNode(d, d.Raw, path, 0)
 }
 
-// Compatible reports whether a producing type set can flow into a consuming type set.
+// Compatible reports whether every concrete producer type is accepted by the consumer.
 // Untyped (empty) sides are compatible (gradual typing). integer may flow into number.
+// Union producers are subtypes of the consumer: overlapping sets are not enough
+// (string|integer is not assignable to string).
 func Compatible(producer, consumer TypeSet) bool {
 	if len(producer) == 0 || len(consumer) == 0 {
 		return true
 	}
 	for t := range producer {
 		if consumer.Has(t) {
-			return true
+			continue
 		}
 		if t == TypeInteger && consumer.Has(TypeNumber) {
-			return true
+			continue
 		}
+		return false
 	}
-	return false
+	return true
 }
 
 func lookupNode(d *Document, node map[string]any, path []string, depth int) LookupResult {
