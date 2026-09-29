@@ -57,14 +57,47 @@ func (s TypeSet) String() string {
 }
 
 // Document is a loaded JSON Schema held on the project graph after validate (issue #193).
-// Path is the absolute file used to compile; Raw is the object form used for static type lookup.
-// Boolean is non-nil when the root document is a Draft 2020-12 boolean schema (issue #549).
+// Path is the absolute file used to compile.
+//
+// Raw is the parsed root schema and is exactly one of two Draft 2020-12 forms: a
+// map[string]any (object schema) or a bool (boolean schema: true accepts every instance, false
+// rejects every instance). It is nil only for a Document that carries no schema content (never
+// produced by [LoadDocument]); nil means "unresolved / gradual", never "boolean". Because a
+// boolean schema is a non-nil interface value, every consumer that asks "is there a schema?"
+// (project export, lookup) gets the right answer for true and false without a side field — use
+// [Document.Schema] rather than comparing Raw to nil so the invariant lives in one place.
 type Document struct {
 	Path string
-	Raw  map[string]any
-	// Boolean is set for a root true/false schema. true is unconstrained; false
-	// rejects every instance. Raw is nil in that case.
-	Boolean *bool
+	Raw  any
+}
+
+// Schema returns the root schema (map[string]any or bool) and whether the document carries one.
+// It is the single presence test: a boolean false schema is present (ok is true), a nil Document or
+// a Document without content is not. A typed-nil object map is treated as absent.
+func (d *Document) Schema() (raw any, ok bool) {
+	if d == nil {
+		return nil, false
+	}
+	switch v := d.Raw.(type) {
+	case bool:
+		return v, true
+	case map[string]any:
+		if v == nil {
+			return nil, false
+		}
+		return v, true
+	default:
+		return nil, false
+	}
+}
+
+// Object returns the root schema when it is an object schema, else nil.
+func (d *Document) Object() map[string]any {
+	if d == nil {
+		return nil
+	}
+	m, _ := d.Raw.(map[string]any)
+	return m
 }
 
 // LookupResult is the static type of a JSON Schema path.
@@ -105,10 +138,7 @@ func LoadDocument(schemaPath string) (*Document, error) {
 		return nil, &CompileError{Path: abs, Err: err}
 	}
 	switch v := decoded.(type) {
-	case bool:
-		bv := v
-		return &Document{Path: abs, Boolean: &bv}, nil
-	case map[string]any:
+	case bool, map[string]any:
 		return &Document{Path: abs, Raw: v}, nil
 	default:
 		return nil, &CompileError{Path: abs, Err: fmt.Errorf("schema must be a JSON object or boolean, got %T", decoded)}
@@ -121,16 +151,20 @@ func (d *Document) Lookup(path []string) LookupResult {
 	if d == nil {
 		return LookupResult{}
 	}
-	if d.Boolean != nil {
-		if *d.Boolean {
+	switch v := d.Raw.(type) {
+	case bool:
+		if v {
 			return LookupResult{}
 		}
 		return LookupResult{Impossible: true}
-	}
-	if d.Raw == nil {
+	case map[string]any:
+		if v == nil {
+			return LookupResult{}
+		}
+		return lookupNode(d, v, path, 0)
+	default:
 		return LookupResult{}
 	}
-	return lookupNode(d, d.Raw, path, 0)
 }
 
 // Compatible reports whether a producing type set can flow into a consuming type set.

@@ -75,11 +75,14 @@ func TestLoadDocument_booleanSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("true schema must load: %v", err)
 	}
-	if trueDoc.Boolean == nil || !*trueDoc.Boolean {
-		t.Fatalf("true document Boolean = %+v", trueDoc.Boolean)
+	if v, ok := trueDoc.Raw.(bool); !ok || !v {
+		t.Fatalf("true document Raw = %#v, want bool true", trueDoc.Raw)
 	}
-	if trueDoc.Raw != nil {
-		t.Fatalf("boolean schema must not populate Raw, got %+v", trueDoc.Raw)
+	if raw, ok := trueDoc.Schema(); !ok || raw != true {
+		t.Fatalf("true document must be a present schema, got %#v, %v", raw, ok)
+	}
+	if trueDoc.Object() != nil {
+		t.Fatalf("boolean schema has no object form, got %+v", trueDoc.Object())
 	}
 	root := trueDoc.Lookup(nil)
 	if root.Impossible || root.Missing || root.Known {
@@ -98,8 +101,13 @@ func TestLoadDocument_booleanSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("false schema must load: %v", err)
 	}
-	if falseDoc.Boolean == nil || *falseDoc.Boolean {
-		t.Fatalf("false document Boolean = %+v", falseDoc.Boolean)
+	if v, ok := falseDoc.Raw.(bool); !ok || v {
+		t.Fatalf("false document Raw = %#v, want bool false", falseDoc.Raw)
+	}
+	// false is a PRESENT schema (never valid), not an absent one: Raw == nil must not be conflated
+	// with it (issue #549 review).
+	if raw, ok := falseDoc.Schema(); !ok || raw != false {
+		t.Fatalf("false document must be a present schema, got %#v, %v", raw, ok)
 	}
 	never := falseDoc.Lookup(nil)
 	if !never.Impossible || never.Known || never.Missing {
@@ -125,6 +133,25 @@ func TestLoadDocument_booleanSchemas(t *testing.T) {
 	}
 	if CompatibleLookup(never, LookupResult{Types: str, Known: true}) {
 		t.Fatal("false must not flow into string")
+	}
+}
+
+func TestDocument_SchemaPresence(t *testing.T) {
+	var nilDoc *Document
+	if _, ok := nilDoc.Schema(); ok {
+		t.Fatal("nil document carries no schema")
+	}
+	if _, ok := (&Document{}).Schema(); ok {
+		t.Fatal("zero document carries no schema")
+	}
+	if _, ok := (&Document{Raw: map[string]any(nil)}).Schema(); ok {
+		t.Fatal("typed-nil object map carries no schema")
+	}
+	if _, ok := (&Document{Raw: map[string]any{}}).Schema(); !ok {
+		t.Fatal("empty object schema {} is a present schema")
+	}
+	if _, ok := (&Document{Raw: false}).Schema(); !ok {
+		t.Fatal("false must be a present schema")
 	}
 }
 

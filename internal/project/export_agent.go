@@ -208,7 +208,9 @@ func refuseForeignAgentSources(dir, target string) error {
 // graph, so the exported .agent's type refs (input/output <Type> -> schemas/<Type>.json) resolve on
 // reload. The directory is fully replaced so a re-export never leaves an orphaned schema behind. A
 // type whose backing schema was never resolved (untyped/gradual typing, #193) is skipped — the
-// reloaded project is untyped there too, matching the source.
+// reloaded project is untyped there too, matching the source. A Draft 2020-12 boolean root schema
+// (true / false, #549) is a resolved schema and is written as `true` / `false`, so `false` keeps its
+// never-valid typing on reload instead of degrading to untyped.
 func writeExportedSchemas(dir string, g *spec.ProjectGraph) error {
 	schemas := collectResolvedSchemas(g)
 	if len(schemas) == 0 {
@@ -235,18 +237,22 @@ func writeExportedSchemas(dir string, g *spec.ProjectGraph) error {
 	return nil
 }
 
-// collectResolvedSchemas maps each canonical schema ref (schemas/<Type>.json) to its resolved schema
-// object, over every typed agent input/output and workflow input in the graph. Only refs that follow
+// collectResolvedSchemas maps each canonical schema ref (schemas/<Type>.json) to its resolved root
+// schema (a map[string]any object schema or a bool boolean schema), over every typed agent input/output and workflow input in the graph. Only refs that follow
 // the convention and carry a resolved document are included; the same Type used by several resources
 // resolves to one file.
-func collectResolvedSchemas(g *spec.ProjectGraph) map[string]map[string]any {
-	out := map[string]map[string]any{}
+func collectResolvedSchemas(g *spec.ProjectGraph) map[string]any {
+	out := map[string]any{}
 	addAgentIO := func(io *spec.AgentIO) {
-		if io == nil || io.Resolved == nil || io.Resolved.Raw == nil {
+		if io == nil {
+			return
+		}
+		raw, ok := io.Resolved.Schema()
+		if !ok {
 			return
 		}
 		if isCanonicalSchemaRef(io.Schema) {
-			out[io.Schema] = io.Resolved.Raw
+			out[io.Schema] = raw
 		}
 	}
 	for _, name := range sortedKeys(g.Agents) {
@@ -263,8 +269,8 @@ func collectResolvedSchemas(g *spec.ProjectGraph) map[string]map[string]any {
 			continue
 		}
 		in := w.Spec.Input
-		if in.Resolved != nil && in.Resolved.Raw != nil && isCanonicalSchemaRef(in.Schema) {
-			out[in.Schema] = in.Resolved.Raw
+		if raw, ok := in.Resolved.Schema(); ok && isCanonicalSchemaRef(in.Schema) {
+			out[in.Schema] = raw
 		}
 	}
 	return out

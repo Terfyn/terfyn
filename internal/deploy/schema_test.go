@@ -142,3 +142,51 @@ func TestHydrateGraph_unsupportedSchemaBundleFormatRefuses(t *testing.T) {
 		t.Fatalf("expected refusal naming both schema bundle versions, got %v", err)
 	}
 }
+
+// A Draft 2020-12 boolean root schema (issue #549) is a real schema: it is captured into the schema
+// bundle, hydrated verbatim, and — because the bundle digest is part of the snapshot identity — a
+// project whose only difference is `true` vs `false` gets a different snapshot digest. Dropping a
+// boolean schema from capture (treating it as "no schema") would make a pinned resume validate
+// against nothing, and would make widening false→true invisible to the digest.
+func TestSchemaBundle_capturesBooleanRootSchemas(t *testing.T) {
+	ctx := context.Background()
+	build := func(body string) (string, *Hydrated, map[string]string) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "in.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		schemas, warnings, err := CollectSchemas(graphWithInputSchema("./in.json"), root)
+		if err != nil || len(warnings) != 0 {
+			t.Fatalf("CollectSchemas(%q): warnings=%v err=%v", body, warnings, err)
+		}
+		if schemas["./in.json"] != body {
+			t.Fatalf("boolean schema %q not captured verbatim: %v", body, schemas)
+		}
+		store := newMemStore()
+		digest, _, err := BuildAndPersist(ctx, store, graphWithInputSchema("./in.json"), "local", "v1", root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap, err := store.GetSnapshot(ctx, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.SchemaBundleDigest == "" {
+			t.Fatalf("snapshot for %q must reference a schema bundle", body)
+		}
+		h, err := HydrateGraph(ctx, store, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return digest, h, schemas
+	}
+
+	trueDigest, trueHyd, _ := build("true")
+	falseDigest, falseHyd, _ := build("false")
+	if trueHyd.Schemas["./in.json"] != "true" || falseHyd.Schemas["./in.json"] != "false" {
+		t.Fatalf("hydrated bundles = %v / %v", trueHyd.Schemas, falseHyd.Schemas)
+	}
+	if trueDigest == falseDigest {
+		t.Fatal("true vs false schema must change the snapshot digest")
+	}
+}
