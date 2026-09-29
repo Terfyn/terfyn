@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // AgenticReviewMarker is embedded in automated PR review issue comments so synchronize
@@ -173,7 +175,7 @@ func githubListIssueCommentsPage(ctx context.Context, owner, repo, number string
 		return nil, err
 	}
 	var comments []map[string]any
-	if err := json.Unmarshal(b, &comments); err != nil {
+	if err := jsonnum.Unmarshal(b, &comments); err != nil {
 		return nil, fmt.Errorf("native: list issue comments decode: %w", err)
 	}
 	return comments, nil
@@ -198,7 +200,7 @@ func githubUpdateIssueComment(ctx context.Context, owner, repo, commentID, body 
 
 func decodeGitHubCommentResponse(b []byte, updated bool) (map[string]any, error) {
 	var out map[string]any
-	if err := json.Unmarshal(b, &out); err != nil {
+	if err := jsonnum.Unmarshal(b, &out); err != nil {
 		return nil, fmt.Errorf("native: pull_request.post_comment decode: %w", err)
 	}
 	if out == nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Terfyn/terfyn/internal/config"
 	"github.com/Terfyn/terfyn/internal/engine"
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/render"
 	"github.com/Terfyn/terfyn/internal/runtime"
@@ -166,7 +167,7 @@ func buildRunInputJSON(inputFile string, pairs []string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("run: read input-file: %w", err)
 		}
-		if err := json.Unmarshal(b, &m); err != nil {
+		if err := jsonnum.Unmarshal(b, &m); err != nil {
 			return nil, fmt.Errorf("run: input-file must be a JSON object: %w", err)
 		}
 		if m == nil {

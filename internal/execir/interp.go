@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
 
@@ -154,13 +155,37 @@ func (in *Interp) RunResumable(ctx context.Context, prog *Program, input any, se
 	sess := &session{memo: map[string]any{}, control: map[string]int{}}
 	if seed != nil {
 		for k, v := range seed.Memo {
-			sess.memo[k] = v
+			c, err := jsonnum.Canonical(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("execir: seed memo %q: %w", k, err)
+			}
+			sess.memo[k] = c
 		}
 		for k, v := range seed.Control {
 			sess.control[k] = v
 		}
 	}
-	scope := paramScope(prog.Params, input)
+	// Runtime values (the input here, leaf results in invoke) enter the
+	// interpreter in ONE canonical form — jsonnum.Canonical: int64 for a whole
+	// number in range, else float64; map[string]any/[]any containers; the value
+	// of an int/int64/float64 reached directly is preserved, other Go types take
+	// their round trip — and that form is a checkpoint round-trip fixed point, so
+	// a value compares, renders and re-encodes identically on a fresh run and
+	// after a checkpoint resume (S7 replay determinism), whatever Go types the
+	// caller supplied. Program literals are not canonicalized here (a float
+	// literal such as 1152921504606846976.0 stays float64 in scope, and the
+	// comparator is exact across int64/float64): a literal that stays inside the
+	// interpreter is re-evaluated identically from the pinned program on replay,
+	// and one that reaches durable state as a leaf argument (a subworkflow's
+	// input, a gated call's or approval's With) is canonicalized by the engine
+	// Invoker before it is persisted. The input is the workflow's whole input
+	// document — any JSON value for a single-parameter callee called with a whole
+	// document (#552), not only an object — so it is canonicalized as a value.
+	cinput, err := jsonnum.Canonical(input)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execir: input: %w", err)
+	}
+	scope := paramScope(prog.Params, cinput)
 	r := &runner{in: in, ctx: ctx, sess: sess}
 	// A top-level ErrSuspend is a clean pause, not a failure: the run is now
 	// waiting on a human decision and RunState reports where (issue #258/#270).
@@ -441,6 +466,15 @@ func (r *runner) invoke(scope map[string]any, bind string, site CallSite, args m
 			return err
 		}
 		return err
+	}
+	// Canonicalize BEFORE memoizing so the live value bound below is exactly the
+	// value a resume replays from the checkpoint (S7): canonical values are
+	// round-trip fixed points. A result with no JSON encoding (or nested past
+	// jsonnum.MaxDepth) could not be checkpointed, so it fails the leaf here
+	// rather than diverging from a resumed run later.
+	res, err = jsonnum.Canonical(res)
+	if err != nil {
+		return fmt.Errorf("execir: %s result: %w", key, err)
 	}
 	r.sess.putMemo(key, res)
 	if bind != "" {

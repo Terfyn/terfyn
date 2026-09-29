@@ -42,7 +42,7 @@ func TestCall_stdio_mockSubprocess(t *testing.T) {
 	if meta.DurationMs < 0 {
 		t.Fatalf("meta %+v", meta)
 	}
-	if out["repo"] != "acme/api" || out["n"] != float64(3) {
+	if out["repo"] != "acme/api" || out["n"] != int64(3) {
 		t.Fatalf("output %+v", out)
 	}
 }
@@ -125,7 +125,7 @@ func TestCall_http_mockServer(t *testing.T) {
 	if meta.DurationMs < 0 {
 		t.Fatalf("meta %+v", meta)
 	}
-	if out["repo"] != "acme/api" || out["n"] != float64(3) {
+	if out["repo"] != "acme/api" || out["n"] != int64(3) {
 		t.Fatalf("output %+v", out)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // Connector is an MCP session that can exchange JSON-RPC over a transport (stdio or HTTP).
@@ -63,7 +65,7 @@ func parseCallToolResult(raw json.RawMessage) (map[string]any, error) {
 	first := envelope.Content[0]
 	if first.Type == "text" && first.Text != "" {
 		var obj map[string]any
-		if json.Unmarshal([]byte(first.Text), &obj) == nil {
+		if jsonnum.Unmarshal([]byte(first.Text), &obj) == nil {
 			return obj, nil
 		}
 		return map[string]any{"text": first.Text}, nil
