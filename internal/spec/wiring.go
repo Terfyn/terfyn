@@ -11,7 +11,8 @@ import (
 var interpTokenRE = regexp.MustCompile(`\$\{([^}]*)\}`)
 
 // validateStepWiring checks ${steps.*.output...} (and ${input...}) interpolations against
-// declared schemas on the graph (issue #193). Absent schemas are skipped (gradual typing).
+// declared schemas on the graph (issue #193). Absent schemas are gradual; every flow goes through
+// schema.CompatibleLookup, the same rule the .agent checker applies.
 func validateStepWiring(g *ProjectGraph) []error {
 	if g == nil {
 		return nil
@@ -223,43 +224,18 @@ func checkConsumerType(
 			wfName, strings.TrimSpace(st.ID), withKey, consumerSchemaName(st),
 		)}
 	}
-	if cons.Impossible {
-		if schema.CompatibleLookup(prod, cons) {
-			return nil
-		}
-		srcType := "any"
-		if prod.Impossible {
-			srcType = "never"
-		} else if prod.Known {
-			srcType = prod.Types.String()
-		} else if !wholeField {
-			srcType = "string"
-		}
-		return []error{st.Pos.Errorf(
-			"workflow %s step %q: ${%s} (%s) does not match %s input %q (never)",
-			wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), withKey,
-		)}
+	// An embedded token is rendered into a string, so the producer the consumer sees is a string —
+	// unless the producer is never: then the step cannot run and the rendered string never exists.
+	src := prod
+	if !wholeField && !prod.Impossible {
+		src = schema.LookupResult{Types: schema.TypeSet{schema.TypeString: {}}, Known: true}
 	}
-	if !cons.Known {
-		return nil
-	}
-	var prodTypes schema.TypeSet
-	srcType := "string"
-	if wholeField {
-		if !prod.Known {
-			return nil
-		}
-		prodTypes = prod.Types
-		srcType = prodTypes.String()
-	} else {
-		prodTypes = schema.TypeSet{schema.TypeString: {}}
-	}
-	if schema.Compatible(prodTypes, cons.Types) {
+	if schema.CompatibleLookup(src, cons) {
 		return nil
 	}
 	return []error{st.Pos.Errorf(
 		"workflow %s step %q: ${%s} (%s) does not match %s input %q (%s)",
-		wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), withKey, cons.Types,
+		wfName, strings.TrimSpace(st.ID), inner, src, consumerSchemaName(st), withKey, cons,
 	)}
 }
 

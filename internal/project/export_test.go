@@ -530,7 +530,7 @@ func successfulTypedExport(t *testing.T) (out string, g *spec.ProjectGraph, befo
 // (unencodable schema value) must not delete or mutate the previous successful schemas/.
 func TestFailedReExportPreservesPreviousSchemas(t *testing.T) {
 	out, g, before := successfulTypedExport(t)
-	g.Agents["A"].Spec.Input.Resolved.Object()["unencodable"] = make(chan int)
+	g.Agents["A"].Spec.Input.Resolved.Raw.(map[string]any)["unencodable"] = make(chan int)
 	if err := WriteAgentProjectDir(out, g); err == nil {
 		t.Fatal("unexpected success")
 	}

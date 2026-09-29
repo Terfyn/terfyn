@@ -530,6 +530,16 @@ not schema identity — passing a `Review` where a differently-named-but-also-`o
 the YAML path. Nominal/structural schema equality is a separate, larger piece of work, not
 part of this pass.
 
+Both paths decide every flow with the single rule `schema.CompatibleLookup`. Draft 2020-12
+**boolean schemas** are honoured wherever a subschema may appear (root, `properties`,
+`prefixItems`/`items`, `additionalProperties`, local `$ref` targets such as `$defs`): `true` is
+unconstrained (`any`), a `false` property/item forbids that key (the same "not declared" error
+as `additionalProperties: false`), and a `false` whole value — a root `false` or a root `$ref` to
+one — is **`never`, the bottom type**. `never` flows into every consumer (a step whose output must
+satisfy `false` cannot complete, so nothing downstream ever receives a value), while a `never`
+consumer accepts only `never` — it is the one place an untyped producer is *not* gradually
+compatible.
+
 **A `TypeRef` name resolves to `<SchemaDir>/schemas/<Name>.json`** (`SchemaDir` defaults to
 the directory of the `.agent` file being checked). This is a new naming convention
 introduced by this package — no earlier ADR or grammar text specifies how a type name

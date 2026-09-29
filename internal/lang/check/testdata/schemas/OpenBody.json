@@ -1,0 +1,7 @@
+{
+  "type": "object",
+  "properties": {
+    "body": true
+  },
+  "additionalProperties": false
+}

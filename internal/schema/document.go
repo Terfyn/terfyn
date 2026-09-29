@@ -91,27 +91,38 @@ func (d *Document) Schema() (raw any, ok bool) {
 	}
 }
 
-// Object returns the root schema when it is an object schema, else nil.
-func (d *Document) Object() map[string]any {
-	if d == nil {
-		return nil
-	}
-	m, _ := d.Raw.(map[string]any)
-	return m
-}
-
 // LookupResult is the static type of a JSON Schema path.
+//
+// Boolean schemas (Draft 2020-12 §4.3.2) are decoded wherever a subschema may appear — the root,
+// properties values, prefixItems/items, additionalProperties, and local "$ref" targets such as
+// "$defs" entries. A true subschema is unconstrained (the zero LookupResult). A false subschema
+// becomes Impossible when it is the schema of the whole value being looked up, and Missing when it
+// is reached by descending a key or index: {"properties":{"x":false}} is how Draft 2020-12 forbids
+// a key, so the enclosing instance can exist and x must simply be absent — the same state as an
+// undeclared key under additionalProperties: false.
 type LookupResult struct {
 	Types TypeSet
 	// Known is true when the schema names at least one instance type at this path.
 	Known bool
-	// Missing is true when the path is forbidden (undeclared property with
-	// additionalProperties: false, or a descent through a non-object/array).
+	// Missing is true when the path is forbidden: an undeclared property with
+	// additionalProperties: false, a property/item whose subschema is (or $refs to) boolean false,
+	// or a descent through a non-object/array.
 	Missing bool
-	// Impossible is true when this path is a boolean false schema (or a descent
-	// through one). Distinct from unconstrained (empty Types) so gradual typing
-	// cannot treat never as any (issue #549).
+	// Impossible is true when no value can exist at this path: the root schema is boolean false
+	// or a local $ref to one (e.g. {"$ref":"#/$defs/n","$defs":{"n":false}}), or the path descends
+	// through such a root. It is distinct from unconstrained (empty Types) so gradual typing
+	// cannot treat never as any (issue #549); see [CompatibleLookup] for how it flows.
+	// Only boolean false (directly or by local $ref) is detected — an unsatisfiable object schema
+	// such as {"not":{}} or {"allOf":[false]} still looks up as its declared types.
 	Impossible bool
+}
+
+// String renders the lookup as a diagnostic type name: "never", "any", or the type union.
+func (r LookupResult) String() string {
+	if r.Impossible {
+		return "never"
+	}
+	return r.Types.String()
 }
 
 const maxSchemaDepth = 32
@@ -151,20 +162,7 @@ func (d *Document) Lookup(path []string) LookupResult {
 	if d == nil {
 		return LookupResult{}
 	}
-	switch v := d.Raw.(type) {
-	case bool:
-		if v {
-			return LookupResult{}
-		}
-		return LookupResult{Impossible: true}
-	case map[string]any:
-		if v == nil {
-			return LookupResult{}
-		}
-		return lookupNode(d, v, path, 0)
-	default:
-		return LookupResult{}
-	}
+	return lookupSchema(d, d.Raw, path, 0)
 }
 
 // Compatible reports whether every concrete producer type is accepted by the consumer.
@@ -187,102 +185,136 @@ func Compatible(producer, consumer TypeSet) bool {
 	return true
 }
 
-// CompatibleLookup reports whether a producing lookup can flow into a consuming lookup.
-// A boolean-false consumer is never gradual: only another impossible producer matches it.
+// CompatibleLookup reports whether a producing lookup can flow into a consuming lookup. It is the
+// one flow rule shared by the .agent checker and YAML step wiring.
+//
+// never (Impossible) is the bottom type. As a producer it is compatible with every consumer: a
+// never-producing step cannot complete (its output fails validation against false), so the
+// downstream flow is dead and there is no value that could violate the consumer — the same answer
+// true / an untyped consumer gives, which Draft 2020-12 defines as accepting everything. As a
+// consumer it accepts only another never: a false consumer is never gradual, so neither a typed nor
+// an untyped producer may flow into it. Everything else is [Compatible].
 func CompatibleLookup(producer, consumer LookupResult) bool {
-	if consumer.Impossible {
-		return producer.Impossible
-	}
 	if producer.Impossible {
+		return true
+	}
+	if consumer.Impossible {
 		return false
 	}
 	return Compatible(producer.Types, consumer.Types)
 }
 
-func lookupNode(d *Document, node map[string]any, path []string, depth int) LookupResult {
-	if node == nil || depth > maxSchemaDepth {
+// lookupSchema looks up path in node, a Draft 2020-12 schema in either form: bool or object.
+func lookupSchema(d *Document, node any, path []string, depth int) LookupResult {
+	if depth > maxSchemaDepth {
 		return LookupResult{}
 	}
-	node = resolveLocalRef(d, node, depth)
-	if node == nil {
+	switch v := node.(type) {
+	case bool:
+		if v {
+			return LookupResult{}
+		}
+		// Descending through a never value stays never.
+		return LookupResult{Impossible: true}
+	case map[string]any:
+		if v == nil {
+			return LookupResult{}
+		}
+		return lookupObject(d, v, path, depth)
+	default:
 		return LookupResult{}
 	}
+}
+
+func lookupObject(d *Document, node map[string]any, path []string, depth int) LookupResult {
+	if target, ok := resolveLocalRef(d, node); ok {
+		switch t := target.(type) {
+		case bool:
+			if !t {
+				// $ref is a conjunct of node: anything and false is false.
+				return LookupResult{Impossible: true}
+			}
+			// $ref to true adds no constraint; node's sibling keywords still apply.
+		case map[string]any:
+			return lookupSchema(d, t, path, depth+1)
+		}
+	}
+	types := extractTypes(node)
 	if len(path) == 0 {
-		ts := extractTypes(node)
-		return LookupResult{Types: ts, Known: len(ts) > 0}
+		return LookupResult{Types: types, Known: len(types) > 0}
 	}
 	key := path[0]
-	types := extractTypes(node)
 
 	if props, ok := asObject(node["properties"]); ok {
 		if sub, ok := props[key]; ok {
-			if sm := asSchemaMap(sub); sm != nil {
-				return lookupNode(d, sm, path[1:], depth+1)
-			}
+			return lookupDescent(d, sub, path[1:], depth)
 		}
 	}
 	if (len(types) == 0 || types.Has(TypeArray)) && isJSONIndex(key) {
-		if items := asSchemaMap(node["items"]); items != nil {
-			return lookupNode(d, items, path[1:], depth+1)
+		idx, _ := strconv.Atoi(key)
+		if prefix, ok := node["prefixItems"].([]any); ok && idx >= 0 && idx < len(prefix) {
+			return lookupDescent(d, prefix[idx], path[1:], depth)
+		}
+		if items, ok := node["items"]; ok {
+			return lookupDescent(d, items, path[1:], depth)
 		}
 	}
 	if len(types) == 0 || types.Has(TypeObject) {
-		return additionalPropertiesLookup(d, node, path, depth)
+		if ap, ok := node["additionalProperties"]; ok {
+			return lookupDescent(d, ap, path[1:], depth)
+		}
+		return LookupResult{}
 	}
 	return LookupResult{Missing: true}
 }
 
-func additionalPropertiesLookup(d *Document, node map[string]any, path []string, depth int) LookupResult {
-	ap, ok := node["additionalProperties"]
-	if !ok {
-		return LookupResult{}
+// lookupDescent looks up rest in sub, the subschema governing one key or index of the current
+// instance. A false subschema there forbids the key (it must be absent) rather than making the
+// enclosing value impossible, so Impossible is reported as Missing.
+func lookupDescent(d *Document, sub any, rest []string, depth int) LookupResult {
+	res := lookupSchema(d, sub, rest, depth+1)
+	if res.Impossible {
+		return LookupResult{Missing: true}
 	}
-	switch t := ap.(type) {
-	case bool:
-		if !t {
-			return LookupResult{Missing: true}
-		}
-		return LookupResult{}
-	default:
-		if sm := asSchemaMap(t); sm != nil {
-			return lookupNode(d, sm, path[1:], depth+1)
-		}
-		return LookupResult{}
-	}
+	return res
 }
 
-func resolveLocalRef(d *Document, node map[string]any, depth int) map[string]any {
+// resolveLocalRef returns the schema (map[string]any or bool) that node's local "#/..." $ref
+// points at, and whether node has such a $ref that resolves. JSON Pointer tokens index objects
+// and arrays.
+func resolveLocalRef(d *Document, node map[string]any) (any, bool) {
 	if d == nil || node == nil {
-		return node
+		return nil, false
 	}
 	ref, ok := node["$ref"].(string)
-	if !ok || ref == "" {
-		return node
+	if !ok || !strings.HasPrefix(ref, "#/") {
+		return nil, false
 	}
-	if !strings.HasPrefix(ref, "#/") {
-		return node
-	}
-	if depth > maxSchemaDepth {
-		return node
-	}
-	cur := any(d.Raw)
+	cur := d.Raw
 	for _, p := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
 		p = strings.ReplaceAll(p, "~1", "/")
 		p = strings.ReplaceAll(p, "~0", "~")
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return node
-		}
-		cur, ok = m[p]
-		if !ok {
-			return node
+		switch c := cur.(type) {
+		case map[string]any:
+			if cur, ok = c[p]; !ok {
+				return nil, false
+			}
+		case []any:
+			i, err := strconv.Atoi(p)
+			if err != nil || i < 0 || i >= len(c) {
+				return nil, false
+			}
+			cur = c[i]
+		default:
+			return nil, false
 		}
 	}
-	m, ok := cur.(map[string]any)
-	if !ok {
-		return node
+	switch cur.(type) {
+	case bool, map[string]any:
+		return cur, true
+	default:
+		return nil, false
 	}
-	return m
 }
 
 func extractTypes(node map[string]any) TypeSet {
@@ -317,14 +349,6 @@ func extractTypes(node map[string]any) TypeSet {
 func asObject(v any) (map[string]any, bool) {
 	m, ok := v.(map[string]any)
 	return m, ok
-}
-
-func asSchemaMap(v any) map[string]any {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return nil
-	}
-	return m
 }
 
 func isJSONIndex(s string) bool {

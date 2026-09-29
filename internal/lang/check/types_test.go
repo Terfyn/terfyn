@@ -233,6 +233,142 @@ workflow W(input: Count) -> Never
 				}
 			},
 		},
+		{
+			name: "never producer flows into an untyped agent input (bottom type)",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output Never
+}
+
+agent Sink {
+    model mock/default
+    instructions "test"
+}
+
+workflow W(input: Count)
+{
+    r = R(input)
+    Sink(r)
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if diags.HasErrors() {
+					t.Fatalf("never must flow into an untyped input, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "never producer flows into a true result and a typed result (bottom type)",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output Never
+}
+
+workflow Loose(input: Count) -> Any
+{
+    return R(input)
+}
+
+workflow Strict(input: Count) -> StringOnly
+{
+    return R(input)
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if diags.HasErrors() {
+					t.Fatalf("never must flow into true and string, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "root $ref to a false $def rejects a typed producer",
+			src: `
+workflow W(input: StringOnly) -> NeverRef
+{
+    return input
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if !hasSeverity(diags, lang.SeverityError, "type string is not compatible with declared type never") {
+					t.Fatalf("expected string→never rejection, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "root $ref to a false $def is a never producer",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output NeverRef
+}
+
+workflow W(input: Count) -> Never
+{
+    return R(input)
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if diags.HasErrors() {
+					t.Fatalf("$ref'd never must match never, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "false property is a forbidden field",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output ForbidBody
+}
+
+workflow W(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.body
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if !hasSeverity(diags, lang.SeverityError, `"body" is not declared`) {
+					t.Fatalf("expected body to be forbidden, got %v", diagMessages(diags))
+				}
+			},
+		},
+		{
+			name: "true property is declared under additionalProperties false",
+			src: `
+agent R {
+    model mock/default
+    instructions "test"
+    output OpenBody
+}
+
+workflow W(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.body
+}
+
+workflow Undeclared(input: Count) -> StringOnly
+{
+    r = R(input)
+    return r.other
+}
+`,
+			check: func(t *testing.T, diags lang.Diagnostics) {
+				if hasSeverity(diags, lang.SeverityError, `"body" is not declared`) {
+					t.Fatalf("a true property must not be forbidden, got %v", diagMessages(diags))
+				}
+				if !hasSeverity(diags, lang.SeverityError, `"other" is not declared`) {
+					t.Fatalf("an undeclared field must still be forbidden, got %v", diagMessages(diags))
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {

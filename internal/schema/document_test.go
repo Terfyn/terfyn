@@ -81,8 +81,8 @@ func TestLoadDocument_booleanSchemas(t *testing.T) {
 	if raw, ok := trueDoc.Schema(); !ok || raw != true {
 		t.Fatalf("true document must be a present schema, got %#v, %v", raw, ok)
 	}
-	if trueDoc.Object() != nil {
-		t.Fatalf("boolean schema has no object form, got %+v", trueDoc.Object())
+	if _, isObject := trueDoc.Raw.(map[string]any); isObject {
+		t.Fatalf("boolean schema has no object form, got %#v", trueDoc.Raw)
 	}
 	root := trueDoc.Lookup(nil)
 	if root.Impossible || root.Missing || root.Known {
@@ -131,8 +131,15 @@ func TestLoadDocument_booleanSchemas(t *testing.T) {
 	if !CompatibleLookup(LookupResult{Types: str, Known: true}, root) {
 		t.Fatal("string may flow into true (unconstrained)")
 	}
-	if CompatibleLookup(never, LookupResult{Types: str, Known: true}) {
-		t.Fatal("false must not flow into string")
+	// never is the bottom type: a false producer flows into every consumer (issue #549 review).
+	if !CompatibleLookup(never, LookupResult{Types: str, Known: true}) {
+		t.Fatal("false must flow into string (bottom type)")
+	}
+	if !CompatibleLookup(never, LookupResult{}) {
+		t.Fatal("false must flow into an untyped consumer")
+	}
+	if !CompatibleLookup(never, root) {
+		t.Fatal("false must flow into true")
 	}
 }
 
@@ -247,5 +254,76 @@ func TestLookup_additionalPropertiesOpen(t *testing.T) {
 	got := doc.Lookup([]string{"extra"})
 	if got.Missing || got.Known {
 		t.Fatalf("open additionalProperties should be untyped, got %+v", got)
+	}
+}
+
+// TestLookup_booleanSubschemas covers Draft 2020-12 boolean schemas below the root (issue #549
+// review): true is unconstrained wherever a subschema may appear, false reached by a key/index
+// descent forbids that key (Missing), and false as the whole value — directly or through a local
+// $ref — is never (Impossible).
+func TestLookup_booleanSubschemas(t *testing.T) {
+	type want struct {
+		impossible, missing, known bool
+		types                      string
+	}
+	unconstrained := want{types: "any"}
+	forbidden := want{missing: true, types: "any"}
+	never := want{impossible: true, types: "any"}
+	str := want{known: true, types: "string"}
+	cases := []struct {
+		name   string
+		schema string
+		path   []string
+		want   want
+	}{
+		{"properties false forbids key", `{"type":"object","properties":{"body":false,"s":{"type":"string"}}}`, []string{"body"}, forbidden},
+		{"properties false forbids descent", `{"type":"object","properties":{"body":false}}`, []string{"body", "x"}, forbidden},
+		{"sibling of false property", `{"type":"object","properties":{"body":false,"s":{"type":"string"}}}`, []string{"s"}, str},
+		{"properties true is declared", `{"type":"object","properties":{"body":true},"additionalProperties":false}`, []string{"body"}, unconstrained},
+		{"descent into true property", `{"type":"object","properties":{"body":true},"additionalProperties":false}`, []string{"body", "x"}, unconstrained},
+		{"undeclared beside true property", `{"type":"object","properties":{"body":true},"additionalProperties":false}`, []string{"other"}, forbidden},
+		{"items false forbids index", `{"type":"array","items":false}`, []string{"0"}, forbidden},
+		{"items true", `{"type":"array","items":true}`, []string{"0"}, unconstrained},
+		{"prefixItems before items false", `{"type":"array","prefixItems":[{"type":"string"}],"items":false}`, []string{"0"}, str},
+		{"items false after prefixItems", `{"type":"array","prefixItems":[{"type":"string"}],"items":false}`, []string{"1"}, forbidden},
+		{"additionalProperties true", `{"type":"object","additionalProperties":true}`, []string{"x"}, unconstrained},
+		{"additionalProperties ref false", `{"type":"object","additionalProperties":{"$ref":"#/$defs/n"},"$defs":{"n":false}}`, []string{"x"}, forbidden},
+		{"root ref false", `{"$ref":"#/$defs/n","$defs":{"n":false}}`, nil, never},
+		{"descent through root ref false", `{"$ref":"#/$defs/n","$defs":{"n":false}}`, []string{"x"}, never},
+		{"root ref chain to false", `{"$ref":"#/$defs/a","$defs":{"a":{"$ref":"#/$defs/b"},"b":false}}`, nil, never},
+		{"root ref false with siblings", `{"type":"string","$ref":"#/$defs/n","$defs":{"n":false}}`, nil, never},
+		{"root ref true keeps siblings", `{"type":"string","$ref":"#/$defs/y","$defs":{"y":true}}`, nil, str},
+		{"property ref false", `{"type":"object","properties":{"body":{"$ref":"#/$defs/n"}},"$defs":{"n":false}}`, []string{"body"}, forbidden},
+		{"property ref true", `{"type":"object","properties":{"body":{"$ref":"#/$defs/y"}},"additionalProperties":false,"$defs":{"y":true}}`, []string{"body"}, unconstrained},
+		{"ref into prefixItems array", `{"type":"object","properties":{"body":{"$ref":"#/$defs/t/prefixItems/0"}},"$defs":{"t":{"prefixItems":[false]}}}`, []string{"body"}, forbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "s.json")
+			if err := os.WriteFile(p, []byte(tc.schema), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			doc, err := LoadDocument(p)
+			if err != nil {
+				t.Fatalf("schema must compile: %v", err)
+			}
+			got := doc.Lookup(tc.path)
+			gotW := want{impossible: got.Impossible, missing: got.Missing, known: got.Known, types: got.Types.String()}
+			if gotW != tc.want {
+				t.Fatalf("Lookup(%v) = %+v, want %+v", tc.path, gotW, tc.want)
+			}
+		})
+	}
+}
+
+func TestLookupResult_String(t *testing.T) {
+	if got := (LookupResult{Impossible: true}).String(); got != "never" {
+		t.Fatalf("impossible = %q", got)
+	}
+	if got := (LookupResult{}).String(); got != "any" {
+		t.Fatalf("unconstrained = %q", got)
+	}
+	if got := (LookupResult{Types: TypeSet{TypeString: {}, TypeInteger: {}}, Known: true}).String(); got != "integer|string" {
+		t.Fatalf("union = %q", got)
 	}
 }

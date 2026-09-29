@@ -133,8 +133,9 @@ func schemaDirFor(f *lang.File) string {
 }
 
 // typeRef is a value's resolved type: a root schema.Document plus the dotted
-// path walked so far. A nil doc means untyped (gradual typing — always
-// compatible). Kept as (doc, path) rather than eagerly resolving to a TypeSet
+// path walked so far. A nil doc means untyped (gradual typing — compatible
+// with everything except a never, i.e. boolean false, consumer; see
+// schema.CompatibleLookup). Kept as (doc, path) rather than eagerly resolving to a TypeSet
 // so a chain like result.summary can extend the path one field at a time,
 // mirroring how internal/spec/wiring.go walks interpolation paths against the
 // same schema.Document API, but over AST RefExpr.Parts instead of a regex over
@@ -710,36 +711,16 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 	return diags
 }
 
+// checkCompatible applies schema.CompatibleLookup — the same flow rule YAML step wiring uses — so a
+// never producer is accepted everywhere (bottom), a never consumer accepts only never, and an
+// untyped side is otherwise always compatible (gradual typing).
 func (wc *wfChecker) checkCompatible(pos lang.Pos, got, want typeRef, what string) lang.Diagnostics {
 	gotRes, wantRes := got.result(), want.result()
-	if gotRes.Impossible || wantRes.Impossible {
-		if schema.CompatibleLookup(gotRes, wantRes) {
-			return nil
-		}
-		return lang.Diagnostics{{
-			Pos: pos,
-			Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, describeLookup(gotRes), describeLookup(wantRes)),
-		}}
-	}
-	gotTypes, wantTypes := gotRes.Types, wantRes.Types
-	if len(gotTypes) == 0 || len(wantTypes) == 0 {
-		return nil // gradual typing: an untyped side is always compatible
-	}
-	if schema.Compatible(gotTypes, wantTypes) {
+	if schema.CompatibleLookup(gotRes, wantRes) {
 		return nil
 	}
 	return lang.Diagnostics{{
 		Pos: pos,
-		Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, gotTypes, wantTypes),
+		Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, gotRes, wantRes),
 	}}
-}
-
-func describeLookup(r schema.LookupResult) string {
-	if r.Impossible {
-		return "never"
-	}
-	if len(r.Types) == 0 {
-		return "any"
-	}
-	return r.Types.String()
 }

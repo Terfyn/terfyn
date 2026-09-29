@@ -285,3 +285,67 @@ func writeSchema(t *testing.T, root, rel, body string) {
 		t.Fatal(err)
 	}
 }
+
+// TestValidateProjectGraph_booleanSchemas covers Draft 2020-12 boolean schemas in YAML wiring
+// (issue #549 review). Wiring applies schema.CompatibleLookup unconditionally: never is the bottom
+// type (an impossible producer flows anywhere), an impossible consumer accepts only never, a false
+// subschema under properties/items forbids that key, and a true one is declared.
+func TestValidateProjectGraph_booleanSchemas(t *testing.T) {
+	cases := []struct {
+		name    string
+		out, in string
+		with    string
+		wantErr string // "" = accepted
+	}{
+		{"false producer into string (whole field)", `false`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output}`, ""},
+		{"false producer into string (embedded)", `false`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `x ${steps.r.output}`, ""},
+		{"false producer into object", `false`, `{"type":"object","properties":{"body":{"type":"object"}}}`, `${steps.r.output}`, ""},
+		{"descent through false producer", `false`, `{"type":"object","properties":{"body":{"type":"object"}}}`, `${steps.r.output.x}`, ""},
+		{"ref-false producer into string", `{"$ref":"#/$defs/n","$defs":{"n":false}}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output}`, ""},
+		{"false producer into false consumer", `false`, `false`, `${steps.r.output}`, ""},
+		{"string into false consumer", `{"type":"object","properties":{"s":{"type":"string"}}}`, `false`, `${steps.r.output.s}`, `(string) does not match Agent/consumer input "body" (never)`},
+		{"untyped into false consumer", `true`, `false`, `${steps.r.output}`, `(any) does not match Agent/consumer input "body" (never)`},
+		{"embedded into false consumer", `true`, `false`, `x ${steps.r.output}`, `(string) does not match Agent/consumer input "body" (never)`},
+		{"string into ref-false consumer", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"$ref":"#/$defs/n","$defs":{"n":false}}`, `${steps.r.output.s}`, `does not match Agent/consumer input "body" (never)`},
+		{"false consumer property forbids key", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","properties":{"body":false}}`, `${steps.r.output.s}`, `with "body" is not declared in Agent/consumer input schema`},
+		{"true consumer property is declared", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","properties":{"body":true},"additionalProperties":false}`, `${steps.r.output.s}`, ""},
+		{"false producer property is not declared", `{"type":"object","properties":{"body":false}}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.body}`, `${steps.r.output.body} is not declared in Agent/reporter output schema`},
+		{"true producer property is declared", `{"type":"object","properties":{"body":true},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.body}`, ""},
+		{"items false forbids index", `{"type":"array","items":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.0}`, `${steps.r.output.0} is not declared in Agent/reporter output schema`},
+		{"prefixItems before items false", `{"type":"array","prefixItems":[{"type":"integer"}],"items":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.0}`, `(integer) does not match Agent/consumer input "body" (string)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSchema(t, root, "schemas/out.json", tc.out)
+			writeSchema(t, root, "schemas/in.json", tc.in)
+			wfYAML := `apiVersion: agentic.dev/v0
+kind: Workflow
+metadata:
+  name: demo
+spec:
+  steps:
+    - id: r
+      agent: reporter
+    - id: c
+      agent: consumer
+      with:
+        body: "` + tc.with + `"
+`
+			dec, err := ParseResourceFromBytes([]byte(wfYAML), "workflow.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ValidateProjectGraph(wiringGraph(dec.Resource.(*WorkflowResource)), root)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
