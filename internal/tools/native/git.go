@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -114,11 +115,19 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 //   - --no-pager: never spawn core.pager / pager.<cmd>.
 //   - -c core.fsmonitor=false, -c core.useBuiltinFSMonitor=false: status/diff consult the
 //     fsmonitor hook (an arbitrary command from .git/config) to decide which files to stat.
-//   - -c core.hooksPath=<empty dir>: git diff (2.34) refreshes and writes the index even with
-//     --no-optional-locks, and every index write runs the post-index-change hook from .git/hooks
-//     or the repository's core.hooksPath. The write lands in the throwaway index copy, but the
-//     hook would still run; pointing hooksPath at an empty directory we own means no hook exists.
-//     (A directory rather than os.DevNull so the lookup behaves the same on Windows.)
+//   - hooks. git diff (2.34+) refreshes and writes the index even with --no-optional-locks, and
+//     every index write runs the post-index-change hook. The write lands in the throwaway index
+//     copy, but the hook would still run. git has two hook sources, and both are disabled:
+//     (1) the hook directory (.git/hooks or core.hooksPath): -c core.hooksPath=<empty dir we
+//     own>, so no hook file exists there (a directory rather than os.DevNull so the lookup
+//     behaves the same on Windows); (2) since git 2.54, hooks defined in config
+//     (hook.<name>.event + hook.<name>.command, from any scope: system, global, repository,
+//     worktree, includes, or the environment), which core.hooksPath does not affect:
+//     -c hook.post-index-change.enabled=false switches the whole event off on git >= 2.55 (older
+//     git reads it as an unknown hook name and ignores it), and hookOff carries
+//     -c hook.<name>.enabled=false for every configured hook name plus
+//     -c hook.<event>.enabled=false for every configured event (see configuredHookOverrides) —
+//     git 2.54 has only the per-name switch. Together no hook runs, from either source.
 //   - --no-optional-locks: status opportunistically refreshes and rewrites .git/index; skip it.
 //     git diff does not honor this, which is why the session also points GIT_INDEX_FILE at a
 //     throwaway copy of the index.
@@ -131,15 +140,112 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 //   - in a partial clone, a blob missing locally makes git lazily fetch it from the promisor
 //     remote, which runs that remote's configured transport (e.g. core.sshCommand).
 //     GIT_NO_LAZY_FETCH=1 (readOnlyGitEnv) disables this on git >= 2.44 only.
-func readOnlyGitArgs(hooksDir string, args []string) []string {
+func readOnlyGitArgs(hooksDir string, hookOff, args []string) []string {
 	pre := []string{
 		"--no-pager",
 		"-c", "core.fsmonitor=false",
 		"-c", "core.useBuiltinFSMonitor=false",
 		"-c", "core.hooksPath=" + hooksDir,
-		"--no-optional-locks",
+		"-c", "hook.post-index-change.enabled=false",
 	}
+	pre = append(pre, hookOff...)
+	pre = append(pre, "--no-optional-locks")
 	return append(pre, args...)
+}
+
+// maxGitHookConfigOutput bounds the hook.* listing; a listing larger than this fails the session
+// closed rather than running with hook names it could not read.
+const maxGitHookConfigOutput = 64 << 10
+
+// configuredHookOverrides lists every config-defined hook (git >= 2.54: hook.<name>.command /
+// hook.<name>.event, from every config scope git reads) and returns the -c flags that disable
+// each one by name, plus each event those hooks name. The listing itself runs through the
+// hardened session (git config runs no hooks). It is computed on every git version: on git < 2.54
+// hook.* keys mean nothing, and the flags are ignored. Fails closed on a name that cannot be
+// expressed as a -c key (one containing '=', which -c would split on).
+func (g *readOnlyGit) configuredHookOverrides(ctx context.Context) ([]string, error) {
+	out, truncated, err := g.run(ctx, maxGitHookConfigOutput, "config", "--null", "--get-regexp", `^hook\..*\.(command|event)$`)
+	if err != nil {
+		// No matching key is a silent exit status 1: no configured hooks.
+		var runErr *gitRunError
+		if gitExitCode(err) == 1 && errors.As(err, &runErr) && runErr.stderr == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("native: git: list configured hooks: %w", err)
+	}
+	if truncated {
+		return nil, fmt.Errorf("native: git: list configured hooks: more than %d bytes of hook.* configuration", maxGitHookConfigOutput)
+	}
+	names, events, err := parseHookConfigListing(out)
+	if err != nil {
+		return nil, fmt.Errorf("native: git: %w", err)
+	}
+	flags := make([]string, 0, 2*(len(names)+len(events)))
+	for _, n := range names {
+		flags = append(flags, "-c", "hook."+n+".enabled=false")
+	}
+	for _, e := range events {
+		flags = append(flags, "-c", "hook."+e+".enabled=false")
+	}
+	return flags, nil
+}
+
+// parseHookConfigListing parses `git config --null --get-regexp '^hook\..*\.(command|event)$'`:
+// NUL-terminated records of "key\nvalue" (or a bare "key" for a value-less entry). The key is
+// hook.<name>.<variable> with section and variable lowercased and <name> (the subsection) kept
+// verbatim, so <name> is everything between the first and the last dot and may itself contain
+// dots; git's -c parser splits a key the same way. It returns the sorted, de-duplicated hook
+// names and the sorted, de-duplicated event values (hook.<name>.event) that are expressible as a
+// -c key. An event value containing '=' or a newline is not a real event and is skipped (the
+// hook's name is disabled regardless); a name containing '=' is an error.
+func parseHookConfigListing(out string) (names, events []string, err error) {
+	nameSet, eventSet := map[string]bool{}, map[string]bool{}
+	for _, rec := range strings.Split(out, "\x00") {
+		if rec == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(rec, "\n")
+		var name, variable string
+		switch {
+		case strings.HasSuffix(key, ".command"):
+			name, variable = strings.TrimSuffix(key, ".command"), "command"
+		case strings.HasSuffix(key, ".event"):
+			name, variable = strings.TrimSuffix(key, ".event"), "event"
+		default:
+			return nil, nil, fmt.Errorf("unexpected hook config key %q", key)
+		}
+		rest, ok := strings.CutPrefix(name, "hook.")
+		if !ok {
+			return nil, nil, fmt.Errorf("unexpected hook config key %q", key)
+		}
+		if strings.Contains(rest, "=") {
+			return nil, nil, fmt.Errorf("configured hook %q cannot be disabled on the command line (its name contains '='); refusing to run git with it enabled", rest)
+		}
+		nameSet[rest] = true
+		if variable == "event" && value != "" && !strings.ContainsAny(value, "=\n") {
+			eventSet[value] = true
+		}
+	}
+	return sortedKeys(nameSet), sortedKeys(eventSet), nil
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// gitExitCode returns the exit status of a failed git run (errors from run/runGit wrap
+// *exec.ExitError), or -1 when git did not exit normally (killed, timed out, not started).
+func gitExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 // readOnlyGitEnv is the process environment for a read-only git run: the ambient environment
@@ -163,19 +269,22 @@ func readOnlyGitEnv() []string {
 }
 
 // readOnlyGit is one hardened inspection session over the workspace repository: a private temp
-// directory holding an empty hooks directory (core.hooksPath, so no hook can run) and a throwaway
-// copy of the index (GIT_INDEX_FILE, so a stat-cache refresh git decides to write never lands in
-// .git/index). Every command goes through readOnlyGitArgs/readOnlyGitEnv. Call close when done.
+// directory holding an empty hooks directory (core.hooksPath, so no hook file is found), the -c
+// flags that disable every config-defined hook (hookOff), and a throwaway copy of the index
+// (GIT_INDEX_FILE, so a stat-cache refresh git decides to write never lands in .git/index). Every
+// command goes through readOnlyGitArgs/readOnlyGitEnv. Call close when done.
 type readOnlyGit struct {
 	root     string
 	hooksDir string
+	hookOff  []string
 	env      []string
 	tmp      string
 }
 
 // newReadOnlyGit prepares a session. Failure is an error (fail closed): a read-only op must not fall
-// back to running with the repository's hooks or against the live index. When the repository has
-// no index yet there is nothing to isolate and GIT_INDEX_FILE is left unset.
+// back to running with the repository's hooks or against the live index. The configured hooks are
+// listed first, before any command that could write an index. When the repository has no index
+// yet there is nothing to isolate and GIT_INDEX_FILE is left unset.
 func newReadOnlyGit(ctx context.Context, root string) (*readOnlyGit, error) {
 	tmp, err := os.MkdirTemp("", "terfyn-git-ro-")
 	if err != nil {
@@ -185,6 +294,10 @@ func newReadOnlyGit(ctx context.Context, root string) (*readOnlyGit, error) {
 	if err := os.Mkdir(g.hooksDir, 0o700); err != nil {
 		g.close()
 		return nil, fmt.Errorf("native: git: hooks dir: %w", err)
+	}
+	if g.hookOff, err = g.configuredHookOverrides(ctx); err != nil {
+		g.close()
+		return nil, err
 	}
 	out, _, err := g.run(ctx, 4096, "rev-parse", "--path-format=absolute", "--git-path", "index")
 	if err != nil {
@@ -229,7 +342,7 @@ const gitWaitDelay = 5 * time.Second
 // truncated is true when stdout exceeded stdoutMax. stdin is empty. A non-zero exit is an error
 // carrying a truncated tail of stderr (falling back to the capped stdout).
 func (g *readOnlyGit) run(ctx context.Context, stdoutMax int, args ...string) (stdout string, truncated bool, err error) {
-	cmd := exec.CommandContext(ctx, "git", readOnlyGitArgs(g.hooksDir, args)...)
+	cmd := exec.CommandContext(ctx, "git", readOnlyGitArgs(g.hooksDir, g.hookOff, args)...)
 	cmd.Dir = g.root
 	cmd.Env = g.env
 	cmd.WaitDelay = gitWaitDelay
@@ -238,14 +351,34 @@ func (g *readOnlyGit) run(ctx context.Context, stdoutMax int, args ...string) (s
 	cmd.Stdout = outCap
 	cmd.Stderr = errCap
 	if runErr := cmd.Run(); runErr != nil {
-		msg := strings.TrimSpace(string(errCap.buf))
-		if msg == "" {
-			msg = strings.TrimSpace(string(outCap.buf))
+		return string(outCap.buf), outCap.truncated, &gitRunError{
+			args:   args,
+			err:    runErr,
+			stderr: strings.TrimSpace(string(errCap.buf)),
+			stdout: strings.TrimSpace(string(outCap.buf)),
 		}
-		return string(outCap.buf), outCap.truncated, fmt.Errorf("native: git %s: %w: %s", strings.Join(args, " "), runErr, truncateRunes(msg, 512))
 	}
 	return string(outCap.buf), outCap.truncated, nil
 }
+
+// gitRunError is a failed readOnlyGit run. It unwraps to the *exec.ExitError (see gitExitCode) and
+// keeps the bounded stderr apart, so a caller can tell a silent exit status (merge-base's "no
+// common ancestor") from one git explained on stderr.
+type gitRunError struct {
+	args           []string
+	err            error
+	stderr, stdout string
+}
+
+func (e *gitRunError) Error() string {
+	msg := e.stderr
+	if msg == "" {
+		msg = e.stdout
+	}
+	return fmt.Sprintf("native: git %s: %v: %s", strings.Join(e.args, " "), e.err, truncateRunes(msg, 512))
+}
+
+func (e *gitRunError) Unwrap() error { return e.err }
 
 // maxGitOIDOutput bounds the stdout of an object-name lookup (rev-parse, merge-base, hash-object).
 const maxGitOIDOutput = 4096
@@ -283,6 +416,32 @@ func (g *readOnlyGit) emptyTreeOID(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("native: git: empty tree: no object name")
 	}
 	return oid, nil
+}
+
+// mergeBase returns the merge base of baseOID and head. Every failure is an error (fail closed —
+// a two-dot fallback would diff against base's tip and misreport the change), but the error says
+// which failure it is: git merge-base exits 1, silently, when it finds no common ancestor, and in
+// a shallow clone that usually means the fork point was not fetched, not that the histories are
+// unrelated. Any other failure (a timeout, a missing object) is reported as git's own error.
+func (g *readOnlyGit) mergeBase(ctx context.Context, base, baseOID, head string) (string, error) {
+	out, _, err := g.run(ctx, maxGitOIDOutput, "merge-base", baseOID, head)
+	if err != nil {
+		// No common ancestor is exit status 1 with nothing on stderr. Older git (2.34, for one) also exits 1
+		// when the walk hits an unreadable commit, but then it says so on stderr.
+		var runErr *gitRunError
+		if gitExitCode(err) != 1 || !errors.As(err, &runErr) || runErr.stderr != "" {
+			return "", fmt.Errorf("native: diff: merge base of base %q and HEAD: %w", base, err)
+		}
+		if shallow, _, serr := g.run(ctx, maxGitOIDOutput, "rev-parse", "--is-shallow-repository"); serr == nil && strings.TrimSpace(shallow) == "true" {
+			return "", fmt.Errorf("native: diff: shallow clone: the fork point of HEAD and %q is not in the fetched history; fetch more history (git fetch --unshallow, or fetch-depth: 0 with actions/checkout) or omit base", base)
+		}
+		return "", fmt.Errorf("native: diff: base %q has no merge base with HEAD (unrelated histories)", base)
+	}
+	mb := strings.TrimSpace(out)
+	if mb == "" {
+		return "", fmt.Errorf("native: diff: merge base of base %q and HEAD: git printed no object name", base)
+	}
+	return mb, nil
 }
 
 func gitCreateBranch(ctx context.Context, with map[string]any) (map[string]any, error) {
@@ -613,6 +772,7 @@ const (
 //     changed since it forked from base, as a pull request shows it — commits base gained after the
 //     fork do not appear. base must resolve to a commit (checked like create_branch does) and the
 //     merge base is echoed as merge_base. Combined with staged, it is the index vs that merge base.
+//     No merge base is an error (see mergeBase: unrelated histories vs a shallow clone).
 //   - unborn branch (no commits yet): HEAD is replaced by the empty tree so every tracked file
 //     shows as added (unborn:true in the result); base is an error there (nothing to fork from).
 //
@@ -669,10 +829,9 @@ func gitDiff(ctx context.Context, with map[string]any) (map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf("native: diff: base %q is not a commit", base)
 		}
-		out, _, err := g.run(ctx, maxGitOIDOutput, "merge-base", baseOID, head)
-		mb := strings.TrimSpace(out)
-		if err != nil || mb == "" {
-			return nil, fmt.Errorf("native: diff: base %q has no merge base with HEAD", base)
+		mb, err := g.mergeBase(ctx, base, baseOID, head)
+		if err != nil {
+			return nil, err
 		}
 		// Re-verify: the value handed to git diff must be a commit, not whatever merge-base printed.
 		if from, ok = g.commitOID(ctx, mb); !ok {

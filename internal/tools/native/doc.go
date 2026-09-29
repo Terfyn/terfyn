@@ -39,15 +39,21 @@
 // working-tree delta. diff is a unified diff: working tree vs HEAD by default (vs the empty tree on
 // a branch with no commits yet); staged:true compares the index instead; base "main" compares
 // against the merge base of base and HEAD (git merge-base, echoed as merge_base) — what this branch
-// changed since it forked, like a pull request, so commits base gained later do not appear. base
-// must resolve to a commit and the revision list always ends in "--", so a base naming a file is an
+// changed since it forked, like a pull request, so commits base gained later do not appear. With
+// no merge base the op fails (never a two-dot fallback), and says whether the histories are
+// unrelated or a shallow clone lacks the fork point. base must resolve to a commit and the revision list always ends in "--", so a base naming a file is an
 // error, never a pathspec. status lists changed/added/deleted/renamed/unmerged/untracked paths.
 // Both are workspace.read effects declared on the Tool resource's operations manifest, grantable
-// to a read-only Reviewer exactly like read_file. Both run git with the pager, fsmonitor, hooks
-// (core.hooksPath points at an empty directory, so post-index-change cannot run), textconv,
-// external-diff, and nested submodule diff (--submodule=short) disabled, and against a throwaway
-// copy of the index, so they do not execute those repository-configured commands and do not
-// rewrite .git/index. Residuals, which git offers no way to disable without misreporting the
+// to a read-only Reviewer exactly like read_file. Both run git with the pager, fsmonitor, hooks,
+// textconv, external-diff, and nested submodule diff (--submodule=short) disabled, and against a
+// throwaway copy of the index, so they do not execute those repository-configured commands and do
+// not rewrite .git/index. Hooks come from two sources and both are disabled: the hook directory
+// (.git/hooks or core.hooksPath — core.hooksPath is pointed at an empty directory), and, since git
+// 2.54, hooks defined in config from any scope (hook.<name>.event / hook.<name>.command), which
+// core.hooksPath does not affect — every configured hook name and event is listed and switched off
+// with -c hook.<name>.enabled=false, plus hook.post-index-change.enabled=false for the event the
+// index write fires (git >= 2.55). A hook name git's -c cannot express (one containing '=') fails
+// the op rather than running it. Residuals, which git offers no way to disable without misreporting the
 // delta: (1) a clean filter (filter.<name>.clean/process, e.g. git-lfs) that .gitattributes
 // selects still runs when git hashes a stat-dirty worktree file; (2) in a partial clone, a blob
 // missing locally is lazily fetched from the promisor remote, running that remote's configured

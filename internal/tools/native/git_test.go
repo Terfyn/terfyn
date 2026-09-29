@@ -1609,3 +1609,233 @@ func TestGitStatus_realMergeConflict(t *testing.T) {
 		t.Fatalf("diff during conflict should show markers:\n%s", diff)
 	}
 }
+
+func TestParseHookConfigListing(t *testing.T) {
+	out := "hook.audit.event\npost-index-change\x00" +
+		"hook.audit.command\necho ran\x00" +
+		"hook.a.b c.event\npost-index-change\x00" + // subsection with a dot and a space
+		"hook.a.b c.command\ntrue\x00" +
+		"hook.Solo.event\x00" + // value-less entry
+		"hook.x.event\npre-commit\x00" +
+		"hook.x.event\n\x00" + // empty value resets the list
+		"hook.x.event\nweird=event\x00" +
+		"hook.x.event\npost-index-change\x00"
+	names, events, err := parseHookConfigListing(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(names, "|"), "Solo|a.b c|audit|x"; got != want {
+		t.Fatalf("names = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(events, "|"), "post-index-change|pre-commit"; got != want {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+	if _, _, err := parseHookConfigListing("hook.a=b.command\ntrue\x00"); err == nil || !strings.Contains(err.Error(), "'='") {
+		t.Fatalf("name with '=': err = %v, want a fail-closed error", err)
+	}
+	if names, events, err := parseHookConfigListing(""); err != nil || len(names) != 0 || len(events) != 0 {
+		t.Fatalf("empty listing: %v %v %v", names, events, err)
+	}
+}
+
+// TestReadOnlyGit_listsConfiguredHooksFromEveryScope: the session disables every config-defined
+// hook by name, from repository and global config alike, and git reads each -c key back under the
+// same (dotted, spaced) name. This runs on any git: the listing and the -c round trip are plain
+// config, even where hook.* has no meaning yet (git < 2.54).
+func TestReadOnlyGit_listsConfiguredHooksFromEveryScope(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[hook \"from-global\"]\n\tevent = post-index-change\n\tcommand = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global) // git >= 2.32
+	gitCfg(t, root, "config", "hook.audit.event", "post-index-change")
+	gitCfg(t, root, "config", "hook.audit.command", "true")
+	gitCfg(t, root, "config", "hook.a.b c.event", "pre-commit")
+	gitCfg(t, root, "config", "hook.a.b c.command", "true")
+
+	g, err := newReadOnlyGit(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.close()
+	joined := strings.Join(g.hookOff, " ")
+	for _, want := range []string{
+		"-c hook.audit.enabled=false",
+		"-c hook.a.b c.enabled=false",
+		"-c hook.from-global.enabled=false",
+		"-c hook.post-index-change.enabled=false",
+		"-c hook.pre-commit.enabled=false",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("hookOff = %q, missing %q", joined, want)
+		}
+	}
+	for _, name := range []string{"audit", "a.b c", "from-global", "post-index-change"} {
+		out, _, err := g.run(context.Background(), maxGitOIDOutput, "config", "--get", "hook."+name+".enabled")
+		if err != nil || strings.TrimSpace(out) != "false" {
+			t.Fatalf("hook.%s.enabled in the session = %q, %v; want false", name, out, err)
+		}
+	}
+
+	// A name -c cannot express fails the op closed.
+	gitCfg(t, root, "config", "hook.a=b.event", "post-index-change")
+	t.Setenv(envWorkspaceRoot, root)
+	if _, _, err := NewRegistry().Dispatch(context.Background(), "diff", nil); err == nil || !strings.Contains(err.Error(), "'='") {
+		t.Fatalf("diff with an inexpressible hook name: err = %v, want fail closed", err)
+	}
+}
+
+// TestGitStatusAndDiff_doNotRunConfigDefinedHooks: since git 2.54 hooks can be defined in config
+// (hook.<name>.event / hook.<name>.command, from any scope), and core.hooksPath does not affect
+// them. git diff's index write runs a configured post-index-change hook, so it must be disabled by
+// name (git 2.54) and by event (git >= 2.55). Skips where plain git does not run the planted hooks
+// (git < 2.54, e.g. the 2.34 of Ubuntu 22.04).
+func TestGitStatusAndDiff_doNotRunConfigDefinedHooks(t *testing.T) {
+	requireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("hook commands are shell one-liners")
+	}
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	markers := t.TempDir()
+	marker := func(name string) string { return filepath.Join(markers, name+".ran") }
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	globalCfg := "[hook \"from-global\"]\n\tevent = post-index-change\n\tcommand = echo ran >> '" + marker("from-global") + "'\n"
+	if err := os.WriteFile(global, []byte(globalCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	for _, name := range []string{"x", "a.b"} { // "a.b": a friendly name containing a dot
+		gitCfg(t, root, "config", "hook."+name+".event", "post-index-change")
+		gitCfg(t, root, "config", "hook."+name+".command", "echo ran >> '"+marker(name)+"'")
+	}
+	all := []string{"x", "a.b", "from-global"}
+	readme := filepath.Join(root, "README.md")
+	bump := func(d time.Duration) {
+		t.Helper()
+		ts := time.Now().Add(d)
+		if err := os.Chtimes(readme, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	bump(time.Hour)
+	plainGit(root, "diff", "HEAD")
+	fired := 0
+	for _, n := range all {
+		if markerRan(marker(n)) {
+			fired++
+		}
+	}
+	if fired == 0 {
+		t.Skip("this git build does not run config-defined hooks (git < 2.54); cannot exercise the guard")
+	}
+	for _, n := range all {
+		if !markerRan(marker(n)) {
+			t.Fatalf("control: plain git ran some configured hooks but not %q", n)
+		}
+		if err := os.Remove(marker(n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i, op := range []string{"status", "diff"} {
+		bump(time.Duration(i+2) * time.Hour)
+		out, _, err := NewRegistry().Dispatch(context.Background(), op, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		for _, n := range all {
+			if markerRan(marker(n)) {
+				t.Fatalf("git.%s executed the config-defined post-index-change hook %q", op, n)
+			}
+		}
+		if op == "diff" {
+			if diff, _ := out["diff"].(string); diff != "" {
+				t.Fatalf("stat-only change should diff empty, got:\n%s", diff)
+			}
+		}
+	}
+}
+
+// fileURL is a file:// URL for a local path, so git uses its transport (a plain local path makes
+// clone ignore --depth).
+func fileURL(p string) string {
+	p = filepath.ToSlash(p)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p // Windows: C:/x -> /C:/x
+	}
+	return "file://" + p
+}
+
+// TestGitDiff_baseInShallowClone: in a shallow clone whose fetched history does not reach the fork
+// point, merge-base finds nothing although the histories are related. The op still fails closed but
+// must say that the clone is shallow, not that the branch is unrelated to base.
+func TestGitDiff_baseInShallowClone(t *testing.T) {
+	requireGit(t)
+	upstream := initRepoWithCommit(t)
+	commitFile := func(dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCfg(t, dir, "add", name)
+		gitCfg(t, dir, "commit", "-m", name)
+	}
+	commitFile(upstream, "b.txt", "b\n")
+	parent := t.TempDir()
+	gitCfg(t, parent, "clone", "--depth=1", fileURL(upstream), "clone")
+	clone := filepath.Join(parent, "clone")
+	if got := gitCfg(t, clone, "rev-parse", "--is-shallow-repository"); got != "true" {
+		t.Skipf("clone --depth=1 did not produce a shallow repository (%q)", got)
+	}
+	// main moves on upstream; a depth-1 fetch brings its tip without the history back to the fork.
+	commitFile(upstream, "c.txt", "c\n")
+	gitCfg(t, clone, "fetch", "--depth=1", "origin", "main")
+	t.Setenv(envWorkspaceRoot, clone)
+
+	_, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "origin/main"})
+	if err == nil {
+		t.Fatal("diff base in a shallow clone without the fork point: want an error")
+	}
+	if !strings.Contains(err.Error(), "shallow clone") || !strings.Contains(err.Error(), "--unshallow") || strings.Contains(err.Error(), "unrelated") {
+		t.Fatalf("err = %v, want a shallow-clone diagnosis", err)
+	}
+}
+
+// TestGitDiff_mergeBaseFailureIsNotNoMergeBase: only merge-base's exit status 1 means "no common
+// ancestor". Any other failure — here a missing commit object on the walk — reports git's error.
+func TestGitDiff_mergeBaseFailureIsNotNoMergeBase(t *testing.T) {
+	requireGit(t)
+	root := initRepoWithCommit(t)
+	t.Setenv(envWorkspaceRoot, root)
+	fork := gitCfg(t, root, "rev-parse", "HEAD")
+	for _, br := range []string{"main", "feature"} {
+		if br == "feature" {
+			gitCfg(t, root, "switch", "-c", "feature", fork)
+		}
+		if err := os.WriteFile(filepath.Join(root, br+".txt"), []byte(br+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCfg(t, root, "add", br+".txt")
+		gitCfg(t, root, "commit", "-m", br)
+	}
+	// Remove the fork commit's loose object: both tips still resolve, but the merge-base walk
+	// reaches the missing parent and git fails with something other than exit status 1.
+	obj := filepath.Join(root, ".git", "objects", fork[:2], fork[2:])
+	if err := os.Chmod(obj, 0o644); err != nil {
+		t.Skipf("fork commit is not a loose object: %v", err)
+	}
+	if err := os.Remove(obj); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := NewRegistry().Dispatch(context.Background(), "diff", map[string]any{"base": "main"})
+	if err == nil {
+		t.Fatal("diff base with a corrupt history: want an error")
+	}
+	if strings.Contains(err.Error(), "no merge base") || !strings.Contains(err.Error(), "merge base of base") {
+		t.Fatalf("err = %v, want git's merge-base failure, not a no-merge-base diagnosis", err)
+	}
+}
