@@ -615,7 +615,8 @@ func (wc *wfChecker) checkTemplate(s string, pos lang.Pos) (typeRef, lang.Diagno
 // reported as an unresolved "" reference in every value position — the execution
 // IR would otherwise lower it to an empty Ref that fails only at run time. The
 // message and position match the resource projection's interpolateArg diagnostic,
-// so dedupDiags collapses the two for a call argument.
+// so for a call argument dedupDiags collapses each token's pair to one report,
+// however many bad tokens the string has.
 func (wc *wfChecker) checkTemplateToken(inner string, pos lang.Pos) (typeRef, lang.Diagnostics) {
 	var parts []*lang.Ident
 	for _, p := range strings.Split(inner, ".") {
