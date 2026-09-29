@@ -281,6 +281,18 @@ type WorkflowStep struct {
 	// derived from key presence during load. `omitempty` keeps JSON unchanged for the common
 	// implicit-sequential step.
 	NeedsDeclared bool `yaml:"-" json:"needsDeclared,omitempty"`
+	// WholeDocument is the explicit call shape of an agent step lowered from a single
+	// UNNAMED argument, `Reviewer(value)` (issue #550): With then holds exactly one entry,
+	// keyed by the lowering placeholder "arg0", and that value is the agent's whole input
+	// document rather than a field of an input object. A named call — including one whose
+	// field is literally called arg0 — and a multi-argument positional call leave it false
+	// and With is the input object. Validation ([ValidateProjectGraph]) and execution
+	// consume this bit; neither may infer the shape from the with: key, which is
+	// author-visible. It is JSON IDENTITY (`json:"wholeDocument"`), not a diagnostic: it
+	// changes what the step executes, so it must survive the deployment snapshot and be
+	// part of the resource hash, mirroring [NeedsDeclared]. Not author-settable in YAML
+	// (`yaml:"-"`); only `.agent` lowering (and snapshot hydration) sets it. Agent steps only.
+	WholeDocument bool `yaml:"-" json:"wholeDocument,omitempty"`
 }
 
 type WorkflowOutput struct {

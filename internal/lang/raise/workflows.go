@@ -90,6 +90,16 @@ func (r *raiser) raiseStep(wf string, st spec.WorkflowStep) (lang.Stmt, bool) {
 	if !aok {
 		return nil, false
 	}
+	if st.WholeDocument {
+		// The explicit whole-document call shape (#550) raises to a POSITIONAL
+		// argument, `id = Agent(value)`; emitting the named `arg0: value` would
+		// reload as a named call with a field called arg0 — a different ABI.
+		if strings.TrimSpace(st.Agent) == "" || len(args) != 1 || args[0].Name == nil || args[0].Name.Name != "arg0" {
+			r.reject("Workflow", wf, "spec.steps", "step "+id+" is marked wholeDocument but is not an agent call with exactly one positional argument")
+			return nil, false
+		}
+		args[0].Name = nil
+	}
 	return &lang.AssignStmt{
 		Target: ident(id),
 		Value:  &lang.CallExpr{Callee: callee, Args: args},

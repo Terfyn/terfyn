@@ -62,10 +62,17 @@ type ApprovalInfo struct {
 //   - Loop is the enclosing loop iteration indices (outermost first), so the same
 //     static node executed on different iterations has distinct identity. It is
 //     empty on the YAML path (no loops) and non-empty only under `.agent` loops.
+//   - WholeDocument is the call shape of an agent invocation (see
+//     [InvokeAgent.WholeDocument]): true when the single "arg0" argument is the
+//     agent's whole input document rather than a field of an input object. It is
+//     the interpreter's carrier of the node's explicit shape bit to the Invoker,
+//     NOT part of the site's identity — [CallKey] ignores it (a node's shape is
+//     fixed by its static address).
 type CallSite struct {
-	Bind string
-	Path []int
-	Loop []int
+	Bind          string
+	Path          []int
+	Loop          []int
+	WholeDocument bool
 }
 
 // Invoker performs the effectful leaf operations. The execution IR carries no
@@ -336,7 +343,7 @@ func (r *runner) exec(scope map[string]any, n Node, path, loop []int) error {
 			return r.in.Invoker.InvokeTool(r.ctx, site, v.Uses, a)
 		})
 	case *InvokeAgent:
-		site := CallSite{Bind: v.Bind, Path: path, Loop: loop}
+		site := CallSite{Bind: v.Bind, Path: path, Loop: loop, WholeDocument: v.WholeDocument}
 		return r.invoke(scope, v.Bind, site, v.Args, func(a map[string]any) (any, error) {
 			return r.in.Invoker.InvokeAgent(r.ctx, site, v.Agent, a)
 		})

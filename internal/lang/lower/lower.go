@@ -670,6 +670,7 @@ func (wl *workflowLowerer) lowerApproval(s *lang.ApprovalStmt, predNeeds []strin
 func (wl *workflowLowerer) lowerCall(id string, call *lang.CallExpr, predNeeds []string, pos spec.Pos) {
 	step := spec.WorkflowStep{ID: id, Pos: pos, NeedsDeclared: true, Synthetic: wl.synthetic}
 	wl.applyCallee(&step, call.Callee)
+	step.WholeDocument = step.Agent != "" && isWholeDocumentCall(call.Args)
 
 	var tempNeeds []string
 	if len(call.Args) > 0 {

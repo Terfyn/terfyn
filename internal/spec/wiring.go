@@ -54,6 +54,9 @@ func checkStepWithWiring(g *ProjectGraph, wfName string, st WorkflowStep, byID m
 	// arg0, an agent input being a whole document, not named fields), and it is never
 	// executed (#305, ADR 002 §5). Argument type safety is enforced by the checker's
 	// type system; skip the per-field input-schema wiring check here.
+	if errs := checkWholeDocumentShape(wfName, st); errs != nil {
+		return errs
+	}
 	if st.Synthetic {
 		return nil
 	}
@@ -255,11 +258,39 @@ func checkConsumerType(
 	)}
 }
 
-// isAgentPositionalWholeDocument reports whether withKey is the lowering
-// placeholder for a single positional agent argument. An agent's input is one
-// type, not named fields, so arg0 is that document (#550).
+// isAgentPositionalWholeDocument reports whether withKey is the single
+// positional argument of an agent step, i.e. the agent's whole input document
+// (#550). It consumes the explicit [WorkflowStep.WholeDocument] call-shape bit
+// that lowering set from the source call; it never infers the shape from the key
+// name, so a named call whose field is literally arg0 stays a field lookup, and a
+// multi-argument positional call (WholeDocument false) is never treated as one.
 func isAgentPositionalWholeDocument(st WorkflowStep, withKey string) bool {
-	return strings.TrimSpace(st.Agent) != "" && withKey == "arg0"
+	return st.WholeDocument && strings.TrimSpace(st.Agent) != "" && withKey == wholeDocumentKey
+}
+
+// wholeDocumentKey is the with: placeholder key lowering stores a whole-document
+// agent argument under (there is no symbol table to name it). It is only ever
+// interpreted together with [WorkflowStep.WholeDocument].
+const wholeDocumentKey = "arg0"
+
+// checkWholeDocumentShape enforces the [WorkflowStep.WholeDocument] representation
+// invariant on every step, synthetic or not, so a snapshot that carries the bit on
+// a step that cannot honor it fails loudly instead of executing under a different
+// ABI than it validated under: it must be an agent step whose with: is exactly
+// the single placeholder entry.
+func checkWholeDocumentShape(wfName string, st WorkflowStep) []error {
+	if !st.WholeDocument {
+		return nil
+	}
+	if strings.TrimSpace(st.Agent) == "" {
+		return []error{st.Pos.Errorf(
+			"workflow %s step %q: wholeDocument is only valid on an agent step", wfName, strings.TrimSpace(st.ID))}
+	}
+	if _, ok := st.With[wholeDocumentKey]; !ok || len(st.With) != 1 {
+		return []error{st.Pos.Errorf(
+			"workflow %s step %q: wholeDocument requires with: to be exactly one positional argument", wfName, strings.TrimSpace(st.ID))}
+	}
+	return nil
 }
 
 func producerOutputDoc(g *ProjectGraph, st WorkflowStep) *schema.Document {

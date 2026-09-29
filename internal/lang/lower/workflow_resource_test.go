@@ -89,6 +89,11 @@ workflow W(input: PR) {
 // the resolved step directly. The head binding is resolved through the workflow's
 // binding environment, so the twins share a digest and the templated step gains the
 // referenced step as a predecessor.
+//
+// The agent argument is the NAMED `arg0:` field on both sides: a positional
+// `reviewer(input)` is the whole-document call shape (#550), which a YAML with:
+// map cannot express, so it deliberately has a different digest than its
+// `arg0:` YAML lookalike.
 func TestLowerWorkflowResource_TemplateParity(t *testing.T) {
 	t.Parallel()
 
@@ -117,7 +122,7 @@ spec:
 
 	agentProg, adiags := lowerExecOrFatal(t, `
 workflow W(input: PR) {
-    review = reviewer(input)
+    review = reviewer(arg0: input)
     post = github.post(body: "## Review\n${review.summary}\ndone")
     return post
 }

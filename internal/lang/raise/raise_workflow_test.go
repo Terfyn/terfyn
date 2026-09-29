@@ -165,3 +165,32 @@ func TestRaise_WorkflowRefusesNullValue(t *testing.T) {
 		t.Fatalf("expected a Workflow Unsupported, got %v", unsup)
 	}
 }
+
+// TestRaise_WholeDocumentCallShapeRoundTrips: the explicit whole-document bit
+// (#550) raises to a positional argument and a named `arg0:` call stays named, so
+// both re-lower to the shape they started with — the with: maps are identical.
+func TestRaise_WholeDocumentCallShapeRoundTrips(t *testing.T) {
+	src := &spec.WorkflowResource{
+		Metadata: spec.Metadata{Name: "demo"},
+		Spec: spec.WorkflowSpec{
+			Input:  &spec.WorkflowInput{Schema: "schemas/DemoInput.json"},
+			Policy: "default",
+			Steps: []spec.WorkflowStep{
+				{ID: "whole", Agent: "reviewer", With: map[string]any{"arg0": "${input}"}, WholeDocument: true},
+				{ID: "named", Agent: "reviewer", With: map[string]any{"arg0": "${steps.whole.output}"}},
+			},
+			Output: &spec.WorkflowOutput{Value: map[string]any{"r": "${steps.named.output}"}},
+		},
+	}
+	wr, out := raiseAndRelower(t, yamlWorkflowGraph(src), "demo")
+	if !strings.Contains(out, "whole = reviewer(input)") || !strings.Contains(out, "named = reviewer(arg0: whole)") {
+		t.Fatalf("raised source did not keep call shapes:\n%s", out)
+	}
+	got := map[string]bool{}
+	for _, st := range wr.Spec.Steps {
+		got[st.ID] = st.WholeDocument
+	}
+	if !got["whole"] || got["named"] {
+		t.Fatalf("re-lowered shapes = %v", got)
+	}
+}

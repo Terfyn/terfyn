@@ -229,7 +229,11 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	ctx2, cancelWC := e.wallClockDeadline(ctx2, pol, pctx)
 	defer cancelWC()
 
-	payload, err := json.Marshal(unwrapAgentWholeDocument(with))
+	input, err := agentInputDocument(step, with)
+	if err != nil {
+		return nil, models.GenerateMeta{}, err
+	}
+	payload, err := json.Marshal(input)
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
@@ -261,21 +265,31 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	return e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
 }
 
-// unwrapAgentWholeDocument implements single-positional agent-call semantics (#550).
-// Lowering keys that one argument as "arg0"; the agent's input is the whole
-// document, not a field named arg0. The model user message is that value.
-// Multi-key or named maps stay as-is (undefined ABI, not this unwrap).
-func unwrapAgentWholeDocument(with map[string]any) any {
-	if len(with) == 1 {
-		if v, ok := with["arg0"]; ok {
-			return v
+// agentInputDocument returns the value the model receives as the agent's input.
+// The call shape is the explicit step.WholeDocument bit set by lowering (#550): a
+// whole-document call (`Reviewer(value)`) passes the single "arg0" value itself;
+// every other call passes the with: map as the input object — including a named
+// call whose field is literally arg0. The shape is never inferred from a key
+// name. A step carrying the bit without exactly the one placeholder argument
+// violates the representation invariant ([spec.WorkflowStep.WholeDocument]) and
+// is refused rather than silently sent as an object.
+func agentInputDocument(step spec.WorkflowStep, with map[string]any) (any, error) {
+	if !step.WholeDocument {
+		if with == nil {
+			return nil, nil
 		}
+		return with, nil
 	}
-	if with == nil {
-		return nil
+	v, ok := with[wholeDocumentArgKey]
+	if !ok || len(with) != 1 {
+		return nil, fmt.Errorf("engine: agent step %q is a whole-document call but has %d arguments (want exactly one positional argument)", step.ID, len(with))
 	}
-	return with
+	return v, nil
 }
+
+// wholeDocumentArgKey is the placeholder key lowering stores a whole-document
+// agent argument under; meaningful only alongside spec.WorkflowStep.WholeDocument.
+const wholeDocumentArgKey = "arg0"
 
 // maxTokensStopError is the actionable run error when a completion stops at its output-token cap
 // (issue #514). Today it fails the step (a truncated write_file would be a corrupted partial file, so

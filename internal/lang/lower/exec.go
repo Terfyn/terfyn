@@ -229,7 +229,17 @@ func (el *execLowerer) lowerCallNode(bind string, c *lang.CallExpr, pre *[]execi
 	if el.workflows[name] {
 		return &execir.InvokeWorkflow{Pos: c.Pos, Bind: bind, Workflow: name, Args: args}
 	}
-	return &execir.InvokeAgent{Pos: c.Pos, Bind: bind, Agent: name, Args: args}
+	return &execir.InvokeAgent{Pos: c.Pos, Bind: bind, Agent: name, Args: args, WholeDocument: isWholeDocumentCall(c.Args)}
+}
+
+// isWholeDocumentCall reports the explicit call shape a single positional agent
+// argument has (#550): exactly one argument and it is unnamed, so it is the agent's
+// whole input document. This is the same shape the checker type-checks against the
+// agent's declared input (checkAgentArgs); a named argument (even one called arg0),
+// several arguments, or none are a different shape. It is decided here, from the
+// AST, and carried as data — nothing downstream re-derives it from the arg0 key.
+func isWholeDocumentCall(args []*lang.Arg) bool {
+	return len(args) == 1 && args[0] != nil && (args[0].Name == nil || args[0].Name.Name == "")
 }
 
 func (el *execLowerer) lowerArgs(args []*lang.Arg, pre *[]execir.Node) map[string]execir.Value {
