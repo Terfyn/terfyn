@@ -2,9 +2,10 @@ package native
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
+
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 )
 
 // GitHub list (read) operations. Each is a GET returning a JSON array, decoded to a
@@ -63,7 +64,7 @@ func githubGETArray(ctx context.Context, path, op string) ([]any, error) {
 		return nil, err
 	}
 	var arr []any
-	if err := json.Unmarshal(b, &arr); err != nil {
+	if err := jsonnum.Unmarshal(b, &arr); err != nil {
 		return nil, fmt.Errorf("native: %s decode: %w", op, err)
 	}
 	return arr, nil

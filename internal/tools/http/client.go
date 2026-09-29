@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Terfyn/terfyn/internal/jsonnum"
 	"github.com/Terfyn/terfyn/internal/models"
 	"github.com/Terfyn/terfyn/internal/spec"
 )
@@ -263,11 +264,11 @@ func decodeResponseBody(b []byte, contentType string) (map[string]any, error) {
 	}
 	if strings.Contains(ct, "application/json") || b[0] == '{' || b[0] == '[' {
 		var obj map[string]any
-		if json.Unmarshal(b, &obj) == nil {
+		if jsonnum.Unmarshal(b, &obj) == nil {
 			return obj, nil
 		}
 		var arr []any
-		if json.Unmarshal(b, &arr) == nil {
+		if jsonnum.Unmarshal(b, &arr) == nil {
 			return map[string]any{"items": arr}, nil
 		}
 	}
