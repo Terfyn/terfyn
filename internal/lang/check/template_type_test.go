@@ -288,3 +288,67 @@ func TestCheck_ForCollectionTemplateResolved(t *testing.T) {
 		})
 	}
 }
+
+// An empty token path (`${}`, `${ . }`, also embedded in text) names nothing: the
+// execution IR would lower it to an empty Ref that fails at run time with
+// `execir: empty reference path`. The checker reports it in every value position —
+// a for / parallel for collection and a return, which the resource projection never
+// interpolates — and, for a call argument, the resource projection's identical
+// diagnostic collapses with the checker's so it is reported exactly once.
+func TestCheck_EmptyTemplateTokenRejected(t *testing.T) {
+	t.Parallel()
+	const want = `unresolved reference "" in interpolation`
+	returnSrc := func(ret string) string {
+		return `
+agent producer {
+    model mock/default
+    instructions "return a value"
+    input String
+    output String
+}
+
+workflow demo(input: String) -> String {
+    v = producer(input)
+    return ` + ret + `
+}
+`
+	}
+	argSrc := func(arg string) string {
+		return `
+agent echo {
+    model mock/default
+    instructions "echo"
+    input String
+    output String
+}
+
+workflow demo(input: String) -> String {
+    r = echo(` + arg + `)
+    return input
+}
+`
+	}
+	for _, tok := range []string{`"${}"`, `"${ . }"`, `"a${}b"`} {
+		srcs := map[string]string{
+			"for":          forCollectionSrc(tok, false),
+			"parallel for": forCollectionSrc(tok, true),
+			"return":       returnSrc(tok),
+			"argument":     argSrc(tok),
+		}
+		for pos, src := range srcs {
+			t.Run(pos+"/"+tok, func(t *testing.T) {
+				t.Parallel()
+				_, diags := Check(parseOrFatal(t, src), Options{SchemaDir: "testdata"})
+				n := 0
+				for _, m := range diagMessages(diags) {
+					if strings.Contains(m, want) {
+						n++
+					}
+				}
+				if !diags.HasErrors() || n != 1 {
+					t.Fatalf("an empty token must be reported exactly once as %q, got %v", want, diagMessages(diags))
+				}
+			})
+		}
+	}
+}

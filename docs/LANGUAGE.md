@@ -421,15 +421,17 @@ case the flagship needs is resolved.)
 
 ### String templates in arguments
 
-An **argument** string value may embed `${<binding>.<field>…}` tokens (#316), the one place
-`.agent` performs interpolation. It is a lowering-time property of **argument position**, not
-of the string form: both `"…${x}…"` and a `"""…${x}…"""` block interpolate the same way, and
-the token syntax is identical to the resource projection's `${…}` (the exact reference
+An **argument** string value may embed `${<binding>.<field>…}` tokens (#316). Arguments are
+the one position both projections interpolate (the resource projection interpolates nothing
+else; the execution IR also interpolates a return value and a `for` collection, below).
+Interpolation is a lowering-time property of **value position**, not of the string form: both
+`"…${x}…"` and a `"""…${x}…"""` block interpolate the same way, and the token syntax is identical to the resource projection's `${…}` (the exact reference
 `interpTokenRE`). The head identifier is resolved through the workflow's binding environment —
 a binding `review` becomes `${steps.review.output.…}`, a parameter field becomes `${input.…}`
 — and the referenced step is added to the consumer's predecessors, so a templated `body:`
 that names an earlier step's output is a valid, ordered reference. An unknown head is an
-`unresolved reference "…" in interpolation` diagnostic. The execution IR applies the same
+`unresolved reference "…" in interpolation` diagnostic, and so is an empty token (`${}`,
+`${ . }`), reported as `unresolved reference ""`. The execution IR applies the same
 lowering to every value position, not only arguments: a return value and a `for` /
 `parallel for` collection interpolate too (`for x in "${xs}"` iterates `xs`), and the checker
 resolves and types the tokens in each of them (see the string-template rule under type
