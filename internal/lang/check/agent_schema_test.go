@@ -69,3 +69,27 @@ agent Loose {
 		t.Fatalf("an unresolved type must stay untyped, got %+v", ar.Spec.Input)
 	}
 }
+
+func TestCheck_AgentBooleanOutputSchemaWires(t *testing.T) {
+	t.Parallel()
+	src := `
+agent Assistant {
+    model mock/default
+    instructions "test"
+    output Never
+}
+`
+	f := parseOrFatal(t, src)
+	prog, diags := Check(f, Options{SchemaDir: "testdata"})
+	if diags.HasErrors() {
+		t.Fatalf("boolean false output schema must compile, got %v", diagMessages(diags))
+	}
+	ar := prog.Graph.Agents["Assistant"]
+	if ar == nil || ar.Spec.Output == nil || ar.Spec.Output.Resolved == nil {
+		t.Fatalf("Never output schema not wired: %+v", ar)
+	}
+	got := ar.Spec.Output.Resolved.Lookup(nil)
+	if !got.Impossible {
+		t.Fatalf("false output schema must be impossible, got %+v", got)
+	}
+}

@@ -265,6 +265,133 @@ workflow Run(input: Ticket) -> Handoff {
 	}
 }
 
+// TestWriteAgentProjectDir_BooleanRootSchemasRoundTrip is the issue #549 review regression: a project
+// typed with Draft 2020-12 boolean root schemas (`true` = accepts everything, `false` = accepts
+// nothing) must keep them across export and reload. Raw == nil used to mean both "unresolved" and
+// "boolean", so export silently omitted schemas/Any.json and schemas/Never.json and the reloaded
+// project either failed to resolve the type or degraded `false` to untyped (accept-everything)
+// gradual typing.
+func TestWriteAgentProjectDir_BooleanRootSchemasRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.agent", `
+agent Anything {
+    model openai/gpt-5
+    input Any
+    output Any
+}
+
+agent Impossible {
+    model openai/gpt-5
+    input Any
+    output Never
+}
+
+workflow Run(input: Any) -> Any {
+    r = Anything(input)
+    return r
+}
+`)
+	writeFile(t, root, "schemas/Any.json", "true\n")
+	writeFile(t, root, "schemas/Never.json", "false\n")
+
+	g1, err := LoadProject(root)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	// Both boolean forms are collected as resolved schemas (not skipped as "unresolved").
+	got := collectResolvedSchemas(g1)
+	if v, ok := got["schemas/Any.json"]; !ok || v != true {
+		t.Fatalf("collectResolvedSchemas[Any] = %#v, %v; want true", v, ok)
+	}
+	if v, ok := got["schemas/Never.json"]; !ok || v != false {
+		t.Fatalf("collectResolvedSchemas[Never] = %#v, %v; want false", v, ok)
+	}
+
+	check := func(label string, g *spec.ProjectGraph) {
+		t.Helper()
+		anyIn := g.Agents["Impossible"].Spec.Input
+		if anyIn == nil || anyIn.Schema != "schemas/Any.json" || anyIn.Resolved == nil {
+			t.Fatalf("%s: Any input lost its type: %+v", label, anyIn)
+		}
+		if raw, ok := anyIn.Resolved.Schema(); !ok || raw != true {
+			t.Fatalf("%s: Any schema = %#v, %v; want true", label, raw, ok)
+		}
+		if res := anyIn.Resolved.Lookup(nil); res.Impossible || res.Missing {
+			t.Fatalf("%s: true schema must stay unconstrained, got %+v", label, res)
+		}
+		neverOut := g.Agents["Impossible"].Spec.Output
+		if neverOut == nil || neverOut.Schema != "schemas/Never.json" || neverOut.Resolved == nil {
+			t.Fatalf("%s: Never output lost its type: %+v", label, neverOut)
+		}
+		if raw, ok := neverOut.Resolved.Schema(); !ok || raw != false {
+			t.Fatalf("%s: Never schema = %#v, %v; want false", label, raw, ok)
+		}
+		if res := neverOut.Resolved.Lookup(nil); !res.Impossible {
+			t.Fatalf("%s: false schema must stay impossible (never), not degrade to untyped: %+v", label, res)
+		}
+		if in := g.Workflows["Run"].Spec.Input; in == nil || in.Schema != "schemas/Any.json" || in.Resolved == nil {
+			t.Fatalf("%s: workflow input lost its type: %+v", label, in)
+		} else if raw, ok := in.Resolved.Schema(); !ok || raw != true {
+			t.Fatalf("%s: workflow Any schema = %#v, %v; want true", label, raw, ok)
+		}
+	}
+	check("source", g1)
+
+	out := filepath.Join(t.TempDir(), "exported")
+	if err := WriteAgentProjectDir(out, g1); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	for ref, want := range map[string]string{"schemas/Any.json": "true\n", "schemas/Never.json": "false\n"} {
+		body, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(ref)))
+		if err != nil {
+			t.Fatalf("exported %s missing (boolean schema dropped as unresolved): %v", ref, err)
+		}
+		if string(body) != want {
+			t.Fatalf("exported %s = %q, want %q", ref, body, want)
+		}
+	}
+
+	// The exported false schema still rejects every instance; true still accepts them.
+	neverPath := filepath.Join(out, "schemas", "Never.json")
+	for _, inst := range []string{`null`, `{}`, `[]`, `0`, `""`, `false`} {
+		if err := schema.Validate(neverPath, []byte(inst)); err == nil {
+			t.Fatalf("exported false schema accepted instance %s", inst)
+		}
+	}
+	if err := schema.Validate(filepath.Join(out, "schemas", "Any.json"), []byte(`{"x":1}`)); err != nil {
+		t.Fatalf("exported true schema rejected an instance: %v", err)
+	}
+
+	g2, err := LoadProject(out)
+	if err != nil {
+		t.Fatalf("reload exported project: %v", err)
+	}
+	check("reloaded", g2)
+
+	// Re-exporting the reloaded project is a fixed point (the form survives the whole lifecycle).
+	out2 := filepath.Join(t.TempDir(), "exported2")
+	if err := WriteAgentProjectDir(out2, g2); err != nil {
+		t.Fatalf("re-export: %v", err)
+	}
+	if before, after := snapshotExportDir(t, out), snapshotExportDir(t, out2); !equalSnapshots(before, after) {
+		t.Fatalf("re-export of reloaded boolean-schema project differs: %v vs %v", keysOf(before), keysOf(after))
+	}
+}
+
+func equalSnapshots(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		w, ok := b[k]
+		if !ok || string(v) != string(w) {
+			return false
+		}
+	}
+	return true
+}
+
 // TestWriteAgentProjectDir_RefusesForeignAgentSource proves export refuses a directory that already
 // holds a foreign .agent file (LoadProject would merge it and duplicate every resource).
 func TestWriteAgentProjectDir_RefusesForeignAgentSource(t *testing.T) {
@@ -403,7 +530,7 @@ func successfulTypedExport(t *testing.T) (out string, g *spec.ProjectGraph, befo
 // (unencodable schema value) must not delete or mutate the previous successful schemas/.
 func TestFailedReExportPreservesPreviousSchemas(t *testing.T) {
 	out, g, before := successfulTypedExport(t)
-	g.Agents["A"].Spec.Input.Resolved.Raw["unencodable"] = make(chan int)
+	g.Agents["A"].Spec.Input.Resolved.Raw.(map[string]any)["unencodable"] = make(chan int)
 	if err := WriteAgentProjectDir(out, g); err == nil {
 		t.Fatal("unexpected success")
 	}

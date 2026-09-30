@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "patternProperties": {
+    "^body$": true,
+    "^n_": { "type": "integer" }
+  },
+  "additionalProperties": false
+}

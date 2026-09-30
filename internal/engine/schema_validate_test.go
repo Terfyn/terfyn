@@ -155,3 +155,26 @@ func TestValidateAgentOutput_pinnedUsesCapturedSchema(t *testing.T) {
 		t.Fatalf("valid output should pass the captured schema: %v", err)
 	}
 }
+
+// A pinned run whose captured schema is a Draft 2020-12 boolean root schema (issue #549) validates
+// against exactly those bytes: `false` rejects every instance (never valid), `true` accepts all. The
+// drifted on-disk file (permissive) must not be consulted.
+func TestValidateWorkflowInput_pinnedBooleanSchemas(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "s.json"), []byte(permissiveInputSchema), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf := wfWithInputSchema("./s.json")
+
+	never := &Executor{PinnedGraph: true, ProjectRoot: root, Schemas: map[string]string{"./s.json": "false\n"}}
+	for _, in := range []map[string]any{{}, {"x": "y"}} {
+		if err := never.validateWorkflowInputSchema(wf, in); err == nil {
+			t.Fatalf("pinned false schema must reject every input, accepted %v", in)
+		}
+	}
+
+	anything := &Executor{PinnedGraph: true, ProjectRoot: "/nonexistent", Schemas: map[string]string{"./s.json": "true"}}
+	if err := anything.validateWorkflowInputSchema(wf, map[string]any{"x": 1}); err != nil {
+		t.Fatalf("pinned true schema must accept any input: %v", err)
+	}
+}

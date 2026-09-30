@@ -40,6 +40,16 @@ func TestValidateContent_externalFileRefNotFollowed(t *testing.T) {
 	}
 }
 
+func TestValidateContent_booleanSchemas(t *testing.T) {
+	if err := ValidateContent("any", []byte("true"), []byte(`{"x":1}`)); err != nil {
+		t.Fatalf("captured true schema must accept any instance: %v", err)
+	}
+	err := ValidateContent("never", []byte("false"), []byte(`{}`))
+	if err == nil {
+		t.Fatal("captured false schema must reject every instance")
+	}
+}
+
 func TestValidateContent_plainSchemaStillWorks(t *testing.T) {
 	s := []byte(`{"type":"object","required":["x"],"properties":{"x":{"type":"string"}}}`)
 	if err := ValidateContent("x", s, []byte(`{"x":"ok"}`)); err != nil {
