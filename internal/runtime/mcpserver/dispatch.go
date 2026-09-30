@@ -115,7 +115,16 @@ func (d *PolicyDispatcher) Call(ctx context.Context, uses string, args map[strin
 		return nil, err
 	}
 	d.traceSelection(ctx, stepID, uses, toolName, args)
-	resp, err := d.exec.Call(ctx, tools.ToolCallRequest{Uses: uses, With: args})
+	callCtx := ctx
+	if hasLimits {
+		// Tell the tool the output limit enforceBytes will apply below, so a tool that bounds its
+		// own result sizes it to the resolved limit, not the default. Unlike the engine's
+		// runToolStep, this budget is NOT clamped to maxCheckpointBytes: an MCP-served result goes
+		// back to the external agent process over MCP and is never written to a Terfyn checkpoint
+		// (RunExternalAgent keeps only the trace), so the tool-output limit is the only one it must fit.
+		callCtx = tools.WithOutputBudget(ctx, limits.MaxToolOutputBytes)
+	}
+	resp, err := d.exec.Call(callCtx, tools.ToolCallRequest{Uses: uses, With: args})
 	d.traceExecution(ctx, stepID, uses, toolName, resp.Meta, err)
 	if err != nil {
 		return nil, err

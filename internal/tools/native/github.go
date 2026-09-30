@@ -126,8 +126,35 @@ func githubPOSTJSON(ctx context.Context, path string, payload any, maxResp int64
 	return githubJSONRequest(ctx, http.MethodPost, path, payload, maxResp)
 }
 
-func defaultGitHubHTTPClient() *http.Client {
-	return &http.Client{Timeout: 60 * time.Second}
+// defaultGitHubHTTPClient builds the client for GitHub API calls. It is a variable
+// only so tests can inject a client that trusts an httptest TLS server; such a client
+// should come from newGitHubHTTPClient so it keeps the production redirect policy.
+var defaultGitHubHTTPClient = func() *http.Client {
+	return newGitHubHTTPClient(nil)
+}
+
+// newGitHubHTTPClient returns a GitHub API client over rt (nil = http.DefaultTransport)
+// with githubCheckRedirect as its redirect policy.
+func newGitHubHTTPClient(rt http.RoundTripper) *http.Client {
+	return &http.Client{Timeout: 60 * time.Second, Transport: rt, CheckRedirect: githubCheckRedirect}
+}
+
+// githubMaxRedirects matches net/http's default redirect bound.
+const githubMaxRedirects = 10
+
+// githubCheckRedirect refuses any redirect that leaves the origin (scheme, host, port)
+// of the original request. Go's default policy re-sends Authorization on a same-host
+// redirect even when it downgrades https to http, which would put the bearer token on
+// the wire in clear text; a cross-origin hop is refused for the same reason. The
+// request then fails instead of following the redirect.
+func githubCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= githubMaxRedirects {
+		return fmt.Errorf("native: github: stopped after %d redirects", githubMaxRedirects)
+	}
+	if from, to := githubOrigin(via[0].URL), githubOrigin(req.URL); from != to {
+		return fmt.Errorf("native: github: refusing redirect from %s to a different origin %s", from, to)
+	}
+	return nil
 }
 
 func readGitHubResponseBody(resp *http.Response, maxResp int64) ([]byte, error) {
@@ -223,7 +250,8 @@ func scalarToString(v any) (string, error) {
 }
 
 func githubGET(ctx context.Context, path, accept string, maxBody int64) ([]byte, error) {
-	return githubRequestBody(ctx, http.MethodGet, path, accept, maxBody)
+	b, _, err := githubRequest(ctx, http.MethodGet, path, accept, maxBody)
+	return b, err
 }
 
 func githubGETString(ctx context.Context, path, accept string, maxBody int64) (string, error) {
@@ -235,14 +263,51 @@ func githubGETString(ctx context.Context, path, accept string, maxBody int64) (s
 }
 
 func githubRequestBody(ctx context.Context, method, path, accept string, maxBody int64) ([]byte, error) {
+	b, _, err := githubRequest(ctx, method, path, accept, maxBody)
+	return b, err
+}
+
+// githubPathURL joins an API-relative path (it must start with "/") onto
+// GITHUB_API_URL. Every request built from a caller path goes through here, so a
+// path can never name another host; the only other way a request carries the bearer
+// token is githubGETURL, which accepts only a githubVettedURL.
+func githubPathURL(path string) (string, error) {
+	if !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("native: github request path must be API-relative (start with \"/\")")
+	}
+	return githubAPIBase() + path, nil
+}
+
+// githubRequest sends an authenticated request to the API-relative path.
+func githubRequest(ctx context.Context, method, path, accept string, maxBody int64) ([]byte, http.Header, error) {
+	fullURL, err := githubPathURL(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return githubSend(ctx, method, fullURL, accept, maxBody)
+}
+
+// githubGETURL sends an authenticated GET to an absolute URL. It takes a
+// githubVettedURL, which only githubResolveSameOrigin produces, so a URL taken from a
+// response (a Link header) reaches the network with the token only after the
+// same-origin check. githubWalkArray is its only caller.
+func githubGETURL(ctx context.Context, u githubVettedURL, accept string, maxBody int64) ([]byte, http.Header, error) {
+	if u.u == nil {
+		return nil, nil, fmt.Errorf("native: github: request URL was not vetted")
+	}
+	return githubSend(ctx, http.MethodGet, u.String(), accept, maxBody)
+}
+
+// githubSend performs the authenticated request. Callers pass either
+// githubPathURL output or a vetted URL; it adds no URL policy of its own.
+func githubSend(ctx context.Context, method, fullURL, accept string, maxBody int64) ([]byte, http.Header, error) {
 	token, err := githubToken()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	fullURL := strings.TrimSuffix(githubAPIBase(), "/") + path
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", githubUserAgent)
@@ -256,16 +321,16 @@ func githubRequestBody(ctx context.Context, method, path, accept string, maxBody
 	cli := defaultGitHubHTTPClient()
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("native: github request: %w", err)
+		return nil, nil, fmt.Errorf("native: github request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	b, err := readGitHubResponseBody(resp, maxBody)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("native: github HTTP %s: %s", resp.Status, truncateRunes(string(b), 512))
+		return nil, nil, fmt.Errorf("native: github HTTP %s: %s", resp.Status, truncateRunes(string(b), 512))
 	}
-	return b, nil
+	return b, resp.Header.Clone(), nil
 }

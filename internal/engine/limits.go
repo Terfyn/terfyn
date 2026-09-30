@@ -56,6 +56,43 @@ func (e *Executor) resolveCheckpointLimits(wf *spec.WorkflowResource) spec.Resol
 	return spec.ResolveExecutionLimits(project, wfSpec, nil)
 }
 
+// checkpointOutputShare is the divisor applied to maxCheckpointBytes when clamping the output
+// budget runToolStep advertises. It is a floor on the copy count, not the count: a completed step's
+// output is stored at least twice in a suspension checkpoint (once under steps, once in the execir
+// completed-leaf memo that lets a resume replay it), so an output above half the checkpoint limit can
+// never survive a later approval gate. Other shapes store it more often, and no constant divisor can
+// cover them: an approval (or HITL-gated call) whose `with` carries the output stores another copy
+// as the pending gate, and a step inside `for` / `parallel for` leaves one memo copy per iteration
+// (steps keeps only the last). Those runs can still exceed maxCheckpointBytes with a single large
+// output; see toolOutputBudget.
+const checkpointOutputShare = 2
+
+// toolOutputBudget is the output byte budget runToolStep advertises to the tool
+// (tools.WithOutputBudget) for a step using uses in wf. It starts from the resolved tool-output
+// limit that enforceToolOutput applies, and is clamped to half the run's resolved checkpoint limit
+// (maxCheckpointBytes, resolved at the ROOT workflow as saveCheckpoint does, fail-only, and not
+// raisable by a tool's limits block): every step output also lands in the checkpoint context, at
+// least twice in a suspension checkpoint (checkpointOutputShare), so a budget above that clamp would
+// invite the tool to return an output the run can never checkpoint. Both resolved limits are
+// always positive (config ignores non-positive overrides); the guards are defensive.
+//
+// The clamp is per output and assumes the minimum two copies. Everything else that shares the
+// checkpoint is the operator's to size (raising maxCheckpointBytes, or lowering the tools'
+// maxToolOutputBytes): other steps' outputs, an approval whose `with` carries the output (one more
+// copy), and a step in a loop (one more memo copy per iteration). A run whose checkpoint exceeds the
+// limit fails at the checkpoint (`checkpoint context exceeds ... bytes`), not at the tool.
+func (e *Executor) toolOutputBudget(wf *spec.WorkflowResource, uses string) int {
+	budget := e.resolveToolLimits(wf, uses).MaxToolOutputBytes
+	cpWF := wf
+	if e != nil && e.rootWF != nil {
+		cpWF = e.rootWF
+	}
+	if cp := e.resolveCheckpointLimits(cpWF).MaxCheckpointBytes / checkpointOutputShare; cp > 0 && (budget <= 0 || cp < budget) {
+		budget = cp
+	}
+	return budget
+}
+
 func (e *Executor) enforceMapLimit(
 	ctx context.Context,
 	runID, stepID, uses string,

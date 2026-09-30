@@ -107,6 +107,54 @@ func TestPolicyDispatcher_noEnforcerSkips(t *testing.T) {
 	}
 }
 
+// TestPolicyDispatcher_propagatesOutputBudget proves the external path tells the tool the output
+// limit it will enforce (the resolved per-tool maxToolOutputBytes), as the engine's runToolStep does,
+// so a tool that bounds its own result (native GitHub list ops) sizes it to that limit.
+func TestPolicyDispatcher_propagatesOutputBudget(t *testing.T) {
+	tests := []struct {
+		name    string
+		limits  *spec.ExecutionLimits
+		enforce bool
+		want    int
+		wantOK  bool
+	}{
+		{"default limit", nil, true, spec.DefaultMaxToolOutputBytes, true},
+		{"raised per-tool limit", &spec.ExecutionLimits{MaxToolOutputBytes: 1 << 20}, true, 1 << 20, true},
+		{"lowered per-tool limit", &spec.ExecutionLimits{MaxToolOutputBytes: 128 << 10}, true, 128 << 10, true},
+		{"no enforcer, no budget", nil, false, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g, root := enforceGraph(t, tc.limits)
+			reg := tools.NewRegistryWithRoot(g, root)
+			capture := &budgetCaptureExecutor{}
+			reg.Mock = capture
+			d := NewPolicyDispatcher(policy.NewEvaluator(g, nil), reg, policy.RunContext{})
+			if tc.enforce {
+				d = d.WithEnforcement(reg)
+			}
+			if _, err := d.Call(context.Background(), "tool.ws.read_file", map[string]any{"path": "x"}); err != nil {
+				t.Fatal(err)
+			}
+			if !capture.called || capture.budget != tc.want || capture.ok != tc.wantOK {
+				t.Fatalf("tool saw budget (%d, %v) called=%v, want (%d, %v)", capture.budget, capture.ok, capture.called, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+type budgetCaptureExecutor struct {
+	called bool
+	budget int
+	ok     bool
+}
+
+func (b *budgetCaptureExecutor) Call(ctx context.Context, _ tools.ToolCallRequest) (tools.ToolCallResponse, error) {
+	b.called = true
+	b.budget, b.ok = tools.OutputBudget(ctx)
+	return tools.ToolCallResponse{Output: map[string]any{"ok": true}}, nil
+}
+
 type bigOutputExecutor struct{}
 
 func (bigOutputExecutor) Call(_ context.Context, _ tools.ToolCallRequest) (tools.ToolCallResponse, error) {
