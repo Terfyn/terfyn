@@ -55,6 +55,12 @@ func encodeNode(b *strings.Builder, n Node) {
 		b.WriteString(v.Bind)
 		b.WriteByte('=')
 		b.WriteString(v.Agent)
+		if v.WholeDocument {
+			// Call shape is executable identity (#550): the same arg0 map is the whole
+			// document under one shape and a field of an object under the other. Only
+			// written when set, so every named/no-arg program keeps its digest.
+			b.WriteString("!doc")
+		}
 		encodeArgs(b, v.Args)
 	case *InvokeWorkflow:
 		b.WriteString("workflow ")

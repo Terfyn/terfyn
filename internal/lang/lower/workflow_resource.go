@@ -113,7 +113,7 @@ func (wl *wfResLowerer) lowerStep(st spec.WorkflowStep) execir.Node {
 	case strings.TrimSpace(st.Uses) != "":
 		return &execir.InvokeTool{Pos: st.Pos, Bind: bind, Uses: st.Uses, Args: wl.lowerWith(st.With, st.Pos)}
 	case strings.TrimSpace(st.Agent) != "":
-		return &execir.InvokeAgent{Pos: st.Pos, Bind: bind, Agent: st.Agent, Args: wl.lowerWith(st.With, st.Pos)}
+		return &execir.InvokeAgent{Pos: st.Pos, Bind: bind, Agent: st.Agent, Args: wl.lowerWith(st.With, st.Pos), WholeDocument: st.WholeDocument}
 	case strings.TrimSpace(st.Workflow) != "":
 		return &execir.InvokeWorkflow{Pos: st.Pos, Bind: bind, Workflow: st.Workflow, Args: wl.lowerWith(st.With, st.Pos)}
 	default:

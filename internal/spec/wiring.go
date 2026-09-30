@@ -2,6 +2,7 @@ package spec
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Terfyn/terfyn/internal/schema"
@@ -49,11 +50,16 @@ func workflowStepsByID(w *WorkflowSpec) map[string]WorkflowStep {
 }
 
 func checkStepWithWiring(g *ProjectGraph, wfName string, st WorkflowStep, byID map[string]WorkflowStep, inputDoc *schema.Document) []error {
-	// A synthetic (flattened control-flow) step is not an executable node: its `with`
-	// carries structural placeholder keys (e.g. a single positional agent arg is
-	// arg0, an agent input being a whole document, not named fields), and it is never
-	// executed (#305, ADR 002 §5). Argument type safety is enforced by the checker's
-	// type system; skip the per-field input-schema wiring check here.
+	// The call-shape invariant holds for every step, synthetic or not: it is what the
+	// step would execute under.
+	if errs := checkWholeDocumentShape(wfName, st); errs != nil {
+		return errs
+	}
+	// A synthetic (flattened control-flow) step is an effect-analysis
+	// over-approximation, not an executable node: its data-dependency needs are not
+	// threaded and it is never executed (#305, ADR 002 §5), so its ${steps.*} refs are
+	// not held to the executable-graph wiring rules. The checker's type system
+	// type-checks its arguments instead.
 	if st.Synthetic {
 		return nil
 	}
@@ -63,33 +69,112 @@ func checkStepWithWiring(g *ProjectGraph, wfName string, st WorkflowStep, byID m
 	consumer := consumerInputDoc(g, st)
 	var errs []error
 	for key, val := range st.With {
-		walkWiringValue(val, func(s string) {
-			errs = append(errs, checkWiringString(g, wfName, st, key, s, byID, inputDoc, consumer)...)
+		root := wiringSite{key: key, whole: isAgentPositionalWholeDocument(st, key)}
+		walkWiringValue(val, root, func(site wiringSite, s string) {
+			errs = append(errs, checkWiringString(g, wfName, st, site, s, byID, inputDoc, consumer)...)
 		})
 	}
 	return errs
 }
 
-func walkWiringValue(v any, fn func(string)) {
+// wiringSite is where one string leaf sits inside a step's with: map, i.e. which
+// part of the consumer's input document it supplies.
+type wiringSite struct {
+	// key is the with: key the leaf is under.
+	key string
+	// whole is true when key is the placeholder of a whole-document agent call
+	// (#550): with[key] is then the agent's whole input document, so the key names
+	// no input field and the consumer path starts at the document root.
+	whole bool
+	// nested is the leaf's path inside with[key]: object keys, and the decimal index
+	// of an array element (the form [schema.Document.Lookup] resolves through items).
+	nested []string
+	// elems are the positions in nested that are array-element segments.
+	elems []int
+}
+
+// child is the site one level deeper, under object key or array index seg.
+func (w wiringSite) child(seg string, elem bool) wiringSite {
+	c := w
+	c.nested = append(w.nested[:len(w.nested):len(w.nested)], seg)
+	if elem {
+		c.elems = append(w.elems[:len(w.elems):len(w.elems)], len(w.nested))
+	}
+	return c
+}
+
+// consumerPath is the consumer input-schema path the leaf supplies: the nested path
+// under the document root for a whole-document call, else under the with: key.
+func (w wiringSite) consumerPath() []string {
+	if w.whole {
+		return append([]string(nil), w.nested...)
+	}
+	return append([]string{w.key}, w.nested...)
+}
+
+// label names the supplied input location in diagnostics ("input" for the whole
+// document itself).
+func (w wiringSite) label() string {
+	p := w.consumerPath()
+	if len(p) == 0 {
+		return "input"
+	}
+	return strings.Join(p, ".")
+}
+
+// walkWiringValue calls fn for every string leaf of v with that leaf's site, keeping
+// the path inside v so each leaf is checked against the input location it actually
+// fills rather than against the whole with: entry.
+func walkWiringValue(v any, site wiringSite, fn func(wiringSite, string)) {
 	switch t := v.(type) {
 	case string:
-		fn(t)
+		fn(site, t)
 	case []any:
-		for _, e := range t {
-			walkWiringValue(e, fn)
+		for i, e := range t {
+			walkWiringValue(e, site.child(strconv.Itoa(i), true), fn)
 		}
 	case map[string]any:
-		for _, e := range t {
-			walkWiringValue(e, fn)
+		for k, e := range t {
+			walkWiringValue(e, site.child(k, false), fn)
 		}
 	}
+}
+
+// lookupConsumer resolves the consumer input type at site. An array element is typed
+// by the array's items; an array schema that declares no items accepts any element,
+// which [schema.Document.Lookup] reports as Missing, so such an element is unknown
+// (gradual) rather than undeclared. That exemption applies only when the element's
+// parent may be an array (its types are unconstrained or include array): an element
+// under a parent that cannot be an array (a closed object, a scalar) is undeclared.
+func lookupConsumer(consumer *schema.Document, site wiringSite) schema.LookupResult {
+	path := site.consumerPath()
+	res := consumer.Lookup(path)
+	if !res.Missing {
+		return res
+	}
+	off := len(path) - len(site.nested)
+	for _, e := range site.elems {
+		i := off + e
+		parent := consumer.Lookup(path[:i])
+		if parent.Missing {
+			break
+		}
+		if consumer.Lookup(path[:i+1]).Missing {
+			if len(parent.Types) == 0 || parent.Types.Has(schema.TypeArray) {
+				return schema.LookupResult{}
+			}
+			break
+		}
+	}
+	return res
 }
 
 func checkWiringString(
 	g *ProjectGraph,
 	wfName string,
 	st WorkflowStep,
-	withKey, s string,
+	site wiringSite,
+	s string,
 	byID map[string]WorkflowStep,
 	inputDoc *schema.Document,
 	consumer *schema.Document,
@@ -100,7 +185,7 @@ func checkWiringString(
 	}
 	var errs []error
 	for _, inner := range tokens {
-		errs = append(errs, checkInterpPath(g, wfName, st, withKey, inner, byID, inputDoc, consumer, whole && len(tokens) == 1)...)
+		errs = append(errs, checkInterpPath(g, wfName, st, site, inner, byID, inputDoc, consumer, whole && len(tokens) == 1)...)
 	}
 	return errs
 }
@@ -122,7 +207,8 @@ func checkInterpPath(
 	g *ProjectGraph,
 	wfName string,
 	st WorkflowStep,
-	withKey, inner string,
+	site wiringSite,
+	inner string,
 	byID map[string]WorkflowStep,
 	inputDoc *schema.Document,
 	consumer *schema.Document,
@@ -137,12 +223,12 @@ func checkInterpPath(
 	}
 	switch parts[0] {
 	case "input":
-		return checkInputPath(wfName, st, withKey, inner, parts[1:], inputDoc, consumer, wholeField)
+		return checkInputPath(wfName, st, site, inner, parts[1:], inputDoc, consumer, wholeField)
 	case "steps":
 		if len(parts) < 3 {
 			return nil
 		}
-		return checkStepsOutputPath(g, wfName, st, withKey, inner, parts, byID, consumer, wholeField)
+		return checkStepsOutputPath(g, wfName, st, site, inner, parts, byID, consumer, wholeField)
 	default:
 		return nil
 	}
@@ -151,14 +237,15 @@ func checkInterpPath(
 func checkInputPath(
 	wfName string,
 	st WorkflowStep,
-	withKey, inner string,
+	site wiringSite,
+	inner string,
 	tail []string,
 	inputDoc *schema.Document,
 	consumer *schema.Document,
 	wholeField bool,
 ) []error {
 	if inputDoc == nil {
-		return checkConsumerType(wfName, st, withKey, inner, schema.LookupResult{}, consumer, wholeField)
+		return checkConsumerType(wfName, st, site, inner, schema.LookupResult{}, consumer, wholeField)
 	}
 	got := inputDoc.Lookup(tail)
 	if got.Missing {
@@ -167,14 +254,15 @@ func checkInputPath(
 			wfName, strings.TrimSpace(st.ID), inner,
 		)}
 	}
-	return checkConsumerType(wfName, st, withKey, inner, got, consumer, wholeField)
+	return checkConsumerType(wfName, st, site, inner, got, consumer, wholeField)
 }
 
 func checkStepsOutputPath(
 	g *ProjectGraph,
 	wfName string,
 	st WorkflowStep,
-	withKey, inner string,
+	site wiringSite,
+	inner string,
 	parts []string,
 	byID map[string]WorkflowStep,
 	consumer *schema.Document,
@@ -202,25 +290,34 @@ func checkStepsOutputPath(
 			)}
 		}
 	}
-	return checkConsumerType(wfName, st, withKey, inner, prodLookup, consumer, wholeField)
+	return checkConsumerType(wfName, st, site, inner, prodLookup, consumer, wholeField)
 }
 
+// checkConsumerType checks one interpolation against the consumer input type at the
+// location its string fills (site). For a whole-document agent call that location
+// is relative to the input document root (#550), so `Reviewer(v)` checks v against
+// the whole input and `Reviewer({repo: v})` checks v against the repo field.
 func checkConsumerType(
 	wfName string,
 	st WorkflowStep,
-	withKey, inner string,
+	site wiringSite,
+	inner string,
 	prod schema.LookupResult,
 	consumer *schema.Document,
 	wholeField bool,
 ) []error {
-	if consumer == nil || strings.TrimSpace(withKey) == "" {
+	if consumer == nil || (!site.whole && strings.TrimSpace(site.key) == "") {
 		return nil
 	}
-	cons := consumer.Lookup([]string{withKey})
+	cons := lookupConsumer(consumer, site)
 	if cons.Missing {
+		what := "with"
+		if site.whole {
+			what = "input field"
+		}
 		return []error{st.Pos.Errorf(
-			"workflow %s step %q: with %q is not declared in %s input schema",
-			wfName, strings.TrimSpace(st.ID), withKey, consumerSchemaName(st),
+			"workflow %s step %q: %s %q is not declared in %s input schema",
+			wfName, strings.TrimSpace(st.ID), what, site.label(), consumerSchemaName(st),
 		)}
 	}
 	if !cons.Known {
@@ -242,8 +339,38 @@ func checkConsumerType(
 	}
 	return []error{st.Pos.Errorf(
 		"workflow %s step %q: ${%s} (%s) does not match %s input %q (%s)",
-		wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), withKey, cons.Types,
+		wfName, strings.TrimSpace(st.ID), inner, srcType, consumerSchemaName(st), site.label(), cons.Types,
 	)}
+}
+
+// isAgentPositionalWholeDocument reports whether withKey is the single
+// positional argument of an agent step, i.e. the agent's whole input document
+// (#550). It consumes the explicit [WorkflowStep.WholeDocument] call-shape bit
+// that lowering set from the source call; it never infers the shape from the key
+// name, so a named call whose field is literally arg0 stays a field lookup, and a
+// multi-argument positional call (WholeDocument false) is never treated as one.
+func isAgentPositionalWholeDocument(st WorkflowStep, withKey string) bool {
+	return st.WholeDocument && strings.TrimSpace(st.Agent) != "" && withKey == WholeDocumentArgKey
+}
+
+// checkWholeDocumentShape enforces the [WorkflowStep.WholeDocument] representation
+// invariant on every step, synthetic or not, so a snapshot that carries the bit on
+// a step that cannot honor it fails loudly instead of executing under a different
+// ABI than it validated under: it must be an agent step whose with: is exactly
+// the single placeholder entry.
+func checkWholeDocumentShape(wfName string, st WorkflowStep) []error {
+	if !st.WholeDocument {
+		return nil
+	}
+	if strings.TrimSpace(st.Agent) == "" {
+		return []error{st.Pos.Errorf(
+			"workflow %s step %q: wholeDocument is only valid on an agent step", wfName, strings.TrimSpace(st.ID))}
+	}
+	if _, ok := st.With[WholeDocumentArgKey]; !ok || len(st.With) != 1 {
+		return []error{st.Pos.Errorf(
+			"workflow %s step %q: wholeDocument requires with: to be exactly one positional argument", wfName, strings.TrimSpace(st.ID))}
+	}
+	return nil
 }
 
 func producerOutputDoc(g *ProjectGraph, st WorkflowStep) *schema.Document {
