@@ -19,7 +19,10 @@ type StepResult struct {
 
 // Context holds values for ${input.*} and ${steps.*} interpolation (§13.1).
 type Context struct {
-	Input         map[string]any
+	// Input is the workflow's input document. The root run's document is always an
+	// object; a single-parameter subworkflow may carry any JSON value (string,
+	// number, bool, array, null) as its whole document.
+	Input         any
 	Steps         map[string]StepResult
 	PendingHitl   *PendingHitlState  `json:"pendingHitl,omitempty"`
 	OtelInterrupt *telemetry.SpanRef `json:"otelInterrupt,omitempty"`

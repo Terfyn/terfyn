@@ -19,7 +19,7 @@ func TestTest_wfFixture_passes(t *testing.T) {
 		t.Fatalf("err=%v out=%s", err, out.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, "happy-path") || !strings.Contains(s, "missing-topic") {
+	if !strings.Contains(s, "happy-path") || !strings.Contains(s, "missing-topic-is-null") {
 		t.Fatalf("cases:\n%s", s)
 	}
 	if !strings.Contains(s, "2 passed, 0 failed") {

@@ -76,24 +76,27 @@ type nodeWire struct {
 	Bind  string `json:"bind,omitempty"`
 	Uses  string `json:"uses,omitempty"`
 	Agent string `json:"agent,omitempty"`
-	// WholeDocument is InvokeAgent.WholeDocument (#550); omitted when false so
+	// WholeDocument is InvokeAgent.WholeDocument (#550) or
+	// InvokeWorkflow.WholeDocument (#552), by node kind; omitted when false so
 	// every pre-existing serialized program is unchanged.
-	WholeDocument bool               `json:"wholeDocument,omitempty"`
-	Workflow      string             `json:"workflow,omitempty"`
-	Args          map[string]valWire `json:"args,omitempty"`
-	Value         *valWire           `json:"value,omitempty"`
-	Cond          *exprWire          `json:"cond,omitempty"`
-	Then          []nodeWire         `json:"then,omitempty"`
-	Else          []nodeWire         `json:"else,omitempty"`
-	Branches      []forkBranchWire   `json:"branches,omitempty"`
-	Var           string             `json:"var,omitempty"`
-	Parallel      bool               `json:"parallel,omitempty"`
-	Collection    *valWire           `json:"collection,omitempty"`
-	Limit         int                `json:"limit,omitempty"`
-	Body          []nodeWire         `json:"body,omitempty"`
-	Nodes         []graphNodeWire    `json:"nodes,omitempty"`
-	Desc          string             `json:"desc,omitempty"`
-	RedactKeys    []string           `json:"redactKeys,omitempty"`
+	WholeDocument bool `json:"wholeDocument,omitempty"`
+	// ProjectValue is InvokeWorkflow.ProjectValue (#551); omitted when false.
+	ProjectValue bool               `json:"projectValue,omitempty"`
+	Workflow     string             `json:"workflow,omitempty"`
+	Args         map[string]valWire `json:"args,omitempty"`
+	Value        *valWire           `json:"value,omitempty"`
+	Cond         *exprWire          `json:"cond,omitempty"`
+	Then         []nodeWire         `json:"then,omitempty"`
+	Else         []nodeWire         `json:"else,omitempty"`
+	Branches     []forkBranchWire   `json:"branches,omitempty"`
+	Var          string             `json:"var,omitempty"`
+	Parallel     bool               `json:"parallel,omitempty"`
+	Collection   *valWire           `json:"collection,omitempty"`
+	Limit        int                `json:"limit,omitempty"`
+	Body         []nodeWire         `json:"body,omitempty"`
+	Nodes        []graphNodeWire    `json:"nodes,omitempty"`
+	Desc         string             `json:"desc,omitempty"`
+	RedactKeys   []string           `json:"redactKeys,omitempty"`
 }
 
 type forkBranchWire struct {
@@ -166,7 +169,7 @@ func wireNode(n Node) (nodeWire, error) {
 		if err != nil {
 			return nodeWire{}, err
 		}
-		return nodeWire{Kind: "invokeWorkflow", Bind: v.Bind, Workflow: v.Workflow, Args: args}, nil
+		return nodeWire{Kind: "invokeWorkflow", Bind: v.Bind, Workflow: v.Workflow, Args: args, WholeDocument: v.WholeDocument, ProjectValue: v.ProjectValue}, nil
 	case *Let:
 		vw, err := wireVal(v.Value)
 		if err != nil {
@@ -403,7 +406,7 @@ func decodeNode(n nodeWire) (Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &InvokeWorkflow{Bind: n.Bind, Workflow: n.Workflow, Args: args}, nil
+		return &InvokeWorkflow{Bind: n.Bind, Workflow: n.Workflow, Args: args, WholeDocument: n.WholeDocument, ProjectValue: n.ProjectValue}, nil
 	case "let":
 		val, err := decodeValPtr(n.Value)
 		if err != nil {

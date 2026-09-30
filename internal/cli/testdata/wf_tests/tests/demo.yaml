@@ -8,6 +8,10 @@ cases:
       outputContains:
         - acme-api
         - echoed
-  - name: missing-topic
+  # Outputs are fail-open (docs/LANGUAGE.md "Subworkflow calls"): a missing input
+  # field evaluates to null and the run succeeds, as it does in a call argument.
+  - name: missing-topic-is-null
     input: {}
-    expectError: true
+    expect:
+      outputContains:
+        - '"topic":null'

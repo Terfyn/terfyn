@@ -72,7 +72,8 @@ func TestExecIRResume_IntegersAboveTwo53SurviveCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ictx.Input["a"] != int64(9007199254740992) || ictx.Input["b"] != int64(9007199254740993) {
+	in, _ := ictx.Input.(map[string]any)
+	if in["a"] != int64(9007199254740992) || in["b"] != int64(9007199254740993) {
 		t.Fatalf("checkpoint input not exact: %#v", ictx.Input)
 	}
 	prep := ictx.Steps["prep"].Output.(map[string]any)["echo"].(map[string]any)
@@ -126,10 +127,15 @@ const twoP60 = float64(1 << 60)
 // exactArmProgram branches on v == 1152921504606846976 (the int literal): "exact"
 // when the value survived, "CHANGED" when a checkpoint round trip rewrote it.
 func exactArmProgram(v execir.Value, arm func(string) execir.Node) execir.Node {
+	return exactArmBranch(v, func(a string) []execir.Node { return []execir.Node{arm(a)} })
+}
+
+// exactArmBranch is exactArmProgram with a multi-node body per arm.
+func exactArmBranch(v execir.Value, arm func(string) []execir.Node) execir.Node {
 	return &execir.Branch{
 		Cond: execir.BinOp{Op: "==", X: execir.Leaf{V: v}, Y: execir.Leaf{V: execir.Lit{V: int64(1152921504606846976)}}},
-		Then: []execir.Node{arm("exact")},
-		Else: []execir.Node{arm("CHANGED")},
+		Then: arm("exact"),
+		Else: arm("CHANGED"),
 	}
 }
 
@@ -206,8 +212,16 @@ func TestExecIRResume_FloatLiteralSubworkflowArgSurvivesNestedGate(t *testing.T)
 				"inner": {Workflow: "inner", Params: []string{"input"}, Body: []execir.Node{
 					&execir.InvokeTool{Bind: "prep", Uses: "tool.helper.echo", Args: map[string]execir.Value{"topic": bigIntRef("input", "topic")}},
 					&execir.InvokeTool{Bind: "gatestep", Uses: gateUses, Args: map[string]execir.Value{"body": execir.Lit{V: "x"}}},
-					exactArmProgram(bigIntRef("input", "topic"), func(arm string) execir.Node {
-						return &execir.InvokeTool{Bind: "after", Uses: "tool.after.echo", Args: map[string]execir.Value{"arm": execir.Lit{V: arm}}}
+					exactArmBranch(bigIntRef("input", "topic"), func(arm string) []execir.Node {
+						return []execir.Node{
+							&execir.InvokeTool{Bind: "after", Uses: "tool.after.echo", Args: map[string]execir.Value{"arm": execir.Lit{V: arm}}},
+							// The Return LowerWorkflowResource derives from the inner output.value above.
+							&execir.Return{Value: execir.Object{Fields: []execir.Field{
+								{Key: "arm", Val: bigIntRef("after", "echo", "arm")},
+								{Key: "prep", Val: bigIntRef("prep", "echo", "topic")},
+								{Key: "topic", Val: bigIntRef("input", "topic")},
+							}}},
+						}
 					}),
 				}},
 			}
@@ -240,8 +254,81 @@ func TestExecIRResume_FloatLiteralSubworkflowArgSurvivesNestedGate(t *testing.T)
 	if payload.Nested == nil {
 		t.Fatalf("gated checkpoint has no nested frame: %s", cpJSON)
 	}
-	if got := payload.Nested.Input["topic"]; got != int64(1152921504606846976) {
+	nestedIn, _ := payload.Nested.Input.(map[string]any)
+	if got := nestedIn["topic"]; got != int64(1152921504606846976) {
 		t.Fatalf("persisted nested.input.topic = %#v (%T), want int64(1152921504606846976)", got, got)
+	}
+	if strings.Contains(cpJSON, "1152921504606847000") {
+		t.Fatalf("checkpoint holds encoding/json's respelling of the raw float: %s", cpJSON)
+	}
+}
+
+// TestExecIRResume_FloatLiteralWholeDocumentArgSurvivesNestedGate is the same S7 regression
+// for a whole-document call (#552): the callee's input document is the argument's VALUE — here
+// the bare float literal 1152921504606846976.0, not an object wrapping it. It is canonicalized
+// with the argument map before the document is taken from it, so the child's interpolation
+// input, its interpreter input and the persisted NestedRunState.Input (a scalar) are the same
+// int64 live and after a resume.
+func TestExecIRResume_FloatLiteralWholeDocumentArgSurvivesNestedGate(t *testing.T) {
+	t.Parallel()
+	graph := func() *spec.ProjectGraph {
+		g := nestedSubworkflowGraph()
+		g.Tools["after"] = &spec.ToolResource{APIVersion: spec.APIVersionV0, Kind: spec.KindTool, Metadata: spec.Metadata{Name: "after"}, Spec: spec.ToolSpec{Type: "native", Safety: &spec.ToolSafety{SideEffects: spec.BoolPtr(false)}}}
+		return g
+	}
+	progs := func(gateUses string) func() map[string]*execir.Program {
+		return func() map[string]*execir.Program {
+			return map[string]*execir.Program{
+				"outer": {Workflow: "outer", Params: []string{"input"}, Body: []execir.Node{
+					&execir.InvokeWorkflow{Bind: "sub", Workflow: "inner", WholeDocument: true, Args: map[string]execir.Value{"topic": execir.Lit{V: twoP60}}},
+					&execir.Return{Value: bigIntRef("sub")},
+				}},
+				"inner": {Workflow: "inner", Params: []string{"topic"}, Body: []execir.Node{
+					&execir.InvokeTool{Bind: "prep", Uses: "tool.helper.echo", Args: map[string]execir.Value{"topic": bigIntRef("topic")}},
+					&execir.InvokeTool{Bind: "gatestep", Uses: gateUses, Args: map[string]execir.Value{"body": execir.Lit{V: "x"}}},
+					exactArmBranch(bigIntRef("topic"), func(arm string) []execir.Node {
+						return []execir.Node{
+							&execir.InvokeTool{Bind: "after", Uses: "tool.after.echo", Args: map[string]execir.Value{"arm": execir.Lit{V: arm}}},
+							&execir.Return{Value: execir.Object{Fields: []execir.Field{
+								{Key: "arm", Val: bigIntRef("after", "echo", "arm")},
+								{Key: "topic", Val: bigIntRef("topic")},
+							}}},
+						}
+					}),
+				}},
+			}
+		}
+	}
+
+	ctx := context.Background()
+	ex, _, runID, started := newResumeExecutor(t, graph(), "outer")
+	ex.Executables = progs("tool.helper.echo")()
+	if err := ex.Run(ctx, RunInput{RunID: runID, WorkflowName: "outer", Env: "dev", StartedAt: started, Input: map[string]any{"topic": "hi"}}); err != nil {
+		t.Fatalf("ungated run: %v", err)
+	}
+	run, _ := ex.Store.GetRun(ctx, runID)
+	ungated := run.OutputJSON
+
+	auto, gated, cpJSON := runGatedVariants(t, graph, "outer", progs("tool.publisher.echo"))
+	const want = `{"value":{"arm":"exact","topic":1152921504606846976}}`
+	for name, got := range map[string]string{"ungated": ungated, "auto-approved": auto, "gated+resumed": gated} {
+		if got != want {
+			t.Errorf("%s output = %s, want %s", name, got, want)
+		}
+	}
+
+	var payload checkpointPayload
+	if err := jsonnum.Unmarshal([]byte(cpJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Nested == nil {
+		t.Fatalf("gated checkpoint has no nested frame: %s", cpJSON)
+	}
+	if got := payload.Nested.Input; got != int64(1152921504606846976) {
+		t.Fatalf("persisted whole-document nested.input = %#v (%T), want int64(1152921504606846976)", got, got)
+	}
+	if payload.Nested.InputParam != "topic" {
+		t.Fatalf("persisted nested.inputParam = %q, want topic", payload.Nested.InputParam)
 	}
 	if strings.Contains(cpJSON, "1152921504606847000") {
 		t.Fatalf("checkpoint holds encoding/json's respelling of the raw float: %s", cpJSON)
@@ -255,9 +342,9 @@ func TestExecIRResume_FloatLiteralSubworkflowArgSurvivesNestedGate(t *testing.T)
 func TestExecIRResume_FloatLiteralApprovalPayloadSurvivesGate(t *testing.T) {
 	t.Parallel()
 	graph := func() *spec.ProjectGraph {
-		g := approvalGraph()
-		g.Workflows["appr"].Spec.Output = &spec.WorkflowOutput{Value: map[string]any{"value": "${steps.gate.output}"}}
-		return g
+		// The program's two object-literal Returns are the output document itself
+		// (lower.WorkflowReturnShape), so no resource output.value is needed.
+		return approvalGraph()
 	}
 	progs := func() map[string]*execir.Program {
 		return map[string]*execir.Program{
@@ -272,7 +359,7 @@ func TestExecIRResume_FloatLiteralApprovalPayloadSurvivesGate(t *testing.T) {
 		}
 	}
 	auto, gated, cpJSON := runGatedVariants(t, graph, "appr", progs)
-	const want = `{"value":{"arm":"exact","n":1152921504606846976}}`
+	const want = `{"arm":"exact","n":1152921504606846976}`
 	if auto != want || gated != want {
 		t.Fatalf("auto-approved = %s, gated+resumed = %s, want both %s", auto, gated, want)
 	}
@@ -291,9 +378,8 @@ func TestExecIRResume_FloatLiteralApprovalPayloadSurvivesGate(t *testing.T) {
 func TestExecIRResume_FloatLiteralToolGateArgsSurviveGate(t *testing.T) {
 	t.Parallel()
 	graph := func() *spec.ProjectGraph {
-		g := gatedTwoStepGraph()
-		g.Workflows["pub"].Spec.Output = &spec.WorkflowOutput{Value: map[string]any{"value": "${steps.pub.output}"}}
-		return g
+		// As above: the two object-literal Returns are the output document.
+		return gatedTwoStepGraph()
 	}
 	progs := func() map[string]*execir.Program {
 		return map[string]*execir.Program{
@@ -308,7 +394,7 @@ func TestExecIRResume_FloatLiteralToolGateArgsSurviveGate(t *testing.T) {
 		}
 	}
 	auto, gated, cpJSON := runGatedVariants(t, graph, "pub", progs)
-	const want = `{"value":{"arm":"exact","n":1152921504606846976}}`
+	const want = `{"arm":"exact","n":1152921504606846976}`
 	if auto != want || gated != want {
 		t.Fatalf("auto-approved = %s, gated+resumed = %s, want both %s", auto, gated, want)
 	}
@@ -339,8 +425,9 @@ func TestExecIRResume_RawRunInputAndSubworkflowOutputAreCanonical(t *testing.T) 
 				Output: &spec.WorkflowOutput{Value: map[string]any{"lit": twoP60}},
 			},
 		}
-		// A multi-key output is built from the interpolation context (buildWorkflowOutput),
-		// which a resume hydrates from the checkpoint.
+		// A multi-key output is the program's object-literal Return (below), whose refs
+		// resolve against the input and the sub step's memoized output, which a resume
+		// hydrates from the checkpoint.
 		g.Workflows["pub"].Spec.Output = &spec.WorkflowOutput{Value: map[string]any{
 			"topic": "${input.topic}", "lit": "${steps.sub.output.lit}",
 		}}
@@ -351,9 +438,14 @@ func TestExecIRResume_RawRunInputAndSubworkflowOutputAreCanonical(t *testing.T) 
 			"pub": {Workflow: "pub", Params: []string{"input"}, Body: []execir.Node{
 				&execir.InvokeWorkflow{Bind: "sub", Workflow: "lit"},
 				&execir.InvokeTool{Bind: "pub", Uses: "tool.publisher.echo", Args: map[string]execir.Value{"body": execir.Lit{V: "x"}}},
+				&execir.Return{Value: execir.Object{Fields: []execir.Field{
+					{Key: "lit", Val: bigIntRef("sub", "lit")}, {Key: "topic", Val: bigIntRef("input", "topic")},
+				}}},
 			}},
 			"lit": {Workflow: "lit", Params: []string{"input"}, Body: []execir.Node{
 				&execir.InvokeTool{Bind: "prep", Uses: "tool.helper.echo", Args: map[string]execir.Value{"x": execir.Lit{V: "1"}}},
+				// output.value {lit: 1152921504606846976.0}: a raw float64 program literal.
+				&execir.Return{Value: execir.Object{Fields: []execir.Field{{Key: "lit", Val: execir.Lit{V: twoP60}}}}},
 			}},
 		}
 	}

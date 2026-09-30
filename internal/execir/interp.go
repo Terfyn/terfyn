@@ -63,9 +63,10 @@ type ApprovalInfo struct {
 //   - Loop is the enclosing loop iteration indices (outermost first), so the same
 //     static node executed on different iterations has distinct identity. It is
 //     empty on the YAML path (no loops) and non-empty only under `.agent` loops.
-//   - WholeDocument is the call shape of an agent invocation (see
-//     [InvokeAgent.WholeDocument]): true when the single "arg0" argument is the
-//     agent's whole input document rather than a field of an input object. It is
+//   - WholeDocument is the call shape of an agent or subworkflow invocation (see
+//     [InvokeAgent.WholeDocument] and [InvokeWorkflow.WholeDocument]): true when
+//     the single argument is the callee's whole input document rather than a
+//     field of an input object. It is
 //     the interpreter's carrier of the node's explicit shape bit to the Invoker,
 //     NOT part of the site's identity — [CallKey] ignores it (a node's shape is
 //     fixed by its static address).
@@ -133,11 +134,11 @@ type RunState struct {
 	SuspendKey string         `json:"-"`
 }
 
-// Run executes prog with the given workflow input and returns the value set by a
+// Run executes prog with the given workflow input document and returns the value set by a
 // Return node (nil if the program returns nothing). It discards durable state; a
 // suspend (an [Invoker] returning [ErrSuspend]) halts cleanly with a nil-ish
 // output. Use [Interp.RunResumable] for the durable path.
-func (in *Interp) Run(ctx context.Context, prog *Program, input map[string]any) (any, error) {
+func (in *Interp) Run(ctx context.Context, prog *Program, input any) (any, error) {
 	out, _, err := in.RunResumable(ctx, prog, input, nil)
 	return out, err
 }
@@ -145,7 +146,7 @@ func (in *Interp) Run(ctx context.Context, prog *Program, input map[string]any) 
 // RunResumable executes prog, seeding completed-leaf memo and control records
 // from seed (nil for a fresh run), and returns the durable [RunState] — whether
 // the run completed or suspended (issue #258).
-func (in *Interp) RunResumable(ctx context.Context, prog *Program, input map[string]any, seed *RunState) (any, *RunState, error) {
+func (in *Interp) RunResumable(ctx context.Context, prog *Program, input any, seed *RunState) (any, *RunState, error) {
 	if in == nil || in.Invoker == nil {
 		return nil, nil, fmt.Errorf("execir: nil interpreter or invoker")
 	}
@@ -178,8 +179,10 @@ func (in *Interp) RunResumable(ctx context.Context, prog *Program, input map[str
 	// interpreter is re-evaluated identically from the pinned program on replay,
 	// and one that reaches durable state as a leaf argument (a subworkflow's
 	// input, a gated call's or approval's With) is canonicalized by the engine
-	// Invoker before it is persisted.
-	cinput, err := jsonnum.CanonicalMap(input)
+	// Invoker before it is persisted. The input is the workflow's whole input
+	// document — any JSON value for a single-parameter callee called with a whole
+	// document (#552), not only an object — so it is canonicalized as a value.
+	cinput, err := jsonnum.Canonical(input)
 	if err != nil {
 		return nil, nil, fmt.Errorf("execir: input: %w", err)
 	}
@@ -288,15 +291,22 @@ func extend(base []int, x int) []int {
 // parameter names the whole workflow input, so `input.repo` (or `pr.repo` for a
 // parameter named `pr`) resolves against the entire input document; multiple
 // parameters each name one top-level field of the input.
-func paramScope(params []string, input map[string]any) map[string]any {
+//
+// The input is a JSON document, not necessarily an object: a single-parameter
+// workflow may receive a string, number, bool, array, or null, and the parameter
+// is bound to exactly that value. Only the multi-parameter form requires an
+// object, since it selects fields by name; a non-object document leaves those
+// parameters unbound (nil).
+func paramScope(params []string, input any) map[string]any {
 	scope := make(map[string]any, len(params)+1)
 	switch {
 	case len(params) == 1:
 		scope[params[0]] = input
 	default:
+		fields, _ := input.(map[string]any)
 		for _, p := range params {
-			if input != nil {
-				scope[p] = input[p]
+			if fields != nil {
+				scope[p] = fields[p]
 			}
 		}
 	}
@@ -371,10 +381,25 @@ func (r *runner) exec(scope map[string]any, n Node, path, loop []int) error {
 			return r.in.Invoker.InvokeAgent(r.ctx, site, v.Agent, a)
 		})
 	case *InvokeWorkflow:
-		site := CallSite{Bind: v.Bind, Path: path, Loop: loop}
-		return r.invoke(scope, v.Bind, site, v.Args, func(a map[string]any) (any, error) {
+		site := CallSite{Bind: v.Bind, Path: path, Loop: loop, WholeDocument: v.WholeDocument}
+		bind := v.Bind
+		if err := r.invoke(scope, bind, site, v.Args, func(a map[string]any) (any, error) {
 			return r.in.Invoker.InvokeWorkflow(r.ctx, site, v.Workflow, a)
-		})
+		}); err != nil {
+			return err
+		}
+		if v.ProjectValue && bind != "" {
+			// The invoker's result (memoized, persisted) is the callee's output
+			// document; a `.agent` caller of a single-value-envelope callee binds its
+			// `value` field — the callee's return value (#551). Applied after memo
+			// replay too, so a resumed run binds exactly what a fresh one does.
+			projected, err := projectValueField(v.Workflow, scope[bind])
+			if err != nil {
+				return err
+			}
+			scope[bind] = projected
+		}
+		return nil
 	case *Let:
 		val, err := evalValue(scope, v.Value)
 		if err != nil {
@@ -457,6 +482,22 @@ func (r *runner) invoke(scope map[string]any, bind string, site CallSite, args m
 		scope[bind] = res
 	}
 	return nil
+}
+
+// projectValueField returns the `value` field of a subworkflow's output document
+// — the callee's return value under the single-value envelope — for an
+// [InvokeWorkflow] with ProjectValue set. The output document of a completed
+// subworkflow is always an object; anything else means the program and the
+// callee disagree about the envelope, which is refused rather than bound as nil.
+func projectValueField(workflow string, doc any) (any, error) {
+	switch m := doc.(type) {
+	case map[string]any:
+		return m["value"], nil
+	case nil:
+		return nil, fmt.Errorf("execir: subworkflow %q returned no output document to project a value from", workflow)
+	default:
+		return nil, fmt.Errorf("execir: subworkflow %q output is %T, not an output document with a value field", workflow, doc)
+	}
 }
 
 func (r *runner) execBranch(scope map[string]any, b *Branch, path, loop []int) error {

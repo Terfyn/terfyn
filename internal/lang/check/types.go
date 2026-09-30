@@ -197,9 +197,16 @@ func (t typeRef) child(field string) (typeRef, schema.LookupResult) {
 // callee's real parameter namespace are the same map, and "arg1" is a legal
 // parameter name) — see applyRebinds for why grouping them lets the rewrite
 // build a fresh map instead.
+//
+// wholeDocument records the call's shape for the EXECUTION IR only (#552): the
+// call passes exactly one argument and it binds the callee's one declared
+// parameter, so that argument's value is the callee's whole input document
+// ([execir.InvokeWorkflow.WholeDocument]). The resource projection keeps its
+// with: map unchanged.
 type rebind struct {
-	pos     lang.Pos
-	renames map[string]string
+	pos           lang.Pos
+	renames       map[string]string
+	wholeDocument bool
 }
 
 // checkTypes type-checks agent invocation arguments and value flow between
@@ -766,8 +773,15 @@ func (wc *wfChecker) checkWorkflowArgs(name string, wi workflowTypeInfo, c *lang
 			})
 		}
 	}
-	if len(renames) > 0 {
-		wc.rebinds = append(wc.rebinds, rebind{pos: c.Callee.Pos, renames: renames})
+	// A single-parameter workflow binds its parameter to the WHOLE input document
+	// (paramScope), so a call that supplies exactly that one parameter — by
+	// position or by its name — passes the argument itself as the document, not an
+	// object wrapping it (#552). Decided here, where the callee's declared
+	// parameters are known, and carried on the execution IR as data.
+	whole := len(wi.ParamOrder) == 1 && len(c.Args) == 1 &&
+		(c.Args[0].Name == nil || c.Args[0].Name.Name == wi.ParamOrder[0])
+	if len(renames) > 0 || whole {
+		wc.rebinds = append(wc.rebinds, rebind{pos: c.Callee.Pos, renames: renames, wholeDocument: whole})
 	}
 	return diags
 }

@@ -46,7 +46,7 @@ type engineInvoker struct {
 	runStartedAt time.Time
 
 	mu   sync.Mutex
-	ictx Context // Input + accumulated Steps, for buildWorkflowOutput after the run
+	ictx Context // Input + accumulated Steps: ${...} interpolation and the checkpoint/suspend snapshot
 	// pending and nested are the ONE presented suspension cause this run cycle: a
 	// direct gate (first-wins) or a suspended subworkflow, which preempts a direct
 	// gate because its frame carries committed work (#275). At most one is set.
@@ -63,8 +63,11 @@ type nestedSuspension struct {
 	key    string
 	stepID string // the parent's workflow: step id (NestedRunState.StepID anchor)
 	callee string
-	ictx   Context
-	state  *execir.RunState
+	// inputParam is the callee's single parameter name for a whole-document call
+	// (NestedRunState.InputParam, display redaction only); "" otherwise.
+	inputParam string
+	ictx       Context
+	state      *execir.RunState
 	// child is THIS callee's own suspended subworkflow, when the gate lives another
 	// level deeper (outer→mid→inner, gate in inner): mid's frame carries inner's
 	// frame so resume can seed it instead of re-running inner fresh (issue #380).
@@ -205,35 +208,44 @@ func (e *Executor) runViaExecIR(ctx context.Context, in RunInput, wf *spec.Workf
 		return e.suspendExecIR(ctx, in, wf, inv, runState, cost.get())
 	}
 	ictx := inv.snapshotIctx()
-	out, err := e.execIROutput(wf, returnValue, ictx)
+	out, err := execIROutput(prog, wf, returnValue)
 	if err != nil {
 		return e.failRun(ctx, in, err, cost.get())
 	}
 	return e.finishRunWithOutput(ctx, in, wf, ictx, cost.get(), out)
 }
 
-// execIROutput builds the workflow output on the execir path (#259). For a
-// control-flow workflow the flattened resource output.value references only the
-// last-lowered arm, so it cannot address the taken arm's result; the interpreter's
-// Return value is the correct output. The `.agent` convention is a single
-// `{value: <token>}` output, which becomes `{value: <return value>}`; a multi-key
-// YAML output is built by buildWorkflowOutput (its step ids align with the ictx),
-// preserving DAG parity for straight-line/YAML runs.
-func (e *Executor) execIROutput(wf *spec.WorkflowResource, returnValue any, ictx Context) (map[string]any, error) {
-	if isSingleValueOutput(wf) {
+// execIROutput builds a workflow's output document from the interpreter's Return
+// value — the ONE output path for a root run and a nested subworkflow alike
+// (#551, #259). The flattened resource output.value is never interpolated: it
+// references only the last-lowered arm of a control-flow workflow and the inert
+// resource-model tokens of an identity return, so it cannot describe what the
+// program returned. How the Return value maps onto the document is
+// [lower.WorkflowReturnShape]: {} for a program with no Return, the returned
+// object itself for object-literal returns, and {value: <return>} for the
+// single-value envelope. A YAML workflow lowers output.value to that same trailing
+// Return (LowerWorkflowResource), so its output is the evaluated output.value.
+func execIROutput(prog *execir.Program, wf *spec.WorkflowResource, returnValue any) (map[string]any, error) {
+	switch lower.WorkflowReturnShape(prog, wf) {
+	case lower.ReturnNone:
+		return map[string]any{}, nil
+	case lower.ReturnDocument:
+		switch m := returnValue.(type) {
+		case map[string]any:
+			if m == nil {
+				return map[string]any{}, nil
+			}
+			return m, nil
+		case nil:
+			// Every Return is an object literal, but none fired (a branch fell off
+			// the end without returning): the program returned nothing.
+			return map[string]any{}, nil
+		default:
+			return nil, fmt.Errorf("engine: workflow output must be an object, got %T", returnValue)
+		}
+	default:
 		return map[string]any{"value": returnValue}, nil
 	}
-	return buildWorkflowOutput(wf, ictx)
-}
-
-// isSingleValueOutput reports the `.agent`-return convention: output.value is a
-// single `value:` key (see internal/lang/lower workflow.go lowerBody).
-func isSingleValueOutput(wf *spec.WorkflowResource) bool {
-	if wf == nil || wf.Spec.Output == nil || len(wf.Spec.Output.Value) != 1 {
-		return false
-	}
-	_, ok := wf.Spec.Output.Value["value"]
-	return ok
 }
 
 func newEngineInvoker(e *Executor, in RunInput, wf *spec.WorkflowResource, wfPol policy.PolicyEvaluator, runHandle *telemetry.RunHandle, cost *liveCost, runStartedAt time.Time) *engineInvoker {
@@ -453,16 +465,23 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	if depth > maxDepth {
 		return nil, fmt.Errorf("engine: step %q: workflow nesting depth %d exceeds maxWorkflowNesting %d", site.Bind, depth, maxDepth)
 	}
-	// Canonicalize at the frame boundary (S7): args become the child's
-	// interpolation input, its interpreter input, and — if the child suspends — the
-	// persisted NestedRunState.Input that a resume feeds back as its input. Only
-	// the canonical fixed point is the same Go value in all three; a raw float
-	// literal past 2^53 would be exact live and respelled after resume. An argument
-	// with no JSON encoding (or nested past jsonnum.MaxDepth) fails the call.
+	// Canonicalize at the frame boundary (S7): the arguments become the child's
+	// input document — its interpolation input, its interpreter input, and, if the
+	// child suspends, the persisted NestedRunState.Input that a resume feeds back as
+	// its input. Only the canonical fixed point is the same Go value in all three; a
+	// raw float literal past 2^53 would be exact live and respelled after resume.
+	// The argument map is canonicalized BEFORE the document is taken from it, so a
+	// whole-document call's value (any JSON value, not only an object) is the
+	// canonical subtree too, and the audit row below redacts the same value. An
+	// argument with no JSON encoding (or nested past jsonnum.MaxDepth) fails the call.
 	if args, err = jsonnum.CanonicalMap(args); err != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q input: %w", site.Bind, workflow, err)
 	}
-	if err := a.e.validateWorkflowInputSchema(callee, args); err != nil {
+	childInput, err := workflowInputDocument(site, workflow, args)
+	if err != nil {
+		return nil, fmt.Errorf("engine: step %q: %w", site.Bind, err)
+	}
+	if err := a.e.validateWorkflowInputSchema(callee, childInput); err != nil {
 		return nil, fmt.Errorf("engine: step %q subworkflow %q input: %w", site.Bind, workflow, err)
 	}
 
@@ -470,7 +489,11 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	// on completion below), matching the DAG's per-step envelope so a subworkflow
 	// call is addressable in run_steps like any other step.
 	wfQID := a.e.qualID(site.Bind)
-	wfInJSON := a.redactStepJSON(args)
+	// The audit row records the document the callee actually receives (validated
+	// above and bound by the child run), not the call's argument map (#552) — but
+	// redacted while the parameter name still marks it sensitive (#408). Every row
+	// variant below (running, succeeded, failed, interrupted) reuses wfInJSON.
+	wfInJSON := a.workflowInputAuditJSON(site, args, childInput)
 	wfStarted := a.e.now()
 	_ = a.e.Store.UpsertRunStep(ctx, state.RunStep{RunID: a.in.RunID, StepID: wfQID, Status: "running", StartedAt: &wfStarted, InputJSON: string(wfInJSON)})
 
@@ -541,13 +564,13 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	}
 
 	childInv := newEngineInvoker(&child, childIn, callee, wfPol, a.runHandle, a.cost, a.runStartedAt)
-	childInv.ictx = Context{Input: args, Steps: map[string]StepResult{}}
+	childInv.ictx = Context{Input: childInput, Steps: map[string]StepResult{}}
 
 	var childSeed *execir.RunState
 	if ns := a.claimNestedSeed(key); ns != nil && strings.TrimSpace(ns.Workflow) == workflow {
 		in := ns.Input
 		if in == nil {
-			in = args
+			in = childInput
 		}
 		steps := ns.Steps
 		if steps == nil {
@@ -564,7 +587,10 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	}
 
 	childInterp := &execir.Interp{Invoker: childInv, MaxConcurrency: a.in.MaxConcurrentSteps}
-	_, childState, rerr := childInterp.RunResumable(ctx, childProg, childInv.ictx.Input, childSeed)
+	// Keep the interpreter return value: the output is built from it by the same
+	// execIROutput the root run uses, never from the flattened resource projection,
+	// which is inert for execir control flow and identity returns (#551).
+	returnValue, childState, rerr := childInterp.RunResumable(ctx, childProg, childInv.ictx.Input, childSeed)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -576,11 +602,12 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 		// the single nested slot — dropping its frame would re-run its committed
 		// inner steps on resume (S7). Fail closed rather than duplicate side effects.
 		if !a.setNestedIfFirst(&nestedSuspension{
-			key:    key,
-			stepID: site.Bind,
-			callee: workflow,
-			ictx:   Context{Input: snap.Input, Steps: snap.Steps, PendingHitl: childInv.getPending()},
-			state:  childState,
+			key:        key,
+			stepID:     site.Bind,
+			callee:     workflow,
+			inputParam: wholeDocumentParam(site, args),
+			ictx:       Context{Input: snap.Input, Steps: snap.Steps, PendingHitl: childInv.getPending()},
+			state:      childState,
 			// When the gate is deeper still, childInv suspended because ITS own
 			// subworkflow suspended: carry that frame so resume seeds it recursively
 			// rather than re-running the inner pre-gate steps (S7, issue #380).
@@ -591,10 +618,15 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 		return nil, execir.ErrSuspend
 	}
 
-	out, oerr := buildWorkflowOutput(callee, childInv.snapshotIctx())
+	// out is this step's ONE runtime value: the callee's output document, exactly
+	// what run_steps.output_json and ictx.Steps hold and what a YAML caller reads as
+	// ${steps.<id>.output}. A `.agent` caller that binds the callee's return value
+	// instead gets it through the node's explicit ProjectValue bit (#551). The
+	// output (which may carry program literals from the callee's return) is
+	// checkpointed in the parent's Steps, so it is canonical like every other step
+	// output (S7).
+	out, oerr := execIROutput(childProg, callee, returnValue)
 	if oerr == nil {
-		// The output (which may carry output.value literals) is checkpointed in the
-		// parent's Steps, so it must be canonical like every other step output.
 		out, oerr = jsonnum.CanonicalMap(out)
 	}
 	if oerr != nil {
@@ -615,6 +647,75 @@ func (a *engineInvoker) InvokeWorkflow(ctx context.Context, site execir.CallSite
 	a.ictx.Steps[site.Bind] = StepResult{Output: out, Meta: map[string]any{}}
 	a.mu.Unlock()
 	return out, nil
+}
+
+// workflowInputDocument returns the input document a subworkflow call hands the
+// callee. The call shape is the explicit site.WholeDocument bit the checker set on
+// the InvokeWorkflow node (#552): a whole-document call (`Identity(x)` against a
+// single-parameter `.agent` callee) passes its one argument's value itself — any
+// JSON value — while every other call, including every YAML `with:` map whatever
+// its keys, passes the argument map as the document. The shape is never inferred
+// from key names or the callee's parameter list. A site carrying the bit without
+// exactly one argument violates the node's representation invariant and is
+// refused rather than silently sent as an object.
+func workflowInputDocument(site execir.CallSite, workflow string, args map[string]any) (any, error) {
+	if !site.WholeDocument {
+		return args, nil
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("subworkflow %q is a whole-document call but has %d arguments (want exactly one)", workflow, len(args))
+	}
+	for _, v := range args {
+		return v, nil
+	}
+	return nil, nil // unreachable: len(args) == 1
+}
+
+// workflowInputAuditJSON marshals the run_steps input row of a subworkflow call:
+// the callee's input document, redacted for display (issue #408). Redaction is by
+// key, so the order matters for a whole-document call: the callee receives the
+// single argument's VALUE, and a scalar or array value has no key left to mask
+// (`Deploy(input.token)` would persist the token in clear). The one-entry argument
+// map — still keyed by the parameter name — is redacted FIRST, and that entry's
+// redacted value is persisted: a sensitive parameter name masks the whole value
+// exactly as the same argument map was masked before the call shape was explicit.
+// Every other call records its argument map, which is the document.
+func (a *engineInvoker) workflowInputAuditJSON(site execir.CallSite, args map[string]any, childInput any) []byte {
+	if !site.WholeDocument {
+		return a.redactStepJSON(childInput)
+	}
+	return redactWholeDocumentJSON(args, a.e.Trace)
+}
+
+// redactWholeDocumentJSON redacts a whole-document call's one-entry argument map
+// with the trace recorder's options and marshals the entry's redacted value. When
+// the prepared payload is no longer that one entry (it exceeded the payload budget
+// and was replaced by the truncation envelope), the prepared payload itself is
+// persisted — it is already redacted, so the raw value never reaches the row.
+func redactWholeDocumentJSON(args map[string]any, r *trace.Recorder) []byte {
+	prepared := trace.PrepareEventData(args, nil, displayRedactionOptions(r))
+	if len(args) == 1 && len(prepared) == 1 {
+		for k := range args {
+			if v, ok := prepared[k]; ok {
+				b, _ := json.Marshal(v)
+				return b
+			}
+		}
+	}
+	b, _ := json.Marshal(prepared)
+	return b
+}
+
+// wholeDocumentParam is the parameter name of a whole-document call's single
+// argument, or "" for any other call.
+func wholeDocumentParam(site execir.CallSite, args map[string]any) string {
+	if !site.WholeDocument || len(args) != 1 {
+		return ""
+	}
+	for k := range args {
+		return k
+	}
+	return ""
 }
 
 // run wraps one leaf invocation with the admit/persist/cost/commit envelope the
@@ -719,16 +820,22 @@ func (a *engineInvoker) redactStepJSON(v any) []byte {
 // mask) is marshaled as is. Falls back to default redaction when no recorder is set, so it never
 // persists raw.
 func redactPayloadJSON(v any, r *trace.Recorder) []byte {
-	opts := trace.NormalizeRedactionOptions(trace.DefaultRedactionOptions())
-	if r != nil {
-		opts = r.Redaction
-	}
+	opts := displayRedactionOptions(r)
 	if m, ok := v.(map[string]any); ok {
 		b, _ := json.Marshal(trace.PrepareEventData(m, nil, opts))
 		return b
 	}
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// displayRedactionOptions is the recorder's redaction, or the defaults when no
+// recorder is set, so a display payload is never persisted raw.
+func displayRedactionOptions(r *trace.Recorder) trace.RedactionOptions {
+	if r != nil {
+		return r.Redaction
+	}
+	return trace.NormalizeRedactionOptions(trace.DefaultRedactionOptions())
 }
 
 func (a *engineInvoker) failStepRow(ctx context.Context, qid string, inJSON []byte, err error, stepCost float64) {
@@ -794,6 +901,7 @@ func nestedRunStateOf(n *nestedSuspension) *NestedRunState {
 		StepID:      n.stepID,
 		Workflow:    n.callee,
 		Input:       n.ictx.Input,
+		InputParam:  n.inputParam,
 		Steps:       n.ictx.Steps,
 		Completed:   completedStepIDs(n.ictx.Steps),
 		PendingHitl: n.ictx.PendingHitl,
@@ -833,9 +941,7 @@ func (e *Executor) saveExecCheckpoint(ctx context.Context, wf *spec.WorkflowReso
 		ExecMemo:      runState.Memo,
 		ExecControl:   runState.Control,
 	}
-	if payload.Input == nil {
-		payload.Input = map[string]any{}
-	}
+	payload.Input = rootCheckpointInput(payload.Input)
 	if payload.Steps == nil {
 		payload.Steps = map[string]StepResult{}
 	}

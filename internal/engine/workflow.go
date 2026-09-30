@@ -45,18 +45,3 @@ func validateWorkflowInput(projectRoot string, wf *spec.WorkflowResource, input 
 	}
 	return nil
 }
-
-func buildWorkflowOutput(wf *spec.WorkflowResource, ictx Context) (map[string]any, error) {
-	if wf == nil || wf.Spec.Output == nil || wf.Spec.Output.Value == nil {
-		return map[string]any{}, nil
-	}
-	v, err := InterpolateWalk(wf.Spec.Output.Value, ictx)
-	if err != nil {
-		return nil, err
-	}
-	out, ok := v.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("engine: workflow output value must interpolate to an object")
-	}
-	return out, nil
-}

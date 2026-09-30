@@ -415,9 +415,59 @@ so `state = input; Implementer(state)` — handing an agent the entire input, as
 implement/review flagship does — compiles and runs. The resource projection carries an inert
 `${input}`: it is a sound over-approximation for effect analysis and is no longer executed (the
 `WorkflowStep` DAG runtime was retired, #278), so there is no run-time `resolvePath` to
-fail-close against. (Whole-input **pass-through to a subworkflow** — a callee input-document
-mapping rather than a one-key `with:` map — remains a separate follow-up; the agent-argument
-case the flagship needs is resolved.)
+fail-close against. Whole-input pass-through to a subworkflow is covered by the call rules
+below.
+
+### Subworkflow calls
+
+A `.agent` call to a `.agent` workflow and a YAML `workflow:` step share one execution-IR node
+(`execir.InvokeWorkflow`) but not one contract, so the checker records the difference on the node
+as data (#551, #552); the runtime never guesses it from key names or output shapes:
+
+- **Arguments.** A call that passes exactly one argument binding the callee's one declared
+  parameter — `Identity(x)` or `Identity(value: x)` — hands the callee `x` itself as its whole
+  input document (any JSON value), which is what the single parameter binds to. This is the
+  node's `WholeDocument` bit. Every other call (several parameters, or a callee the checker
+  cannot resolve, such as a YAML-only workflow) passes the argument map as the document, exactly
+  as a YAML `with:` map is passed.
+- **Results.** A workflow's output document is `{value: <return>}` for a scalar/non-literal
+  `return` and the returned object itself when every `return` is an object literal
+  (`lower.WorkflowReturnShape`). A `.agent` workflow is classified from its `return`s alone,
+  so neither the order nor the number of `return`s changes the shape: `return {value: x}` is
+  the document `{value: x}` whether it is the workflow's only `return` or one arm of several.
+  The one object literal that keeps the envelope is YAML's: `output.value: {value: <map>}`
+  outputs `{value: <map>}`, recognized structurally as a single `return` that mirrors the map
+  key for key (a `.agent` `return {value: e}` is always one level deeper, so it never does).
+  The shape is a test on the program's `return`s and its resource alone — nothing about it is
+  recorded in the program, so no program's digest changes — and it classifies a `.agent`
+  program pinned in a deployment snapshot applied with an earlier release the same way
+  (tested against programs compiled by main at 8741333): for a workflow without control flow,
+  a nested call of it and a caller's binding of `<call>.value` or
+  `${steps.<id>.output.value}` give exactly what they gave on that release. Two things
+  differ, both #551 fixes a fresh apply shows too: a root run of a workflow whose only
+  `return` is a `{value: x}` literal outputs `{value: x}` (earlier releases doubled it to
+  `{value: {value: x}}` at the root only), and a nested call of a control-flow workflow
+  outputs what the program returned instead of the last-lowered `return`'s projection. That
+  document is the step's one runtime value: the run's output, the persisted `run_steps`
+  output, and what a YAML caller reads as `${steps.<id>.output}`. A `.agent` binding
+  `r = Identity(x)` is the callee's **return value**: when the callee uses the `{value: …}`
+  envelope the checker sets the node's `ProjectValue` bit and the interpreter binds the `value`
+  field. A call to a YAML-only workflow binds its output document.
+- **Missing fields are `null` (fail-open).** Outputs — a `.agent` `return {…}` and a YAML
+  `output.value` alike — are evaluated by the interpreter with the same gradual field rule as
+  call arguments: a reference to an absent field (`input.topic` when the input has no `topic`,
+  `ping.echo.nope`, or YAML `${steps.<id>.meta.*}`, since a step is bound to its output only)
+  evaluates to `null` and the run **succeeds**. Only an unbound head name is an error, and the
+  checker rejects it before run. A workflow that must fail on a missing value has to say so —
+  declare the workflow's input schema with `required:` (validated before the run, and before a
+  subworkflow call), or guard the value with control flow. A workflow output schema is not
+  validated at run time.
+- **Audit rows.** The `run_steps` input of a call records the document the callee received,
+  masked for display (#408). For a whole-document call the argument is redacted **under its
+  parameter name** before it is unwrapped, so `Deploy(input.token)` against
+  `workflow Deploy(token: …)` records `"[REDACTED]"` whatever the value's JSON kind. A suspended
+  call's checkpoint frame keeps the raw document for replay plus the parameter name
+  (`inputParam`), which `inspect` uses to mask it the same way.
 
 ### String templates in arguments
 

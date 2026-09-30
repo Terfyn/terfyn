@@ -144,6 +144,12 @@ func Check(f *lang.File, opts Options) (*Program, lang.Diagnostics) {
 	// engine will run — an InvokeWorkflow left with arg0 keys would hand the
 	// Invoker a map under the wrong keys (paramScope binds by parameter name).
 	applyExecRebinds(executables, rebinds)
+	// A `.agent` caller binds a `.agent` callee's RETURN VALUE, while the callee's
+	// output document (what the engine persists and what a YAML caller reads as
+	// ${steps.<id>.output}) wraps a non-object return as {value: …}. Record the
+	// projection on each such call now that every program and resource exists
+	// (#551), so the runtime never guesses it from the output's shape.
+	applyExecReturnProjections(executables, graph)
 
 	diags = append(diags, checkEffectsClauses(unit, prog.Bounds)...)
 
@@ -278,7 +284,9 @@ func applyRebinds(lowered []*spec.WorkflowResource, rebinds []rebind) {
 	}
 	byPos := make(map[lang.Pos]map[string]string, len(rebinds))
 	for _, rb := range rebinds {
-		byPos[rb.pos] = rb.renames
+		if len(rb.renames) > 0 {
+			byPos[rb.pos] = rb.renames
+		}
 	}
 	for _, wr := range lowered {
 		for i := range wr.Spec.Steps {
@@ -311,44 +319,93 @@ func applyRebinds(lowered []*spec.WorkflowResource, rebinds []rebind) {
 // (CallExpr.Pos is its callee RefExpr.Pos), so no re-derivation of a step-id
 // scheme is needed. It recurses into every control-flow body so a workflow call
 // inside an if/loop/parallel — including a hoisted nested call — is rebound too.
+//
+// The same pass stamps the call-shape bit (rebind.wholeDocument) onto the node:
+// the checker, not the runtime, decides that a single argument binding a
+// single-parameter callee is the callee's whole input document (#552).
 func applyExecRebinds(executables map[string]*execir.Program, rebinds []rebind) {
 	if len(rebinds) == 0 {
 		return
 	}
-	byPos := make(map[lang.Pos]map[string]string, len(rebinds))
+	byPos := make(map[lang.Pos]rebind, len(rebinds))
 	for _, rb := range rebinds {
-		byPos[rb.pos] = rb.renames
+		byPos[rb.pos] = rb
 	}
 	for _, prog := range executables {
-		if prog != nil {
-			rebindNodes(prog.Body, byPos)
+		if prog == nil {
+			continue
 		}
+		forEachInvokeWorkflow(prog.Body, func(v *execir.InvokeWorkflow) {
+			rb, ok := byPos[v.Pos]
+			if !ok {
+				return
+			}
+			if len(rb.renames) > 0 {
+				v.Args = renameArgs(v.Args, rb.renames)
+			}
+			v.WholeDocument = rb.wholeDocument
+		})
 	}
 }
 
-func rebindNodes(nodes []execir.Node, byPos map[lang.Pos]map[string]string) {
+// applyExecReturnProjections sets [execir.InvokeWorkflow.ProjectValue] on every
+// bound call from a `.agent` program to a `.agent` callee in this compilation unit
+// whose output uses the single-value envelope ([lower.ReturnValueEnvelope]): the
+// invoker's result is the callee's output document {value: <return>}, and the
+// `.agent` binding is its value field — the callee's return value. A callee that
+// returns an object literal (its output document IS the returned object) or
+// nothing needs no projection. A callee outside the unit (a YAML workflow from
+// Options.Project) is never projected: a call to it binds its output document,
+// exactly as a YAML caller's step output does (DESIGN_DOC §13.2).
+func applyExecReturnProjections(executables map[string]*execir.Program, graph *spec.ProjectGraph) {
+	if graph == nil {
+		return
+	}
+	shapes := make(map[string]lower.ReturnShape, len(executables))
+	for name, prog := range executables {
+		if wr := graph.Workflows[name]; prog != nil && wr != nil {
+			shapes[name] = lower.WorkflowReturnShape(prog, wr)
+		}
+	}
+	for _, prog := range executables {
+		if prog == nil {
+			continue
+		}
+		forEachInvokeWorkflow(prog.Body, func(v *execir.InvokeWorkflow) {
+			if v.Bind == "" {
+				return // effect-only: nothing is bound, so nothing to project
+			}
+			if shape, ok := shapes[v.Workflow]; ok && shape == lower.ReturnValueEnvelope {
+				v.ProjectValue = true
+			}
+		})
+	}
+}
+
+// forEachInvokeWorkflow calls fn on every InvokeWorkflow reachable in nodes,
+// recursing into every control-flow body so a call inside an if/loop/parallel —
+// including a hoisted nested call — is visited too.
+func forEachInvokeWorkflow(nodes []execir.Node, fn func(*execir.InvokeWorkflow)) {
 	for _, n := range nodes {
 		switch v := n.(type) {
 		case *execir.InvokeWorkflow:
-			if renames, ok := byPos[v.Pos]; ok {
-				v.Args = renameArgs(v.Args, renames)
-			}
+			fn(v)
 		case *execir.Branch:
-			rebindNodes(v.Then, byPos)
-			rebindNodes(v.Else, byPos)
+			forEachInvokeWorkflow(v.Then, fn)
+			forEachInvokeWorkflow(v.Else, fn)
 		case *execir.Loop:
-			rebindNodes(v.Body, byPos)
+			forEachInvokeWorkflow(v.Body, fn)
 		case *execir.While:
-			rebindNodes(v.Body, byPos)
+			forEachInvokeWorkflow(v.Body, fn)
 		case *execir.Retry:
-			rebindNodes(v.Body, byPos)
+			forEachInvokeWorkflow(v.Body, fn)
 		case *execir.Fork:
 			for i := range v.Branches {
-				rebindNodes(v.Branches[i].Nodes, byPos)
+				forEachInvokeWorkflow(v.Branches[i].Nodes, fn)
 			}
 		case *execir.Graph:
 			for i := range v.Nodes {
-				rebindNodes([]execir.Node{v.Nodes[i].Run}, byPos)
+				forEachInvokeWorkflow([]execir.Node{v.Nodes[i].Run}, fn)
 			}
 		}
 	}

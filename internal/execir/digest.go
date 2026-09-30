@@ -67,6 +67,17 @@ func encodeNode(b *strings.Builder, n Node) {
 		b.WriteString(v.Bind)
 		b.WriteByte('=')
 		b.WriteString(v.Workflow)
+		if v.WholeDocument {
+			// Call shape is executable identity (#552): the same one-entry Args map is
+			// the whole input document under one shape and a field of it under the
+			// other. Only written when set, so existing programs keep their digest.
+			b.WriteString("!doc")
+		}
+		if v.ProjectValue {
+			// The caller binds the callee output's `value` field, not the whole
+			// document (#551). Only written when set.
+			b.WriteString("!value")
+		}
 		encodeArgs(b, v.Args)
 	case *Let:
 		b.WriteString("let ")
