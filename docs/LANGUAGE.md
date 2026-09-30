@@ -586,6 +586,47 @@ not schema identity — passing a `Review` where a differently-named-but-also-`o
 the YAML path. Nominal/structural schema equality is a separate, larger piece of work, not
 part of this pass.
 
+Both paths decide every flow with the single rule `schema.CompatibleLookup`. A literal is an
+**untyped producer** on both: a `.agent` literal argument (`C("hi")`, an object literal) and a YAML
+`with:` value containing no `${…}` token (string, number, bool, null, or an object/array built
+only from those) are checked like any other flow, which is gradual against every consumer except
+`never`. A missing argument is rejected into a `never` consumer on both — `C()` and a YAML agent
+step with no `with:` (for a typed, non-`never` input the `.agent` zero-argument rule is stricter:
+YAML treats an absent `with:` as an empty input object). Agent input is not validated at run time,
+so this static check is what keeps a `false`-input agent from running. Where a `with:` value lands
+in the consumer input follows the step's explicit call shape, never the key's name: the single
+positional argument of a lowered `.agent` call (`r = Reviewer(input)`, `C("hi")`, `C({q: "hi"})`,
+`WholeDocument` with the `arg0` placeholder key) is checked against the **whole** input — the
+value as a whole is gradual there and rejected at the root only by `never`, but each field or
+element of an object/array literal is also checked at its own nested location, so a field the
+consumer input does not declare (`additionalProperties: false`, a `false` property, or any field
+of a scalar input) is "not declared" there, just as a token in that field would be: `C({q: "hi"})`
+is accepted into an input that declares `q` and rejected into a closed object without `q` or into a
+scalar input — while a named `with:` key, including one literally called `arg0`, is an input field.
+
+Draft 2020-12 **boolean schemas** are honoured in every subschema position `Lookup` descends
+through — the root, `properties` and `patternProperties` values, `prefixItems`/`items`,
+`additionalProperties`, and local `$ref` targets such as `$defs` (applicators `Lookup` does not
+interpret, such as `allOf`/`anyOf`/`not`, are not consulted at all): `true` is unconstrained
+(`any`), a `false` property/item forbids that key (the same "not declared" error as
+`additionalProperties: false`), and a `false` whole value — a root `false` or a root `$ref` to one
+— is **`never`, the bottom type**. `patternProperties` follows §10.3.2.3: a key matched by
+`properties` or by any pattern (Go RE2 syntax, matched unanchored — the runtime validator compiles
+patterns with the same engine) is not subject to `additionalProperties`; when several of them
+match, the value must satisfy all of them: any `false` forbids the key, and the typed matches'
+type sets are intersected (`integer` meets `number` at `integer`; an untyped match such as `true`
+or `{"minLength":1}` adds no type constraint). An empty intersection — `properties: {a: string}`
+with a matching `integer` pattern — is unsatisfiable, so the key is reported as not declared.
+
+`never` flows into every consumer, because a `never` producer cannot yield a value where its schema
+is enforced at the source: an agent's output is always validated (a step whose output must satisfy
+`false` cannot complete), and a single-parameter workflow's input is validated at run start. A
+`never` consumer accepts only `never` — it is the one place an untyped producer is *not* gradually
+compatible. **Known gap:** a workflow with **more than one parameter** gets no runtime input schema
+(only a single parameter is wired as the whole runtime input), so none of its parameter types —
+`Never` included — is enforced at run time; the static accept of a flow from such a parameter
+rests on an enforcement that does not exist there.
+
 **A `TypeRef` name resolves to `<SchemaDir>/schemas/<Name>.json`** (`SchemaDir` defaults to
 the directory of the `.agent` file being checked). This is a new naming convention
 introduced by this package — no earlier ADR or grammar text specifies how a type name
@@ -613,7 +654,8 @@ What is checked:
   named parameter list. An **object-literal** argument (`Reviewer({repo: r, number: n})`)
   is checked field by field (recursively for nested literals): each field value against
   that field's declared type, and a field the type forbids (`additionalProperties: false`)
-  is an error — the same per-field rule graph validation applies to the lowered step (#550). Every OTHER call shape against a known input type is a diagnostic,
+  is an error — the same per-field rule graph validation applies to the lowered step (#550);
+  into a `never` input the literal (even `{}`) is rejected as one value. Every OTHER call shape against a known input type is a diagnostic,
   not a smaller version of the same problem to skip past quietly: **zero arguments** is an
   **error** (a declared input was never supplied); a **single named argument**
   (`A(input: x)`) and **more than one argument** — the ADR 002 normative surface's own

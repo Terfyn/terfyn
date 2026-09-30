@@ -135,8 +135,9 @@ func schemaDirFor(f *lang.File) string {
 }
 
 // typeRef is a value's resolved type: a root schema.Document plus the dotted
-// path walked so far. A nil doc means untyped (gradual typing — always
-// compatible). Kept as (doc, path) rather than eagerly resolving to a TypeSet
+// path walked so far. A nil doc means untyped (gradual typing — compatible
+// with everything except a never, i.e. boolean false, consumer; see
+// schema.CompatibleLookup). Kept as (doc, path) rather than eagerly resolving to a TypeSet
 // so a chain like result.summary can extend the path one field at a time,
 // mirroring how internal/spec/wiring.go walks interpolation paths against the
 // same schema.Document API, but over AST RefExpr.Parts instead of a regex over
@@ -155,10 +156,14 @@ type typeRef struct {
 var stringType = typeRef{lit: schema.TypeSet{schema.TypeString: {}}}
 
 func (t typeRef) types() schema.TypeSet {
+	return t.result().Types
+}
+
+func (t typeRef) result() schema.LookupResult {
 	if t.doc == nil {
-		return t.lit
+		return schema.LookupResult{Types: t.lit, Known: len(t.lit) > 0}
 	}
-	return t.doc.Lookup(t.path).Types
+	return t.doc.Lookup(t.path)
 }
 
 func (t typeRef) child(field string) (typeRef, schema.LookupResult) {
@@ -844,7 +849,10 @@ func (wc *wfChecker) checkAgentArgs(name string, ai agentTypeInfo, c *lang.CallE
 // A string-template field is typed by checkTemplate, the rule graph validation applies.
 func (wc *wfChecker) checkValueAgainst(e lang.Expr, pos lang.Pos, want typeRef, what string) lang.Diagnostics {
 	obj, ok := e.(*lang.ObjectExpr)
-	if !ok || want.doc == nil {
+	// A never (false) location accepts no value, so the object literal itself — an untyped
+	// producer — is rejected there as one value: descending into its fields would let an
+	// empty literal ({}) through with nothing checked, while graph validation rejects it.
+	if !ok || want.doc == nil || want.result().Impossible {
 		got, _ := wc.checkValue(e)
 		return wc.checkCompatible(pos, got, want, what)
 	}
@@ -867,16 +875,16 @@ func (wc *wfChecker) checkValueAgainst(e lang.Expr, pos lang.Pos, want typeRef, 
 	return diags
 }
 
+// checkCompatible applies schema.CompatibleLookup — the same flow rule YAML step wiring uses — so a
+// never producer is accepted everywhere (bottom), a never consumer accepts only never, and an
+// untyped side is otherwise always compatible (gradual typing).
 func (wc *wfChecker) checkCompatible(pos lang.Pos, got, want typeRef, what string) lang.Diagnostics {
-	gotTypes, wantTypes := got.types(), want.types()
-	if len(gotTypes) == 0 || len(wantTypes) == 0 {
-		return nil // gradual typing: an untyped side is always compatible
-	}
-	if schema.Compatible(gotTypes, wantTypes) {
+	gotRes, wantRes := got.result(), want.result()
+	if schema.CompatibleLookup(gotRes, wantRes) {
 		return nil
 	}
 	return lang.Diagnostics{{
 		Pos: pos,
-		Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, gotTypes, wantTypes),
+		Msg: fmt.Sprintf("%s: type %s is not compatible with declared type %s", what, gotRes, wantRes),
 	}}
 }

@@ -288,6 +288,150 @@ func writeSchema(t *testing.T, root, rel, body string) {
 	}
 }
 
+// TestValidateProjectGraph_booleanSchemas covers Draft 2020-12 boolean schemas in YAML wiring
+// (issue #549 review). Wiring applies schema.CompatibleLookup unconditionally: never is the bottom
+// type (an impossible producer flows anywhere), an impossible consumer accepts only never, a false
+// subschema under properties/items forbids that key, and a true one is declared.
+func TestValidateProjectGraph_booleanSchemas(t *testing.T) {
+	cases := []struct {
+		name    string
+		out, in string
+		with    string
+		wantErr string // "" = accepted
+	}{
+		{"false producer into string (whole field)", `false`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output}`, ""},
+		{"false producer into string (embedded)", `false`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `x ${steps.r.output}`, ""},
+		{"false producer into object", `false`, `{"type":"object","properties":{"body":{"type":"object"}}}`, `${steps.r.output}`, ""},
+		{"descent through false producer", `false`, `{"type":"object","properties":{"body":{"type":"object"}}}`, `${steps.r.output.x}`, ""},
+		{"ref-false producer into string", `{"$ref":"#/$defs/n","$defs":{"n":false}}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output}`, ""},
+		{"false producer into false consumer", `false`, `false`, `${steps.r.output}`, ""},
+		{"string into false consumer", `{"type":"object","properties":{"s":{"type":"string"}}}`, `false`, `${steps.r.output.s}`, `(string) does not match Agent/consumer input "body" (never)`},
+		{"untyped into false consumer", `true`, `false`, `${steps.r.output}`, `(any) does not match Agent/consumer input "body" (never)`},
+		{"embedded into false consumer", `true`, `false`, `x ${steps.r.output}`, `(string) does not match Agent/consumer input "body" (never)`},
+		{"string into ref-false consumer", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"$ref":"#/$defs/n","$defs":{"n":false}}`, `${steps.r.output.s}`, `does not match Agent/consumer input "body" (never)`},
+		{"false consumer property forbids key", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","properties":{"body":false}}`, `${steps.r.output.s}`, `with "body" is not declared in Agent/consumer input schema`},
+		{"true consumer property is declared", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","properties":{"body":true},"additionalProperties":false}`, `${steps.r.output.s}`, ""},
+		{"false producer property is not declared", `{"type":"object","properties":{"body":false}}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.body}`, `${steps.r.output.body} is not declared in Agent/reporter output schema`},
+		{"true producer property is declared", `{"type":"object","properties":{"body":true},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.body}`, ""},
+		{"items false forbids index", `{"type":"array","items":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.0}`, `${steps.r.output.0} is not declared in Agent/reporter output schema`},
+		{"prefixItems before items false", `{"type":"array","prefixItems":[{"type":"integer"}],"items":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.0}`, `(integer) does not match Agent/consumer input "body" (string)`},
+		{"true consumer pattern is declared", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","patternProperties":{"^body$":true},"additionalProperties":false}`, `${steps.r.output.s}`, ""},
+		{"false consumer pattern forbids key", `{"type":"object","properties":{"s":{"type":"string"}}}`, `{"type":"object","patternProperties":{"^body$":false}}`, `${steps.r.output.s}`, `with "body" is not declared in Agent/consumer input schema`},
+		{"typed producer pattern", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.n_x}`, `(integer) does not match Agent/consumer input "body" (string)`},
+		{"producer key no pattern matches", `{"type":"object","patternProperties":{"^n_":{"type":"integer"}},"additionalProperties":false}`, `{"type":"object","properties":{"body":{"type":"string"}}}`, `${steps.r.output.other}`, `${steps.r.output.other} is not declared in Agent/reporter output schema`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSchema(t, root, "schemas/out.json", tc.out)
+			writeSchema(t, root, "schemas/in.json", tc.in)
+			wfYAML := `apiVersion: agentic.dev/v0
+kind: Workflow
+metadata:
+  name: demo
+spec:
+  steps:
+    - id: r
+      agent: reporter
+    - id: c
+      agent: consumer
+      with:
+        body: "` + tc.with + `"
+`
+			dec, err := ParseResourceFromBytes([]byte(wfYAML), "workflow.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ValidateProjectGraph(wiringGraph(dec.Resource.(*WorkflowResource)), root)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestValidateProjectGraph_literalAndMissingWith covers the with shapes that carry no typed token
+// (issue #549 review): a token-free with value is an untyped producer, exactly like a .agent
+// literal argument, so it is gradual against typed consumers but rejected by a never (false)
+// consumer and by a forbidden key; a step with no with into a never consumer is rejected like a
+// .agent zero-argument call to a typed agent.
+func TestValidateProjectGraph_literalAndMissingWith(t *testing.T) {
+	const (
+		neverIn  = `false`
+		refNever = `{"$ref":"#/$defs/n","$defs":{"n":false}}`
+		strBody  = `{"type":"object","properties":{"body":{"type":"string"}}}`
+		closed   = `{"type":"object","properties":{"body":{"type":"string"}},"additionalProperties":false}`
+		forbid   = `{"type":"object","properties":{"body":false}}`
+	)
+	cases := []struct {
+		name    string
+		in      string
+		with    string // YAML lines under `with:`, or "" for a step with no with
+		wantErr string // "" = accepted
+	}{
+		{"string literal into never", neverIn, "body: hello", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"number literal into never", neverIn, "body: 42", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"bool literal into never", neverIn, "body: true", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"null literal into never", neverIn, "body: null", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"object literal into never", neverIn, "body: {a: 1, b: [x]}", `literal value (any) does not match Agent/consumer input "body" (never)`},
+		{"literal into ref-false", refNever, "body: hello", `does not match Agent/consumer input "body" (never)`},
+		{"no with into never", neverIn, "", `Agent/consumer input schema is never (false) but the step supplies no with`},
+		{"no with into ref-false", refNever, "", `input schema is never (false) but the step supplies no with`},
+		{"untyped token into never", neverIn, "body: ${steps.r.status}", `untyped value (any) does not match Agent/consumer input "body" (never)`},
+		{"literal into forbidden key", forbid, "body: hello", `with "body" is not declared in Agent/consumer input schema`},
+		{"literal into undeclared key of closed object", closed, "other: hello", `with "other" is not declared in Agent/consumer input schema`},
+		{"string literal into string (gradual)", strBody, "body: hello", ""},
+		{"number literal into string (gradual, like .agent)", strBody, "body: 42", ""},
+		{"object literal into string (gradual, like .agent)", strBody, "body: {a: 1}", ""},
+		{"no with into typed object", strBody, "", ""},
+		{"literal into true consumer", `true`, "body: hello", ""},
+		{"no with into true consumer", `true`, "", ""},
+		{"never producer beside a literal into never", neverIn, `body: {a: "${steps.r.output}", b: lit}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSchema(t, root, "schemas/out.json", `false`)
+			writeSchema(t, root, "schemas/in.json", tc.in)
+			with := ""
+			if tc.with != "" {
+				with = "      with:\n        " + tc.with + "\n"
+			}
+			wfYAML := `apiVersion: agentic.dev/v0
+kind: Workflow
+metadata:
+  name: demo
+spec:
+  steps:
+    - id: r
+      agent: reporter
+    - id: c
+      agent: consumer
+` + with
+			dec, err := ParseResourceFromBytes([]byte(wfYAML), "workflow.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ValidateProjectGraph(wiringGraph(dec.Resource.(*WorkflowResource)), root)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 // wholeDocumentGraph builds the straight-line consumer step of the #550 repro with
 // the given with: map and explicit call shape.
 func wholeDocumentGraph(t *testing.T, with map[string]any, whole bool) *ProjectGraph {
@@ -336,6 +480,94 @@ func TestValidateProjectGraph_multiPositionalAgentArgsAreNotWholeDocument(t *tes
 	}, false)
 	if err == nil || !strings.Contains(err.Error(), "is not declared") {
 		t.Fatalf("multi-arg positional must be checked per field, got %v", err)
+	}
+}
+
+// The literal / untyped fallback (a with value with no typed token) honours the explicit call
+// shape exactly like the token path (#575 review): a whole-document argument is checked at the
+// consumer's input root, so a literal or a bare ${input} into a closed-object or scalar input
+// validates, and only a never root rejects it. Without the bit the same key is a field called
+// arg0 (a named call, or one argument of a multi-positional call) and is checked as one.
+func TestValidateProjectGraph_wholeDocumentLiteralFallback(t *testing.T) {
+	const closed = `{"type":"object","properties":{"title":{"type":"string"}},"additionalProperties":false}`
+	const nested = `{"type":"object","properties":{` +
+		`"meta":{"type":"object","properties":{"x":{"type":"string"}},"additionalProperties":false},` +
+		`"tags":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"}},"additionalProperties":false}}` +
+		`},"additionalProperties":false}`
+	obj := func(fields map[string]any) map[string]any { return map[string]any{"arg0": fields} }
+	cases := []struct {
+		name     string
+		consumer string
+		with     map[string]any
+		whole    bool
+		wantErr  string // "" = accepted
+	}{
+		{name: "string literal into scalar", consumer: `{"type":"string"}`, with: map[string]any{"arg0": "hi"}, whole: true},
+		{name: "number literal into scalar", consumer: `{"type":"string"}`, with: map[string]any{"arg0": 42}, whole: true},
+		{name: "object literal into closed object", consumer: closed, with: map[string]any{"arg0": map[string]any{"title": "hi"}}, whole: true},
+		{name: "bare input into closed object", consumer: closed, with: map[string]any{"arg0": "${input}"}, whole: true},
+		{name: "status token into scalar", consumer: `{"type":"string"}`, with: map[string]any{"arg0": "${steps.value.status}"}, whole: true},
+		{name: "literal into never", consumer: `false`, with: map[string]any{"arg0": "hi"}, whole: true,
+			wantErr: `literal value (any) does not match Agent/consumer input "input" (never)`},
+		{name: "empty object literal into never", consumer: `false`, with: map[string]any{"arg0": map[string]any{}}, whole: true,
+			wantErr: `literal value (any) does not match Agent/consumer input "input" (never)`},
+		{name: "bare input into never", consumer: `false`, with: map[string]any{"arg0": "${input}"}, whole: true,
+			wantErr: `untyped value (any) does not match Agent/consumer input "input" (never)`},
+		// The literal parts of a whole-document value are held to their own nested locations
+		// (#575 review): a literal field the consumer does not declare is rejected like a token.
+		{name: "nested literals into closed objects", consumer: nested, whole: true,
+			with: obj(map[string]any{"meta": map[string]any{"x": "a"}, "tags": []any{map[string]any{"name": "a"}, map[string]any{"name": "b"}}})},
+		{name: "undeclared literal field", consumer: closed, whole: true,
+			with:    obj(map[string]any{"title": "hi", "bogus": 1}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared null literal field", consumer: closed, whole: true,
+			with:    obj(map[string]any{"bogus": nil}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared literal field beside a typed token", consumer: closed, whole: true,
+			with:    obj(map[string]any{"title": "${steps.value.output}", "bogus": true}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared field holding an untyped token", consumer: closed, whole: true,
+			with:    obj(map[string]any{"bogus": "${steps.value.status}"}),
+			wantErr: `input field "bogus" is not declared in Agent/consumer input schema`},
+		{name: "nested undeclared literal field", consumer: nested, whole: true,
+			with:    obj(map[string]any{"meta": map[string]any{"x": "a", "bogus": 1}}),
+			wantErr: `input field "meta.bogus" is not declared in Agent/consumer input schema`},
+		{name: "undeclared literal field in an array element", consumer: nested, whole: true,
+			with:    obj(map[string]any{"tags": []any{map[string]any{"name": "a", "bogus": "b"}}}),
+			wantErr: `input field "tags.0.bogus" is not declared in Agent/consumer input schema`},
+		{name: "literal array into closed object", consumer: closed, whole: true,
+			with:    map[string]any{"arg0": []any{1}},
+			wantErr: `input field "0" is not declared in Agent/consumer input schema`},
+		{name: "literal field into scalar", consumer: `{"type":"string"}`, whole: true,
+			with:    obj(map[string]any{"q": "hi"}),
+			wantErr: `input field "q" is not declared in Agent/consumer input schema`},
+		// A named key keeps its behaviour: the value is checked once, at the field.
+		{name: "named nested literal is checked at the field only", consumer: nested,
+			with: map[string]any{"meta": map[string]any{"bogus": 1}}},
+		{name: "named arg0 literal into closed object", consumer: closed, with: map[string]any{"arg0": "hi"},
+			wantErr: `with "arg0" is not declared`},
+		{name: "multi-positional literals into closed object", consumer: closed, with: map[string]any{"arg0": "a", "arg1": "b"},
+			wantErr: `with "arg0" is not declared`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSchema(t, root, "schemas/out.json", `{"type":"string"}`)
+			writeSchema(t, root, "schemas/in.json", tc.consumer)
+			err := ValidateProjectGraph(wholeDocumentGraph(t, tc.with, tc.whole), root)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+			if n := strings.Count(err.Error(), "is not declared"); tc.whole && n > 1 {
+				t.Fatalf("want one undeclared-location diagnostic, got %d: %v", n, err)
+			}
+		})
 	}
 }
 
