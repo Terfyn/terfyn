@@ -235,22 +235,26 @@ func wireWorkflowSchemas(unit []*lang.File, tu *typeUniverse, graph *spec.Projec
 	}
 }
 
-// dedupDiags drops adjacent exact-duplicate diagnostics (same position, message,
-// and severity). The checker is the authority for unresolved references and
-// emits the same message lowering's prefixOf does for a straight-line reference,
-// so a genuine typo would otherwise be reported twice; a control-flow scope
-// violation is reported by the checker alone. Sorting groups identical entries
-// adjacently, so one pass suffices.
+// dedupDiags drops every exact-duplicate diagnostic (same position, message,
+// and severity), keeping the first occurrence and the input order. The checker
+// is the authority for unresolved references and emits the same message
+// lowering's prefixOf does for a straight-line reference, so a genuine typo
+// would otherwise be reported twice; a control-flow scope violation is reported
+// by the checker alone. Duplicates need not be adjacent: Sorted orders by
+// position only, and a call-argument string with several bad ${…} tokens puts
+// the checker's [t1, t2] and lowering's [t1, t2] at the same position, so the
+// two copies of t1 are interleaved with t2. A seen-set catches them anyway.
 func dedupDiags(diags lang.Diagnostics) lang.Diagnostics {
 	if len(diags) < 2 {
 		return diags
 	}
-	out := diags[:1]
-	for _, d := range diags[1:] {
-		last := out[len(out)-1]
-		if d.Pos == last.Pos && d.Msg == last.Msg && d.Severity == last.Severity {
+	seen := make(map[lang.Diagnostic]struct{}, len(diags))
+	out := make(lang.Diagnostics, 0, len(diags))
+	for _, d := range diags {
+		if _, dup := seen[d]; dup {
 			continue
 		}
+		seen[d] = struct{}{}
 		out = append(out, d)
 	}
 	return out

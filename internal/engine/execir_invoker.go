@@ -429,7 +429,7 @@ func (a *engineInvoker) emitHitlRequest(ctx context.Context, step spec.WorkflowS
 }
 
 func (a *engineInvoker) InvokeAgent(ctx context.Context, site execir.CallSite, agentName string, args map[string]any) (any, error) {
-	step := spec.WorkflowStep{ID: site.Bind, Agent: agentName}
+	step := spec.WorkflowStep{ID: site.Bind, Agent: agentName, WholeDocument: site.WholeDocument}
 	ar, ok := a.e.Graph.Agents[agentName]
 	if !ok || ar == nil {
 		return nil, fmt.Errorf("engine: unknown agent %q", agentName)

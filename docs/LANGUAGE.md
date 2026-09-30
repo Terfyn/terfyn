@@ -471,15 +471,21 @@ as data (#551, #552); the runtime never guesses it from key names or output shap
 
 ### String templates in arguments
 
-An **argument** string value may embed `${<binding>.<field>…}` tokens (#316), the one place
-`.agent` performs interpolation. It is a lowering-time property of **argument position**, not
-of the string form: both `"…${x}…"` and a `"""…${x}…"""` block interpolate the same way, and
-the token syntax is identical to the resource projection's `${…}` (the exact reference
+An **argument** string value may embed `${<binding>.<field>…}` tokens (#316). Arguments are
+the one position both projections interpolate (the resource projection interpolates nothing
+else; the execution IR also interpolates a return value and a `for` collection, below).
+Interpolation is a lowering-time property of **value position**, not of the string form: both
+`"…${x}…"` and a `"""…${x}…"""` block interpolate the same way, and the token syntax is identical to the resource projection's `${…}` (the exact reference
 `interpTokenRE`). The head identifier is resolved through the workflow's binding environment —
 a binding `review` becomes `${steps.review.output.…}`, a parameter field becomes `${input.…}`
 — and the referenced step is added to the consumer's predecessors, so a templated `body:`
 that names an earlier step's output is a valid, ordered reference. An unknown head is an
-`unresolved reference "…" in interpolation` diagnostic.
+`unresolved reference "…" in interpolation` diagnostic, and so is an empty token (`${}`,
+`${ . }`), reported as `unresolved reference ""`. The execution IR applies the same
+lowering to every value position, not only arguments: a return value and a `for` /
+`parallel for` collection interpolate too (`for x in "${xs}"` iterates `xs`), and the checker
+resolves and types the tokens in each of them (see the string-template rule under type
+checking).
 
 A whole-string single token (`"${review.summary}"`) lowers to a bare reference; a string with
 surrounding text or multiple tokens lowers to a template whose parts concatenate at run time.
@@ -604,7 +610,10 @@ What is checked:
 
 - An agent invocation's **single positional argument** against the callee's declared
   `input` type — the one unambiguous shape, since an agent's `input` is one type, not a
-  named parameter list. Every OTHER call shape against a known input type is a diagnostic,
+  named parameter list. An **object-literal** argument (`Reviewer({repo: r, number: n})`)
+  is checked field by field (recursively for nested literals): each field value against
+  that field's declared type, and a field the type forbids (`additionalProperties: false`)
+  is an error — the same per-field rule graph validation applies to the lowered step (#550). Every OTHER call shape against a known input type is a diagnostic,
   not a smaller version of the same problem to skip past quietly: **zero arguments** is an
   **error** (a declared input was never supplied); a **single named argument**
   (`A(input: x)`) and **more than one argument** — the ADR 002 normative surface's own
@@ -627,6 +636,18 @@ What is checked:
   `schema.Document.Lookup`, and a field the schema declares forbidden
   (`additionalProperties: false`) is a positioned error.
 - A `return <expr>` against the enclosing workflow's declared result type.
+- A **string template** in a value position (a call argument or a field of one, an approval
+  `with` payload entry, a return value, a `for` / `parallel for` collection — exactly the
+  positions the execution IR interpolates) is typed by the rule graph validation applies to the
+  lowered interpolation (#550): a string that is exactly one `${binding…}` token has the
+  referenced binding's type, and any other string containing a token is a `string`. Each
+  token is resolved like a reference, so an undeclared member path or a binding that is not
+  definitely assigned is an error. A string without a token stays an untyped literal. This
+  holds inside control-flow bodies too, whose synthetic steps graph validation skips, so
+  `Reviewer({repo: "${count}"})` is refused in a `while` body exactly as it is straight-line,
+  and `for x in "${zz}"` with no binding `zz` is an unresolved-reference error, not a
+  runtime failure. A condition operand and the whole value of a binding (`x = "${y}"`) are
+  not interpolated, so a literal there stays an untyped literal.
 - A dotted (tool) callee's arguments are checked for their own internal well-formedness
   (nested calls, member access) but not against a declared parameter type — there is no
   `.agent`-visible tool schema.

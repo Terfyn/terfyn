@@ -187,6 +187,11 @@ func (e *Executor) runToolStep(ctx context.Context, runHandle *telemetry.RunHand
 	// tool blocks the run forever despite maxWallClockSeconds (#394).
 	toolCtx, cancelWC := e.wallClockDeadline(toolCtx, pol, pctx)
 	defer cancelWC()
+	// Tell the tool how large an output this step can actually keep, so a tool that bounds its own
+	// result (the native GitHub list ops) sizes it to the resolved limits, not the default: the
+	// tool-output limit enforceToolOutput applies below, clamped to half the run's checkpoint limit
+	// (see toolOutputBudget for what that clamp does and does not cover).
+	toolCtx = tools.WithOutputBudget(toolCtx, e.toolOutputBudget(wf, uses))
 	resp, err := e.Tools.Call(toolCtx, tools.ToolCallRequest{Uses: uses, With: withArgs})
 	if endTool != nil {
 		endTool(err)
@@ -230,7 +235,11 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 	ctx2, cancelWC := e.wallClockDeadline(ctx2, pol, pctx)
 	defer cancelWC()
 
-	payload, err := json.Marshal(with)
+	input, err := agentInputDocument(step, with)
+	if err != nil {
+		return nil, models.GenerateMeta{}, err
+	}
+	payload, err := json.Marshal(input)
 	if err != nil {
 		return nil, models.GenerateMeta{}, err
 	}
@@ -260,6 +269,28 @@ func (e *Executor) runAgentStep(ctx context.Context, runHandle *telemetry.RunHan
 		})
 	}
 	return e.runAgentToolLoop(ctx, ctx2, runHandle, pol, wf, cli, modelRef, modelID, runID, step, pctx, agent, messages, toolDefs, usesByName, temperature, maxTokens, respFormat)
+}
+
+// agentInputDocument returns the value the model receives as the agent's input.
+// The call shape is the explicit step.WholeDocument bit set by lowering (#550): a
+// whole-document call (`Reviewer(value)`) passes the single
+// [spec.WholeDocumentArgKey] value itself; every other call passes the with: map
+// as the input object — including a named call whose field is literally arg0.
+// The shape is never inferred from a key name. A step carrying the bit without exactly the one placeholder argument
+// violates the representation invariant ([spec.WorkflowStep.WholeDocument]) and
+// is refused rather than silently sent as an object.
+func agentInputDocument(step spec.WorkflowStep, with map[string]any) (any, error) {
+	if !step.WholeDocument {
+		if with == nil {
+			return nil, nil
+		}
+		return with, nil
+	}
+	v, ok := with[spec.WholeDocumentArgKey]
+	if !ok || len(with) != 1 {
+		return nil, fmt.Errorf("engine: agent step %q is a whole-document call but has %d arguments (want exactly one positional argument)", step.ID, len(with))
+	}
+	return v, nil
 }
 
 // maxTokensStopError is the actionable run error when a completion stops at its output-token cap

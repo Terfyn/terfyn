@@ -651,11 +651,7 @@ func (wl *workflowLowerer) lowerApproval(s *lang.ApprovalStmt, predNeeds []strin
 	if len(s.With) > 0 {
 		with := make(map[string]any, len(s.With))
 		for i, arg := range s.With {
-			key := "arg" + strconv.Itoa(i)
-			if arg.Name != nil && arg.Name.Name != "" {
-				key = arg.Name.Name
-			}
-			with[key] = wl.lowerArg(arg.Value, id, i, predNeeds, &tempNeeds)
+			with[callArgKey(i, arg, false)] = wl.lowerArg(arg.Value, id, i, predNeeds, &tempNeeds)
 		}
 		step.With = with
 	}
@@ -670,16 +666,13 @@ func (wl *workflowLowerer) lowerApproval(s *lang.ApprovalStmt, predNeeds []strin
 func (wl *workflowLowerer) lowerCall(id string, call *lang.CallExpr, predNeeds []string, pos spec.Pos) {
 	step := spec.WorkflowStep{ID: id, Pos: pos, NeedsDeclared: true, Synthetic: wl.synthetic}
 	wl.applyCallee(&step, call.Callee)
+	step.WholeDocument = step.Agent != "" && isWholeDocumentCall(call.Args)
 
 	var tempNeeds []string
 	if len(call.Args) > 0 {
 		with := make(map[string]any, len(call.Args))
 		for i, arg := range call.Args {
-			key := "arg" + strconv.Itoa(i)
-			if arg.Name != nil && arg.Name.Name != "" {
-				key = arg.Name.Name
-			}
-			with[key] = wl.lowerArg(arg.Value, id, i, predNeeds, &tempNeeds)
+			with[callArgKey(i, arg, step.WholeDocument)] = wl.lowerArg(arg.Value, id, i, predNeeds, &tempNeeds)
 		}
 		step.With = with
 	}
