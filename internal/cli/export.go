@@ -20,7 +20,10 @@ directory (ADR 003 / ADR 007).
 By default the graph is written to stdout as a multi-document YAML stream for inspection or
 handoff. That YAML is NOT the trustworthy record (applied deployment state plus the audit
 chain is) and, under ADR 007, is NOT a project source — validate/plan/apply/run refuse a
-project.yaml.
+project.yaml. An agent step called with a single positional argument (the agent's whole input
+document) is marked 'wholeDocument: true' next to its 'with: {arg0: ...}'; without the marker
+the step is a named call with a field called arg0. The marker is output-only: the strict YAML
+decoder rejects it.
 
 Pass --output DIR to write a loadable project instead. Because .agent is the sole executable
 source under ADR 007, the directory is a consolidated project.agent (plus a schemas/ directory

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Terfyn/terfyn/internal/plan"
 	"github.com/Terfyn/terfyn/internal/policy"
 	"github.com/Terfyn/terfyn/internal/spec"
 	"github.com/Terfyn/terfyn/internal/state"
@@ -185,6 +186,46 @@ func TestGraphRoundTrip_parallelOnlyWorkflowKeepsGraphMode(t *testing.T) {
 	}
 	if !spec.WorkflowUsesExplicitNeeds(got.Workflows["wf"].Spec.Steps) {
 		t.Fatal("hydrated workflow lost graph mode: NeedsDeclared did not survive the snapshot round-trip")
+	}
+}
+
+// A whole-document agent call is a call SHAPE (#550): the with: map alone
+// ({"arg0": v}) is identical for `Reviewer(v)` and `Reviewer(arg0: v)`. The shape
+// bit must survive the snapshot round-trip or a pinned resume validates/executes
+// the step under the wrong ABI, and it must be part of the graph digest.
+func TestGraphRoundTrip_wholeDocumentAgentCallShape(t *testing.T) {
+	build := func(whole bool) *spec.ProjectGraph {
+		return &spec.ProjectGraph{
+			Workflows: map[string]*spec.WorkflowResource{
+				"wf": {Metadata: spec.Metadata{Name: "wf"}, Spec: spec.WorkflowSpec{Steps: []spec.WorkflowStep{
+					{ID: "a", Agent: "reviewer", With: map[string]any{"arg0": "x"}, WholeDocument: whole, NeedsDeclared: true},
+				}}},
+			},
+		}
+	}
+	for _, whole := range []bool{true, false} {
+		payload, err := MarshalGraph(build(whole))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := UnmarshalGraph(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h := got.Workflows["wf"].Spec.Steps[0].WholeDocument; h != whole {
+			t.Fatalf("WholeDocument = %v after snapshot round-trip, want %v", h, whole)
+		}
+	}
+	dTrue, err := plan.ResolvedGraphDigest(build(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dFalse, err := plan.ResolvedGraphDigest(build(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dTrue == dFalse {
+		t.Fatal("call shape must change the resolved graph digest")
 	}
 }
 
